@@ -57,7 +57,11 @@ async function loadState(withBalance = false) {
   if (SELECTED) {
     const still = STATE.providers.find((p) => p.id === SELECTED);
     if (still) renderDetail(still);
-    else { SELECTED = null; $('detail').innerHTML = '<div class="placeholder">从左边选一个平台。</div>'; }
+    else {
+      SELECTED = null;
+      $('detail').innerHTML = '<div class="placeholder"></div>';
+      $('detail').firstChild.textContent = t('detail.pick_provider');
+    }
   } else {
     // 首次打开时自动展示当前正在使用的平台
     const current = STATE.providers.find((p) => p.is_current) || STATE.providers[0];
@@ -75,10 +79,8 @@ function renderThreadBanner() {
   if (!banner) return;
   if (!info.mismatch) { banner.hidden = true; return; }
   banner.hidden = false;
-  $('thread-banner-title').textContent =
-    `${info.mismatch} 个旧任务的服务商和模型对不上`;
-  $('thread-banner-detail').textContent =
-    `在这些任务里换模型会报 “model is not supported”。一键修复后即可正常继续，改动前会自动备份。`;
+  $('thread-banner-title').textContent = t('banner.detail', { n: info.mismatch });
+  $('thread-banner-detail').textContent = t('banner.note');
 }
 
 async function repairThreads(dryRun) {
@@ -87,12 +89,12 @@ async function repairThreads(dryRun) {
     if (dryRun) {
       const lines = (result.items || []).map((item) =>
         `${item.id}  ${item.from} → ${item.to}  （${item.model}）`);
-      alert(`预演：将修复 ${result.items.length} 个任务\n\n` + lines.join('\n'));
+      alert(t('repair.preview_title', { count: result.items.length }) + '\n\n' + lines.join('\n'));
       return;
     }
     if (result.state) STATE = result.state;
     renderThreadBanner();
-    toast(result.fixed ? `已修复 ${result.fixed} 个任务，重启 Codex 后生效` : '没有需要修复的任务');
+    toast(result.fixed ? t('repair.fixed', { count: result.fixed }) : t('repair.nothing'));
   } catch (error) {
     toast(error.message, true);
   }
@@ -101,10 +103,15 @@ async function repairThreads(dryRun) {
 function renderHeader() {
   const current = STATE.current || {};
   $('current-status').textContent = current.model_provider
-    ? `当前默认：${current.model_provider} · ${current.model || '未设置'}`
-    : '还没有检测到 Codex 配置';
-  $('secret-backend').textContent = `v${STATE.version || '?'} · 密钥存储：${STATE.secret_backend || '—'}`;
-  $('about-version').textContent = `codex（ChatGPT App）多平台模型切换 v${STATE.version || '?'}`;
+    ? t('status.current', { provider: current.model_provider, model: current.model || t('status.unset') })
+    : t('status.no_config');
+  // 优先用服务端给的机器可读代号，按当前语言翻译；拿不到才退回服务端的中文串
+  const backendKey = 'keys.' + String(STATE.secret_backend_id || '').replace(/-/g, '_');
+  const backend = (STATE.secret_backend_id && I18N[LANG][backendKey])
+    ? t(backendKey) : (STATE.secret_backend || '—');
+  $('secret-backend').textContent = 'v' + (STATE.version || '?') + ' · '
+    + t('topbar.secret', { backend: backend });
+  $('about-version').textContent = t('status.version', { version: STATE.version || '?' });
   if (STATE.project_url) $('about-repo').href = STATE.project_url;
   renderUpdate(STATE.update);
 }
@@ -115,10 +122,10 @@ function renderUpdate(info) {
   if (info.status !== 'ok') { node.textContent = ''; return; }
   if (info.up_to_date) {
     node.className = 'hint';
-    node.textContent = '已是最新版本';
+    node.textContent = t('update.up_to_date');
   } else {
     node.className = 'hint update-new';
-    node.textContent = `有新版本 ${info.latest}（当前 v${info.current}）`;
+    node.textContent = t('update.available', { latest: info.latest, current: info.current });
   }
 }
 
@@ -140,8 +147,10 @@ function renderProviders() {
     row.appendChild(el('span', 'name', provider.label || provider.id));
     row.appendChild(el('span', 'dot' + (provider.is_current ? ' on' : '')));
     body.appendChild(row);
-    body.appendChild(el('div', 'meta',
-      `${provider.models.length} 个模型 · ${provider.has_key ? provider.key_hint : '未配置密钥'}`));
+    body.appendChild(el('div', 'meta', t('provider.meta', {
+      count: provider.models.length,
+      hint: provider.has_key ? provider.key_hint : t('provider.no_key'),
+    })));
     card.appendChild(body);
     card.onclick = () => { SELECTED = provider.id; renderProviders(); renderDetail(provider); };
     list.appendChild(card);
@@ -161,13 +170,13 @@ function renderDetail(provider) {
   head.appendChild(info);
 
   const actions = el('div', 'detail-actions');
-  const balanceButton = el('button', 'btn ghost', '查询额度');
+  const balanceButton = el('button', 'btn ghost', t('btn.balance'));
   balanceButton.onclick = () => queryBalance(provider, balanceButton);
-  const refreshButton = el('button', 'btn ghost', '刷新模型');
+  const refreshButton = el('button', 'btn ghost', t('btn.refresh'));
   refreshButton.onclick = () => refreshModels(provider.id, refreshButton);
-  const useButton = el('button', 'btn primary', '设为默认平台');
+  const useButton = el('button', 'btn primary', t('btn.use'));
   useButton.onclick = () => switchTo(provider.id, provider.default_model || provider.models[0]);
-  const removeButton = el('button', 'btn danger', '删除平台');
+  const removeButton = el('button', 'btn danger', t('btn.remove'));
   removeButton.onclick = () => removeProvider(provider);
   actions.append(balanceButton, refreshButton, useButton, removeButton);
   head.appendChild(actions);
@@ -176,63 +185,69 @@ function renderDetail(provider) {
   const cards = el('div', 'cards');
   const keyCard = el('div', 'card');
   keyCard.appendChild(el('div', 'label', 'API Key'));
-  keyCard.appendChild(el('div', 'value small', provider.has_key ? provider.key_hint : '未配置'));
-  keyCard.appendChild(el('div', 'note', '只存在系统钥匙串，不写进配置文件'));
+  keyCard.appendChild(el('div', 'value small',
+    provider.has_key ? provider.key_hint : t('provider.unconfigured')));
+  keyCard.appendChild(el('div', 'note', t('provider.key_note')));
   cards.appendChild(keyCard);
 
   const modelCard = el('div', 'card');
-  modelCard.appendChild(el('div', 'label', '可用模型'));
+  modelCard.appendChild(el('div', 'label', t('card.models')));
   modelCard.appendChild(el('div', 'value', String(provider.models.length)));
   // 老记录没有同步时间，但模型是实打实在的，不要显示成“尚未同步”那样的异常状态
   modelCard.appendChild(el('div', 'note', provider.models_synced_at
-    ? `更新于 ${provider.models_synced_at.replace('T', ' ')}`
-    : '已从平台导入，可随时点「刷新模型」更新'));
+    ? t('card.synced_at', { time: provider.models_synced_at.replace('T', ' ') })
+    : t('card.imported')));
   cards.appendChild(modelCard);
 
   if (provider.transport === 'native') {
     const nativeCard = el('div', 'card ok');
-    nativeCard.appendChild(el('div', 'label', '连接方式'));
-    nativeCard.appendChild(el('div', 'value small', '原生 Responses'));
-    nativeCard.appendChild(el('div', 'note', '平台自带 Codex 需要的接口，直连最快'));
+    nativeCard.appendChild(el('div', 'label', t('card.transport')));
+    nativeCard.appendChild(el('div', 'value small', t('card.native')));
+    nativeCard.appendChild(el('div', 'note', t('card.native_note')));
     cards.appendChild(nativeCard);
   } else {
     const bridgeCard = el('div', 'card' + (provider.bridge_running ? ' ok' : ' warn'));
-    bridgeCard.appendChild(el('div', 'label', '本地协议桥'));
-    bridgeCard.appendChild(el('div', 'value small', provider.bridge_running ? '运行中' : '未运行'));
-    bridgeCard.appendChild(el('div', 'note', provider.bridge_running
-      ? 'Codex 通过本机 127.0.0.1:8787 访问该平台'
-      : '该平台只支持 Chat Completions，未运行协议桥时请求会失败'));
+    bridgeCard.appendChild(el('div', 'label', t('card.bridge')));
+    bridgeCard.appendChild(el('div', 'value small',
+      provider.bridge_running ? t('card.running') : t('card.not_running')));
+    bridgeCard.appendChild(el('div', 'note',
+      provider.bridge_running ? t('card.bridge_note_on') : t('card.bridge_note_off')));
     cards.appendChild(bridgeCard);
   }
 
   if (provider.usage) {
     const usageCard = el('div', 'card');
-    usageCard.appendChild(el('div', 'label', '本机用量（近似）'));
+    usageCard.appendChild(el('div', 'label', t('card.usage')));
     usageCard.appendChild(el('div', 'value', provider.usage.used_tokens_human || '0'));
     if (provider.usage.percent !== undefined) {
-      usageCard.appendChild(el('div', 'note',
-        `套餐额度 ${provider.usage.quota_tokens_human} · 已用 ${provider.usage.percent}% · 约剩 ${provider.usage.remaining_tokens_human}`));
+      usageCard.appendChild(el('div', 'note', t('card.quota_line', {
+        total: provider.usage.quota_tokens_human,
+        percent: provider.usage.percent,
+        remain: provider.usage.remaining_tokens_human,
+      })));
       const bar = el('div', 'progress' + (provider.usage.percent >= 90 ? ' err' : (provider.usage.percent >= 70 ? ' warn' : '')));
       const fill = el('span');
       fill.style.width = `${Math.max(2, provider.usage.percent)}%`;
       bar.appendChild(fill);
       usageCard.appendChild(bar);
     } else {
-      usageCard.appendChild(el('div', 'note', '没设套餐额度，只能看已用量；点下面按钮可以补上'));
+      usageCard.appendChild(el('div', 'note', t('card.quota_none')));
     }
     if (provider.local_usage) {
-      usageCard.appendChild(el('div', 'note',
-        `${provider.local_usage.sessions} 个任务 · ${provider.local_usage.turns} 轮对话`));
+      usageCard.appendChild(el('div', 'note', t('card.turns', {
+        sessions: provider.local_usage.sessions, turns: provider.local_usage.turns })));
     }
-    const quotaButton = el('button', 'btn ghost small', provider.usage.quota_tokens ? '修改套餐额度' : '设置套餐额度');
+    const quotaButton = el('button', 'btn ghost small',
+      provider.usage.quota_tokens ? t('card.quota_edit') : t('card.quota_set'));
     quotaButton.onclick = () => setQuota(provider);
     usageCard.appendChild(quotaButton);
     cards.appendChild(usageCard);
   } else if (provider.local_usage) {
     const usageCard = el('div', 'card');
-    usageCard.appendChild(el('div', 'label', '本机用量（近似）'));
+    usageCard.appendChild(el('div', 'label', t('card.usage')));
     usageCard.appendChild(el('div', 'value', provider.local_usage.total_tokens_human));
-    usageCard.appendChild(el('div', 'note', `${provider.local_usage.sessions} 个任务 · ${provider.local_usage.turns} 轮对话`));
+    usageCard.appendChild(el('div', 'note', t('card.turns', {
+      sessions: provider.local_usage.sessions, turns: provider.local_usage.turns })));
     cards.appendChild(usageCard);
   }
 
@@ -240,9 +255,9 @@ function renderDetail(provider) {
     cards.appendChild(balanceCard(provider.balance));
   } else if (provider.console_url) {
     const card = el('div', 'card');
-    card.appendChild(el('div', 'label', '额度'));
-    card.appendChild(el('div', 'value small', '需在官网查看'));
-    const link = el('a', 'note', '打开官网 ↗');
+    card.appendChild(el('div', 'label', t('card.balance')));
+    card.appendChild(el('div', 'value small', t('card.check_on_site')));
+    const link = el('a', 'note', t('card.open_site'));
     link.href = provider.console_url;
     link.target = '_blank';
     link.rel = 'noreferrer';
@@ -261,32 +276,31 @@ function renderDetail(provider) {
   }
 
   const modelsHead = el('div', 'models-head');
-  modelsHead.appendChild(el('h3', null, '模型列表'));
-  const addModelButton = el('button', 'btn ghost', '手动加模型');
+  modelsHead.appendChild(el('h3', null, t('models.title')));
+  const addModelButton = el('button', 'btn ghost', t('models.add'));
   addModelButton.onclick = () => addModel(provider.id);
   modelsHead.appendChild(addModelButton);
   detail.appendChild(modelsHead);
 
   const grid = el('div', 'models');
   if (!provider.models.length) {
-    grid.appendChild(el('div', 'hint', '这个平台还没有模型。点「刷新模型」，或用「手动加模型」。'));
+    grid.appendChild(el('div', 'hint', t('models.empty')));
   } else if (!models.length) {
-    grid.appendChild(el('div', 'hint', `没有匹配「${QUERY}」的模型。`));
+    grid.appendChild(el('div', 'hint', t('models.no_match', { query: QUERY })));
   }
   for (const model of models) {
     const item = el('div', 'model' + (provider.is_current && provider.default_model === model ? ' current' : ''));
     const left = el('div');
     left.appendChild(el('span', 'id', model));
     item.appendChild(left);
-    const button = el('button', 'btn ghost', '切换');
+    const button = el('button', 'btn ghost', t('models.switch'));
     button.onclick = () => switchTo(provider.id, model);
     item.appendChild(button);
     grid.appendChild(item);
   }
   detail.appendChild(grid);
 
-  detail.appendChild(el('div', 'notice',
-    '切换成功后要完全退出（⌘Q）并重新打开 Codex 才生效。已经存在的旧任务仍绑定原来的平台，不会跟着切换；要在旧对话里继续，请对它使用「分叉」，或新建任务。'));
+  detail.appendChild(el('div', 'notice', t('switch.notice')));
 }
 
 function balanceCard(balance) {
@@ -294,14 +308,14 @@ function balanceCard(balance) {
   if (balance.status === 'ok') card.classList.add('ok');
   else if (balance.status === 'error') card.classList.add('err');
   else card.classList.add('warn');
-  card.appendChild(el('div', 'label', '余额 / 额度'));
+  card.appendChild(el('div', 'label', t('card.balance')));
   card.appendChild(el('div', 'value', balance.display || '—'));
   if (balance.message) card.appendChild(el('div', 'note', balance.message));
   for (const field of balance.fields || []) {
     card.appendChild(el('div', 'note', `${field.label}：${field.value}`));
   }
   if (balance.console_url) {
-    const link = el('a', 'note', '打开官网 ↗');
+    const link = el('a', 'note', t('card.open_site'));
     link.href = balance.console_url;
     link.target = '_blank';
     link.rel = 'noreferrer';
@@ -311,9 +325,9 @@ function balanceCard(balance) {
 }
 
 function transportLabel(transport) {
-  if (transport === 'native') return '原生 Responses 直连';
-  if (transport === 'bridge') return '本地协议桥';
-  return '自动探测';
+  if (transport === 'native') return t('transport.native');
+  if (transport === 'bridge') return t('transport.bridge');
+  return t('transport.auto');
 }
 
 function visibleModels(provider) {
@@ -326,10 +340,7 @@ function visibleModels(provider) {
 
 async function setQuota(provider) {
   const current = provider.usage && provider.usage.quota_tokens;
-  const raw = prompt(
-    `输入这个平台套餐的总 token 数（例如 500000000）。\n留空表示清除设置。\n\n` +
-    `这个数字由你自己填，工具只用它来算本机用量占比，不会去猜。`,
-    current ? String(current) : '');
+  const raw = prompt(t('prompt.quota'), current ? String(current) : '');
   if (raw === null) return;
   const trimmed = raw.trim();
   try {
@@ -337,14 +348,14 @@ async function setQuota(provider) {
       ? { provider: provider.id, tokens: Number(trimmed) }
       : { provider: provider.id, clear: true };
     if (trimmed && (!Number.isFinite(payload.tokens) || payload.tokens <= 0)) {
-      toast('请输入正整数', true);
+      toast(t('toast.positive_int'), true);
       return;
     }
     const result = await api('quota', payload);
     STATE = result.state;
     const item = STATE.providers.find((p) => p.id === provider.id);
     if (item) { provider.usage = item.usage; renderDetail(provider); }
-    toast('已更新额度设置');
+    toast(t('toast.quota_updated'));
   } catch (error) {
     toast(error.message, true);
   }
@@ -353,7 +364,7 @@ async function setQuota(provider) {
 async function queryBalance(provider, button) {
   if (button) {
     button.disabled = true;
-    button.textContent = '查询中…';
+    button.textContent = t('btn.balancing');
   }
   try {
     const result = await api('balance', { provider: provider.id });
@@ -363,17 +374,17 @@ async function queryBalance(provider, button) {
     toast(error.message, true);
     if (button) {
       button.disabled = false;
-      button.textContent = '查询额度';
+      button.textContent = t('btn.balance');
     }
   }
 }
 
 async function refreshModels(providerId, button) {
   button.disabled = true;
-  button.textContent = '更新中…';
+  button.textContent = t('btn.refreshing');
   try {
     const result = await api('refresh', { provider: providerId });
-    toast(`已更新 ${result.models.length} 个模型`);
+    toast(t('toast.models_updated', { count: result.models.length }));
     STATE = result.state;
     renderHeader(); renderProviders();
     const provider = STATE.providers.find((p) => p.id === providerId);
@@ -381,14 +392,15 @@ async function refreshModels(providerId, button) {
   } catch (error) {
     toast(error.message, true);
     button.disabled = false;
-    button.textContent = '刷新模型';
+    button.textContent = t('btn.refresh');
   }
 }
 
 async function switchTo(provider, model) {
   try {
     const result = await api('switch', { provider, model });
-    toast(`已切换为 ${result.label || result.provider} · ${result.model}`);
+    toast(t('toast.switched', {
+      label: result.label || result.provider, model: result.model }));
     STATE = result.state;
     SELECTED = provider;
     renderHeader(); renderProviders();
@@ -400,27 +412,28 @@ async function switchTo(provider, model) {
 }
 
 async function removeProvider(provider) {
-  if (!confirm(`确定删除「${provider.label || provider.id}」？\n会同时移除配置并删除钥匙串里的密钥。`)) return;
+  if (!confirm(t('confirm.delete', { label: provider.label || provider.id }))) return;
   try {
     const result = await api('remove', { provider: provider.id });
-    toast('已删除');
+    toast(t('toast.deleted'));
     STATE = result.state;
     SELECTED = null;
     renderHeader(); renderProviders();
-    $('detail').innerHTML = '<div class="placeholder">从左边选一个平台。</div>';
+    $('detail').innerHTML = '<div class="placeholder"></div>';
+    $('detail').firstChild.textContent = t('detail.pick_provider');
   } catch (error) {
     toast(error.message, true);
   }
 }
 
 async function addModel(providerId) {
-  const raw = prompt('输入模型名，多个用逗号分隔：');
+  const raw = prompt(t('prompt.model'));
   if (!raw) return;
   const models = raw.split(',').map((item) => item.trim()).filter(Boolean);
   if (!models.length) return;
   try {
     const result = await api('add-model', { provider: providerId, models });
-    toast(`已加入 ${models.length} 个模型`);
+    toast(t('toast.models_added', { count: models.length }));
     STATE = result.state;
     renderProviders();
     const provider = STATE.providers.find((p) => p.id === providerId);
@@ -442,13 +455,19 @@ function closeManual() { $('manual-modal').hidden = true; }
 
 function fillPresets() {
   const select = $('f-preset');
-  if (select.options.length > 1) return;
+  const keep = select.value;
+  select.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = t('modal.preset_none');
+  select.appendChild(placeholder);
   for (const preset of STATE.presets || []) {
     const option = document.createElement('option');
     option.value = preset.id;
-    option.textContent = `${preset.label}${preset.has_balance_api ? '（支持额度查询）' : ''}`;
+    option.textContent = preset.label + (preset.has_balance_api ? t('preset.balance_badge') : '');
     select.appendChild(option);
   }
+  select.value = keep;
   select.onchange = () => {
     const preset = (STATE.presets || []).find((item) => item.id === select.value);
     if (!preset) return;
@@ -477,8 +496,8 @@ async function saveManual() {
     balance_currency: $('f-balance-currency').value.trim(),
     models: $('f-models').value.split('\n').map((item) => item.trim()).filter(Boolean),
   };
-  if (!payload.base_url) { message.textContent = '请填写 Base URL。'; return; }
-  message.textContent = '正在拉取模型…';
+  if (!payload.base_url) { message.textContent = t('form.need_base_url'); return; }
+  message.textContent = t('form.fetching');
   try {
     const result = await api('add', payload);
     STATE = result.state;
@@ -488,9 +507,9 @@ async function saveManual() {
     closeManual();
     $('f-key').value = '';
     if (result.discovery_error) {
-      toast(`平台已保存，但自动获取模型失败：${result.discovery_error}`, true);
+      toast(t('toast.saved_discovery_failed', { error: result.discovery_error }), true);
     } else {
-      toast(`已接入 ${result.models.length} 个模型`);
+      toast(t('toast.saved', { count: result.models.length }));
     }
   } catch (error) {
     message.textContent = error.message;
@@ -515,7 +534,7 @@ $('btn-save-manual').onclick = saveManual;
 $('btn-refresh-all').onclick = async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
-  button.textContent = '刷新中…';
+  button.textContent = t('btn.refreshing_all');
   try {
     await api('refresh', { provider: 'all' });
   } catch (error) {
@@ -523,15 +542,15 @@ $('btn-refresh-all').onclick = async (event) => {
   }
   await loadState();
   button.disabled = false;
-  button.textContent = '全部刷新模型';
-  toast('模型列表已刷新');
+  button.textContent = t('topbar.refresh_all');
+  toast(t('toast.all_refreshed'));
 };
 $('btn-restore').onclick = async () => {
-  if (!confirm('恢复成官方 OpenAI 登录？\n第三方配置会保留，随时可以再切回去。')) return;
+  if (!confirm(t('confirm.restore'))) return;
   try {
     await api('restore', {});
     await loadState();
-    toast('已恢复官方 OpenAI，重启 Codex 后生效');
+    toast(t('toast.restored'));
   } catch (error) {
     toast(error.message, true);
   }
@@ -540,16 +559,48 @@ $('btn-restore').onclick = async () => {
 $('btn-check-update').onclick = async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
-  button.textContent = '检查中…';
+  button.textContent = t('update.checking');
   try {
     const result = await api('update-check', {});
     renderUpdate(result);
-    toast(result.description || '已检查');
+    toast(t('update.checked'));
   } catch (error) {
-    toast('检查更新失败：' + error.message, true);
+    toast(t('update.failed', { message: error.message }), true);
   }
   button.disabled = false;
-  button.textContent = '检查更新';
+  button.textContent = t('update.check');
 };
+
+/* ---------------------------------------------------------------- 语言切换 */
+
+function renderFooterHelp() {
+  const node = $('footer-help');
+  if (!node) return;
+  // 这句里有 <code>，所以用 innerHTML；文本全部来自词典，不含用户输入
+  node.innerHTML = t('footer.help')
+    .split('{doctor}').join('<code>codex-switcher doctor</code>')
+    .split('{stop}').join('<code>codex-switcher stop</code>');
+}
+
+$('btn-lang').onclick = toggleLang;
+
+window.addEventListener('langchange', () => {
+  renderFooterHelp();
+  renderHeader();
+  renderThreadBanner();
+  renderProviders();
+  if (SELECTED) {
+    const item = STATE.providers.find((p) => p.id === SELECTED);
+    if (item) renderDetail(item);
+  } else {
+    $('detail').innerHTML = '<div class="placeholder"></div>';
+    $('detail').firstChild.textContent = t('detail.pick_provider');
+  }
+  // 表单里的预设下拉是动态填充的，语言变了要重建
+  fillPresets();
+});
+
+applyI18n();
+renderFooterHelp();
 
 loadState().catch((error) => toast(error.message, true));

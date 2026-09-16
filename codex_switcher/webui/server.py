@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import secrets as py_secrets
 import threading
 import urllib.parse
@@ -59,6 +60,9 @@ def _state_payload(include_balance: bool = False) -> Dict:
         "providers": providers,
         "presets": registry.preset_list(),
         "secret_backend": secrets.backend_label(),
+        # 同时给出机器可读的代号：界面按它翻译，避免中英混排。
+        # 这里返回的中文串是给命令行用的，直接显示在英文界面上会很突兀。
+        "secret_backend_id": secrets.backend(),
         "codex_missing": not current.get("exists", False),
     }
 
@@ -92,12 +96,13 @@ class Handler(BaseHTTPRequestHandler):
         # 页面里的静态资源也要带上令牌，否则样式和脚本会被自己拦下来
         if path.name == "index.html":
             text = body.decode("utf-8")
-            text = text.replace('href="/static/style.css"',
-                                'href="/static/style.css?t=%s"' % self.token)
-            text = text.replace('src="/static/app.js"',
-                                'src="/static/app.js?t=%s"' % self.token)
-            text = text.replace('src="/static/logo.svg"',
-                                'src="/static/logo.svg?t=%s"' % self.token)
+            # 用正则一次覆盖所有 /static/ 引用，而不是把文件名一个个写死。
+            # 写死过一次：后来加了 i18n.js，忘了往这里补，结果脚本取不到令牌
+            # 被 403 挡掉，界面直接报 "toggleLang is not defined"。
+            text = re.sub(
+                r'((?:src|href)="/static/[^"?]+)"',
+                lambda m: '%s?t=%s"' % (m.group(1), self.token),
+                text)
             body = text.encode("utf-8")
         mime, _ = mimetypes.guess_type(str(path))
         self.send_response(200)
@@ -134,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(403, "invalid token")
                 return
             name = Path(path).name
-            if name not in {"app.js", "style.css", "logo.svg"}:
+            if name not in {"app.js", "i18n.js", "style.css", "logo.svg"}:
                 self.send_error(404, "not found")
                 return
             self._send_file(STATIC_DIR / name)

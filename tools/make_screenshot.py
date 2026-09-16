@@ -126,6 +126,9 @@ def main() -> int:
     secrets._macos_available = lambda: False
     # 截图上展示 macOS 用户真实会看到的字样
     secrets.backend_label = lambda: "macOS 钥匙串"
+    # 界面按这个代号查词典翻译，所以也要一起改，否则英文截图会显示成
+    # "local file (0600, weakest)" —— 与实际不符
+    secrets.backend = lambda: "keychain"
     stamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
     state = state_module.load()
@@ -178,13 +181,22 @@ def main() -> int:
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     time.sleep(0.4)
 
-    url = "http://127.0.0.1:%d/?t=%s" % (port, token)
+    base = "http://127.0.0.1:%d/?t=%s" % (port, token)
+    # 无头 Chrome 的 navigator.language 是 en-US，不锁定语言的话截图会变成英文。
+    url = base + "&lang=zh"
     target = ROOT / "docs" / "screenshot.png"
     if not shoot(chrome, url, target):
         print("截图失败", file=sys.stderr)
         httpd.shutdown()
         return 1
     print("已生成：%s" % target)
+
+    # 英文界面来一张，给 README.en.md 用
+    target_en = ROOT / "docs" / "screenshot.en.png"
+    if shoot(chrome, base + "&lang=en", target_en):
+        print("已生成：%s" % target_en)
+    # 后面拍 GIF 用中文界面
+    url = base + "&lang=zh"
 
     if "--gif" in sys.argv:
         frames_dir = Path(tempfile.mkdtemp(prefix="codex-switcher-gif-"))

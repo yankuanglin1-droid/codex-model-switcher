@@ -827,6 +827,24 @@ class WebUITests(TempCodexHome):
         self.assertIn("style.css?t=" + self.token, body)
         self.assertIn("app.js?t=" + self.token, body)
 
+    def test_every_static_reference_gets_a_token(self):
+        """页面里引用的每个静态资源都必须带上令牌。
+
+        这条是补出来的：以前服务端把 style.css / app.js / logo.svg 三个文件名
+        写死在那里注入令牌，后来加了 i18n.js 忘了补，浏览器取不到令牌被 403
+        挡掉，界面直接报 "toggleLang is not defined"。所以改成从 index.html
+        自己扫一遍引用，新增资源忘了处理就会被这条测试拦住。
+        """
+        import re as _re
+        from pathlib import Path as _Path
+        static_index = _Path(__file__).resolve().parents[1] / "codex_switcher/webui/static/index.html"
+        referenced = _re.findall(r'(?:src|href)="(/static/[^"?]+)"', static_index.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(referenced), 4, "页面里的静态引用比预期少，检查是否漏读")
+        status, body = self._get("/?t=" + self.token)
+        self.assertEqual(status, 200)
+        for ref in referenced:
+            self.assertIn("%s?t=%s" % (ref, self.token), body, "%s 没带上令牌" % ref)
+
     def test_assets_are_served_with_token(self):
         status, body = self._get("/static/style.css?t=" + self.token)
         self.assertEqual(status, 200)
@@ -1035,6 +1053,61 @@ class AppEnsureBridgeTests(unittest.TestCase):
             cli._ensure_bridge()      # 不能抛出去，界面必须还能打开
         finally:
             engine.provider_overview = original
+
+
+class I18nTests(unittest.TestCase):
+    """界面双语文案必须完整。
+
+    i18n.js 里 zh / en 两份词典的键必须一一对应：少一个键，界面上就会出现
+    key 本身或者退回中文，而且只在切到英文时才暴露。所以在这里静态比对。
+    """
+
+    def _dictionary_keys(self):
+        import re as _re
+        from pathlib import Path as _Path
+        source = (_Path(__file__).resolve().parents[1]
+                  / "codex_switcher/webui/static/i18n.js").read_text(encoding="utf-8")
+        blocks = {}
+        for name in ("zh", "en"):
+            match = _re.search(r"\n  %s: \{(.*?)\n  \}," % name, source, _re.S)
+            self.assertIsNotNone(match, "词典里找不到 %s 段" % name)
+            blocks[name] = set(_re.findall(r"'([A-Za-z0-9_.]+)':", match.group(1)))
+        return blocks
+
+    def test_both_dictionaries_have_the_same_keys(self):
+        blocks = self._dictionary_keys()
+        self.assertGreater(len(blocks["zh"]), 80, "中文词典条目太少，可能没解析成功")
+        missing_in_en = sorted(blocks["zh"] - blocks["en"])
+        missing_in_zh = sorted(blocks["en"] - blocks["zh"])
+        self.assertEqual(missing_in_en, [], "英文词典缺这些键：%s" % missing_in_en[:8])
+        self.assertEqual(missing_in_zh, [], "中文词典缺这些键：%s" % missing_in_zh[:8])
+
+    def test_html_only_uses_keys_that_exist(self):
+        """页面里 data-i18n 引用的键必须在词典里，否则会原样显示 key。"""
+        import re as _re
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parents[1]
+        keys = self._dictionary_keys()["zh"]
+        html = (root / "codex_switcher/webui/static/index.html").read_text(encoding="utf-8")
+        used = set()
+        for attr in ("data-i18n", "data-i18n-placeholder", "data-i18n-title"):
+            used |= set(_re.findall(r'%s="([^"]+)"' % attr, html))
+        self.assertTrue(used, "页面上没有任何 data-i18n 标记？")
+        unknown = sorted(used - keys)
+        self.assertEqual(unknown, [], "页面引用了词典里没有的键：%s" % unknown)
+
+    def test_language_switch_is_wired_up(self):
+        """语言按钮必须存在、必须连上切换函数，脚本也必须真被页面加载。"""
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parents[1]
+        html = (root / "codex_switcher/webui/static/index.html").read_text(encoding="utf-8")
+        app = (root / "codex_switcher/webui/static/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="btn-lang"', html)
+        self.assertIn('src="/static/i18n.js"', html)
+        # i18n.js 必须在 app.js 之前加载，否则 app.js 执行时还没有 t()
+        self.assertLess(html.index('src="/static/i18n.js"'), html.index('src="/static/app.js"'))
+        self.assertIn("btn-lang", app)
+        self.assertIn("langchange", app)
 
 
 class OutputEncodingTests(unittest.TestCase):

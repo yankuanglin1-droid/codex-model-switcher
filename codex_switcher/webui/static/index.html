@@ -11,129 +11,132 @@
   <div class="brand">
     <img class="brand-mark" src="/static/logo.svg" alt="Codex" width="46" height="46">
     <div>
-      <h1>codex（ChatGPT App）多平台模型切换</h1>
-      <p class="sub" id="current-status">正在读取状态…</p>
+      <h1 data-i18n="app.title">codex（ChatGPT App）多平台模型切换</h1>
+      <p class="sub" id="current-status" data-i18n="topbar.status_loading">正在读取状态…</p>
     </div>
   </div>
   <div class="topbar-actions">
     <label class="search">
       <span>⌕</span>
-      <input id="platform-search" type="search" placeholder="搜索平台或模型…" autocomplete="off">
+      <input id="platform-search" type="search" placeholder="搜索平台或模型…"
+             data-i18n-placeholder="topbar.search" autocomplete="off">
     </label>
     <span class="badge" id="secret-backend">密钥存储：—</span>
-    <button class="btn ghost" id="btn-refresh-all">全部刷新模型</button>
-    <button class="btn ghost" id="btn-restore">恢复官方 OpenAI</button>
-    <button class="btn primary" id="btn-manual">手动添加平台</button>
+    <button class="btn ghost" id="btn-lang" data-i18n-title="lang.title">English</button>
+    <button class="btn ghost" id="btn-refresh-all" data-i18n="topbar.refresh_all">全部刷新模型</button>
+    <button class="btn ghost" id="btn-restore" data-i18n="topbar.restore">恢复官方 OpenAI</button>
+    <button class="btn primary" id="btn-manual" data-i18n="topbar.add_manual">手动添加平台</button>
   </div>
 </header>
 
 <div class="banner" id="thread-banner" hidden>
   <div class="banner-text">
-    <strong id="thread-banner-title">检测到任务绑定异常</strong>
+    <strong id="thread-banner-title" data-i18n="banner.title">检测到任务绑定异常</strong>
     <span class="hint" id="thread-banner-detail"></span>
   </div>
   <div class="banner-actions">
-    <button class="btn ghost small" id="btn-thread-preview">查看明细</button>
-    <button class="btn primary" id="btn-repair-threads">一键修复</button>
+    <button class="btn ghost small" id="btn-thread-preview" data-i18n="banner.preview">查看明细</button>
+    <button class="btn primary" id="btn-repair-threads" data-i18n="banner.repair">一键修复</button>
   </div>
 </div>
 
 <main class="layout">
   <aside class="sidebar">
-    <h2 class="panel-title">已接入平台</h2>
+    <h2 class="panel-title" data-i18n="sidebar.title">已接入平台</h2>
     <div id="provider-list" class="provider-list"></div>
-    <p class="hint" id="empty-hint" hidden>
+    <p class="hint" id="empty-hint" data-i18n="sidebar.empty" hidden>
       还没有接入任何平台。点右上角「手动添加平台」，或从预设里选一个开始。
     </p>
   </aside>
 
   <section class="detail" id="detail">
-    <div class="placeholder">从左边选一个平台，查看它的模型与额度。</div>
+    <div class="placeholder" data-i18n="detail.placeholder">从左边选一个平台，查看它的模型与额度。</div>
   </section>
 </main>
 
 <footer class="footer">
   <span id="about-version" class="hint">codex（ChatGPT App）多平台模型切换</span>
   <span id="about-update" class="hint"></span>
-  <button class="btn ghost small" id="btn-check-update">检查更新</button>
+  <button class="btn ghost small" id="btn-check-update" data-i18n="update.check">检查更新</button>
   <a id="about-repo" href="https://github.com/yankuanglin1-droid/codex-model-switcher"
-     target="_blank" rel="noreferrer">GitHub 项目主页 ↗</a>
-  <span class="hint">出问题先跑 <code>codex-switcher doctor</code>；停掉后台服务用 <code>codex-switcher stop</code></span>
+     target="_blank" rel="noreferrer" data-i18n="footer.repo">GitHub 项目主页 ↗</a>
+  <span class="hint" id="footer-help"></span>
 </footer>
 
 <div class="modal" id="manual-modal" hidden>
   <div class="modal-card">
     <div class="modal-head">
-      <h2>手动添加平台</h2>
+      <h2 data-i18n="modal.title">手动添加平台</h2>
       <button class="btn icon" id="btn-close-manual">✕</button>
     </div>
-    <p class="hint">
+    <p class="hint" data-i18n="modal.hint">
       只需要平台名称和 Base URL 就能接入。API Key 会存进系统钥匙串，不会写进 Codex 配置文件。
       本机模型（Ollama / LM Studio）可以不填 Key。
     </p>
     <div class="form-grid">
       <label>
-        <span>从预设开始（可选）</span>
-        <select id="f-preset"><option value="">— 自己填写 —</option></select>
+        <span data-i18n="modal.preset">从预设开始（可选）</span>
+        <select id="f-preset"><option value="" data-i18n="modal.preset_none">— 自己填写 —</option></select>
       </label>
       <label>
-        <span>平台名称 *</span>
-        <input id="f-label" placeholder="例如 我的中转站">
+        <span data-i18n="modal.label">平台名称 *</span>
+        <input id="f-label" placeholder="例如 我的中转站" data-i18n-placeholder="modal.label_ph">
       </label>
       <label>
-        <span>Base URL *</span>
+        <span data-i18n="modal.base_url">Base URL *</span>
         <input id="f-base-url" placeholder="https://api.example.com/v1">
       </label>
       <label>
-        <span>模型列表地址（留空自动推断）</span>
+        <span data-i18n="modal.models_url">模型列表地址（留空自动推断）</span>
         <input id="f-models-url" placeholder="https://api.example.com/v1/models">
       </label>
       <label>
-        <span>API Key（存进钥匙串）</span>
+        <span data-i18n="modal.key">API Key（存进钥匙串）</span>
         <input id="f-key" type="password" placeholder="sk-…">
       </label>
       <label>
-        <span>连接方式</span>
+        <span data-i18n="modal.transport">连接方式</span>
         <select id="f-transport">
-          <option value="auto">自动探测（推荐）</option>
-          <option value="native">直连 Responses（平台自带）</option>
-          <option value="bridge">本地协议桥（只支持 Chat Completions 的平台）</option>
+          <option value="auto" data-i18n="transport.auto_label">自动探测（推荐）</option>
+          <option value="native" data-i18n="transport.native_label">直连 Responses（平台自带）</option>
+          <option value="bridge" data-i18n="transport.bridge_label">本地协议桥（只支持 Chat Completions 的平台）</option>
         </select>
       </label>
       <label class="full">
-        <span>模型清单（每行一个；留空则自动拉取）</span>
+        <span data-i18n="modal.models">模型清单（每行一个；留空则自动拉取）</span>
         <textarea id="f-models" rows="4" placeholder="model-a&#10;model-b"></textarea>
       </label>
       <label class="full">
-        <span>官网地址（选填，用于查额度）</span>
+        <span data-i18n="modal.console_url">官网地址（选填，用于查额度）</span>
         <input id="f-console-url" placeholder="https://example.com/billing">
       </label>
       <label>
-        <span>余额接口（选填）</span>
+        <span data-i18n="modal.balance_url">余额接口（选填）</span>
         <input id="f-balance-url" placeholder="https://api.example.com/balance">
       </label>
       <label>
-        <span>余额字段路径</span>
+        <span data-i18n="modal.balance_path">余额字段路径</span>
         <input id="f-balance-path" placeholder="data.balance">
       </label>
       <label>
-        <span>币种</span>
+        <span data-i18n="modal.currency">币种</span>
         <input id="f-balance-currency" placeholder="CNY">
       </label>
       <label class="checkbox">
         <input type="checkbox" id="f-requires-key" checked>
-        <span>这个平台需要 API Key</span>
+        <span data-i18n="modal.needs_key">这个平台需要 API Key</span>
       </label>
     </div>
     <div class="modal-foot">
       <span class="form-message" id="form-message"></span>
-      <button class="btn primary" id="btn-save-manual">保存并拉取模型</button>
+      <button class="btn primary" id="btn-save-manual" data-i18n="btn.save">保存并拉取模型</button>
     </div>
   </div>
 </div>
 
 <div class="toast" id="toast" hidden></div>
 
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
