@@ -17,6 +17,11 @@ from . import paths
 
 SERVICE_PREFIX = "com.codex.model-switcher."
 
+# 读钥匙串要起一次子进程（几十毫秒）。界面每次刷新都读一遍太浪费，加一个很短的
+# 缓存；改完密钥最多 20 秒内会重新读取。
+_CACHE_TTL_SECONDS = 20
+_CACHE: dict = {}
+
 
 def _account() -> str:
     return getpass.getuser()
@@ -59,6 +64,7 @@ def store(provider_id: str, secret: str) -> None:
     secret = (secret or "").strip()
     if not secret:
         raise ValueError("密钥为空")
+    _CACHE.pop(provider_id, None)
     if _macos_available():
         result = _run([
             "/usr/bin/security", "add-generic-password",
@@ -89,6 +95,16 @@ def store(provider_id: str, secret: str) -> None:
 
 def load(provider_id: str) -> Optional[str]:
     """读取密钥；不存在时返回 None。"""
+    import time
+    cached = _CACHE.get(provider_id)
+    if cached and time.time() - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+    value = _load_uncached(provider_id)
+    _CACHE[provider_id] = (time.time(), value)
+    return value
+
+
+def _load_uncached(provider_id: str) -> Optional[str]:
     if _macos_available():
         result = _run([
             "/usr/bin/security", "find-generic-password",
@@ -114,6 +130,7 @@ def load(provider_id: str) -> Optional[str]:
 
 
 def delete(provider_id: str) -> bool:
+    _CACHE.pop(provider_id, None)
     removed = False
     if _macos_available():
         result = _run([

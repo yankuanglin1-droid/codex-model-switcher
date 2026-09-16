@@ -32,10 +32,13 @@ This tool does all of it in two commands. The pitfalls it handles:
 - 17 built-in provider presets plus a fully manual "any Base URL" path
 - Full model list imported per provider, newest versions first
 - Switch from CLI, interactive menu, or a local-only web UI
+- A double-clickable macOS app that runs in the background (no Terminal window)
 - `codex-switcher restore` returns to official OpenAI in one step
 - Real balance/quota display where the provider exposes an API; an honest "not available"
   where it does not
-- Local token usage stats read from Codex's own session logs (never leaves your machine)
+- Local token usage stats read from Codex's own session logs (never leaves your machine),
+  plus an optional usage percentage against a quota you declare yourself
+- Update check: `codex-switcher update`
 - Built-in Responses ⇄ Chat Completions bridge
 - `codex-switcher doctor` environment check
 - Standard library only, no pip installs

@@ -7,6 +7,8 @@
 
 ![图形界面](docs/screenshot.png)
 
+<sub>截图里的 API Key 和余额是演示数据；真实使用时 Key 存在系统钥匙串，余额来自平台自己的接口。</sub>
+
 ```
 codex-switcher add --preset deepseek --key-stdin   # 接入一个平台
 codex-switcher use deepseek                        # 切换过去
@@ -41,7 +43,10 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 - **一键切换**：命令行、交互菜单、图形界面三种方式；同一平台内换型号不用重新配置。
 - **一键还原**：`codex-switcher restore` 立刻回到官方 OpenAI 登录，第三方配置保留待用。
 - **余额 / 额度**：能查到就显示真实数字（DeepSeek 实测可用），查不到就如实说明并给出官网入口。
-- **本机用量**：读取 Codex 自己的会话日志统计 token 用量，不联网、不读对话内容。
+- **用量百分比**：填一次套餐总量（如「每月 5 亿 tokens」），界面就显示本机已用比例和剩余量。
+- **本机用量**：读取 Codex 自己的会话日志统计 token 用量，不联网、不读对话内容，0.3 秒出结果。
+- **版本检查**：`codex-switcher update` 或界面上的「检查更新」，一眼看出是不是最新版。
+- **本地 App**：macOS 双击即用的图形界面，后台常驻，不弹终端窗口。
 - **协议桥**：内置 Responses ⇄ Chat Completions 转换，让只支持 Chat 的平台也能用。
 - **环境自检**：`codex-switcher doctor` 一次检查 Python、钥匙串、配置、模型、协议桥。
 - **零依赖**：纯标准库，不需要 pip 安装任何东西。
@@ -162,6 +167,26 @@ codex-switcher app
 
 界面带一次性访问令牌，别的程序访问不到；也不会把密钥显示出来，只显示脱敏串。
 
+### 场景三之二：装成 macOS 应用（双击即用）
+
+```bash
+bash packaging/macos/build_app.sh             # 生成到 ~/Applications
+open ~/Applications/"Codex 多模型切换器.app"   # 或直接在访达里双击
+```
+
+双击后它会后台拉起协议桥和图形界面，然后自动打开浏览器，**不弹终端窗口**。
+
+想停掉后台服务：
+
+```bash
+codex-switcher stop
+```
+
+> ⚠️ 应用必须指向**非受保护目录**里的运行时。macOS 会保护「文稿 / 桌面 / 下载」，
+> 从访达启动的 App 无权执行放在 `~/Documents` 里的脚本，报错是
+> `Operation not permitted`。所以 `install.sh` 会把运行时代码复制一份到
+> `~/.local/share/codex-switcher/`，App 指向那里；仓库放在哪都不影响使用。
+
 ### 场景四：需要协议桥的平台
 
 只支持 Chat Completions 的平台（Kimi、通义、OpenRouter、Groq…）需要协议桥常驻：
@@ -243,6 +268,25 @@ codex-switcher add --name "我的中转站" --base-url https://api.example.com/v
 
 - 另外提供**本机用量**：读取 Codex 会话日志统计每个平台用了多少 token，
   数据不出本机，也不读取对话内容。
+- **想要百分比**：套餐总量只有你自己知道，所以由你填一次：
+
+```bash
+codex-switcher quota deepseek --tokens 500000000   # 按套餐页写的总量填
+codex-switcher quota deepseek                      # 查看已用比例
+codex-switcher quota deepseek --clear              # 清除
+```
+
+填了之后界面会显示「已用 X% · 约剩 Y」和一根进度条；不填就只显示已用量，
+不会凭空给一个百分比。
+
+### 检查是不是最新版
+
+```bash
+codex-switcher update            # 只检查，不动任何文件
+codex-switcher update --pull     # 确认无本地改动后自动 git pull
+```
+
+图形界面底部也有「检查更新」；`doctor` 和 `status` 里会带一行版本状态。
 
 ---
 

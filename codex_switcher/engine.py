@@ -53,23 +53,63 @@ def unique_id(state: Dict, base: str) -> str:
 
 def effective_base_url(record: Dict) -> str:
     """Codex 实际要连的地址：原生平台直连，其余走本地协议桥。"""
-    if record.get("transport") == "native":
-        return (record.get("base_url") or "").rstrip("/")
+    if resolve_transport(record) == "native":
+        return resolve_base_url(record)
     port = int(record.get("bridge_port") or bridge_module.DEFAULT_PORT)
     return "http://127.0.0.1:%d/%s/v1" % (port, record.get("id"))
 
 
-def provider_settings(record: Dict, model_id: str) -> Dict:
-    """写进 config.toml 顶部的模型相关字段。"""
+def resolve_base_url(record: Dict, config_text: Optional[str] = None,
+                     provider_id: Optional[str] = None) -> str:
+    """确定平台的真实地址。
+
+    顺序：状态文件里的字段 → 现有 config.toml 的 provider 块 → 内置预设。
+    老版本状态文件不带 base_url，必须靠后两级兜底，否则会把地址写空。
+
+    provider_id 最好由调用方显式传入：老记录里连 id 字段都没有。
+    """
+    for key in ("upstream_base_url", "base_url"):
+        value = (record.get(key) or "").strip()
+        if value:
+            return value.rstrip("/")
+    identifier = provider_id or record.get("id") or ""
+    if config_text and identifier:
+        found = configfile.provider_block_value(config_text, identifier, "base_url")
+        if isinstance(found, str) and found.strip():
+            return found.strip().rstrip("/")
+    preset = registry.preset(record.get("preset_id") or "") or registry.preset(identifier)
+    if preset and preset.get("base_url"):
+        return preset["base_url"].rstrip("/")
+    return ""
+
+
+def resolve_transport(record: Dict) -> str:
+    """判断一个平台该直连还是走协议桥。
+
+    关键点：旧版本或手工建的状态文件里没有 transport 字段，那种记录本来就指向
+    平台真实地址，必须按“直连”处理；否则会被误判成需要协议桥，
+    把用户本来好用的配置改成指向 127.0.0.1。
+    """
+    return "bridge" if (record.get("transport") or "").strip() == "bridge" else "native"
+
+
+def provider_settings(record: Dict, model_id: str, provider_id: Optional[str] = None) -> Dict:
+    """写进 config.toml 顶部的模型相关字段。
+
+    provider_id 由调用方显式传入：老状态记录里可能连 id 字段都没有。
+    """
+    identifier = provider_id or record.get("id") or ""
+    if not identifier:
+        raise SwitchError("这条记录缺少平台 ID，请重新添加该平台")
     override = (record.get("model_overrides") or {}).get(model_id) or {}
     effort = override.get("default_reasoning_level") or record.get("default_reasoning_effort") or "high"
     settings = {
-        "model_provider": record["id"],
+        "model_provider": identifier,
         "model": model_id,
         "model_reasoning_effort": effort,
         "model_reasoning_summary": "none",
         "model_supports_reasoning_summaries": True,
-        "model_catalog_json": str(catalog_module.catalog_path(record["id"])),
+        "model_catalog_json": str(catalog_module.catalog_path(identifier)),
     }
     context = override.get("context_window")
     if context:
@@ -233,6 +273,9 @@ def refresh_models(provider_id: str) -> Dict:
     record = state_module.get_provider(state, provider_id)
     if not record:
         raise SwitchError("没有找到平台：%s" % provider_id)
+    # 老记录可能缺 id / base_url / transport，切换时顺手补全，
+    # 以后就不用再依赖 config.toml 反查了
+    record.setdefault("id", provider_id)
     api_key = secrets.load(provider_id) if record.get("requires_key", True) else None
     try:
         model_ids = discover(record, api_key)
@@ -263,6 +306,9 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
     record = state_module.get_provider(state, provider_id)
     if not record:
         raise SwitchError("没有找到平台：%s" % provider_id)
+    # 老记录可能缺 id / base_url / transport，顺手补全，
+    # 以后就不用再依赖 config.toml 反查了
+    record.setdefault("id", provider_id)
 
     models = list((record.get("models") or {}).keys())
     if not models:
@@ -278,16 +324,13 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
     if not catalog_target.exists():
         catalog_module.write_catalog(provider_id, record, models)
 
-    fields = {"name": record.get("config_name") or record["label"],
-              "base_url": effective_base_url(record),
-              "wire_api": registry.WIRE_API}
     auth = None
     if record.get("requires_key", True):
         helper = secrets.install_helper()
         auth = {"command": str(helper), "args": [provider_id], "timeout_ms": 10000,
                 "refresh_interval_ms": 300000}
 
-    settings = provider_settings(record, chosen)
+    settings = provider_settings(record, chosen, provider_id)
 
     paths.ensure_dir(paths.state_dir())
     lock_path = paths.lock_file()
@@ -297,6 +340,16 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         if not config.exists():
             raise SwitchError("找不到 Codex 配置文件：%s" % config)
         text = config.read_text()
+        # 地址要在这里确定：老状态文件不带 base_url，需要从现有配置里取回来
+        upstream = resolve_base_url(record, text, provider_id)
+        if not upstream:
+            raise SwitchError(
+                "这个平台没有记录 Base URL（多半是早期版本建的）。"
+                "请重新添加一次：codex-switcher add --id %s --base-url <平台地址>" % provider_id)
+        base_url = upstream if resolve_transport(record) == "native" else effective_base_url(record)
+        fields = {"name": record.get("config_name") or record["label"],
+                  "base_url": base_url,
+                  "wire_api": registry.WIRE_API}
         try:
             with_block = configfile.upsert_provider_block(text, provider_id, fields, auth)
             new_text = configfile.rewrite_model_settings(with_block, settings)
@@ -308,6 +361,9 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         configfile.atomic_write(config, new_text, text)
 
     record["default_model"] = chosen
+    record.setdefault("transport", "native")
+    record["base_url"] = upstream
+    record["upstream_base_url"] = upstream
     state_module.upsert_provider(state, record)
     state_module.save(state)
     return {"provider": provider_id, "label": record["label"], "model": chosen, "backup": str(backup)}
@@ -363,33 +419,74 @@ def current_status() -> Dict:
 def provider_overview(include_balance: bool = False) -> List[Dict]:
     state = state_module.load()
     current = current_status().get("model_provider")
+    try:
+        config_text = paths.config_path().read_text()
+    except OSError:
+        config_text = None
     bridge_cache: Dict[int, bool] = {}
     overview = []
     for provider_id, record in (state.get("providers") or {}).items():
-        transport = record.get("transport")
+        transport = resolve_transport(record)
         port = int(record.get("bridge_port") or bridge_module.DEFAULT_PORT)
-        if transport != "native" and port not in bridge_cache:
+        if transport == "bridge" and port not in bridge_cache:
             bridge_cache[port] = bridge_module.is_running(port)
+        # 钥匙串读取要起子进程，每个平台只读一次（原来读了三遍）
+        stored_key = secrets.load(provider_id)
+        upstream = resolve_base_url(record, config_text, provider_id)
+        effective = upstream if transport == "native" else "http://127.0.0.1:%d/%s/v1" % (port, provider_id)
         item = {
             "id": provider_id,
             "label": record.get("label"),
-            "base_url": record.get("base_url"),
-            "upstream_base_url": record.get("upstream_base_url") or record.get("base_url"),
-            "effective_base_url": effective_base_url(record),
+            "base_url": upstream or None,
+            "upstream_base_url": upstream or None,
+            "effective_base_url": effective,
             "transport": transport,
             "wire_api": registry.WIRE_API,
             "bridge_running": None if transport == "native" else bridge_cache.get(port, False),
             "models": list((record.get("models") or {}).keys()),
             "default_model": record.get("default_model"),
-            "console_url": record.get("console_url"),
+            "console_url": record.get("console_url")
+            or (registry.preset(record.get("preset_id") or provider_id) or {}).get("console_url"),
             "requires_key": record.get("requires_key", True),
-            "has_key": secrets.exists(provider_id),
-            "key_hint": secrets.mask(secrets.load(provider_id)) if secrets.exists(provider_id) else "未配置",
+            "has_key": bool(stored_key),
+            "key_hint": secrets.mask(stored_key) if stored_key else "未配置",
             "is_current": provider_id == current,
             "notes": record.get("notes"),
             "models_synced_at": record.get("models_synced_at"),
+            "quota_tokens": record.get("quota_tokens"),
+            "preset_id": (registry.preset(record.get("preset_id") or provider_id) or {}).get("id"),
         }
         if include_balance:
             item["balance"] = balance_module.query(record, secrets.load(provider_id))
         overview.append(item)
     return overview
+
+
+def set_quota(provider_id: str, tokens: Optional[int]) -> Dict:
+    """记录这个平台套餐的 token 总量，用来算本机用量的百分比。
+
+    分母完全由用户自己填（例如套餐页面写的“每月 5 亿 tokens”），
+    我们不猜、也不从别处推断。
+    """
+    state = state_module.load()
+    record = state_module.get_provider(state, provider_id)
+    if not record:
+        raise SwitchError("没有找到平台：%s" % provider_id)
+    if tokens is None:
+        record.pop("quota_tokens", None)
+    else:
+        if tokens <= 0:
+            raise SwitchError("额度必须是正整数")
+        record["quota_tokens"] = int(tokens)
+    state_module.save(state)
+    return record
+
+
+def usage_with_quota(provider_id: str, quota_tokens: Optional[int], used_tokens: int) -> Dict:
+    """算出本机用量的占比。没有填额度就不给百分比，避免误导。"""
+    result = {"used_tokens": used_tokens, "quota_tokens": quota_tokens}
+    if quota_tokens:
+        percent = min(100.0, round(used_tokens / quota_tokens * 100, 2))
+        result["percent"] = percent
+        result["remaining_tokens"] = max(0, quota_tokens - used_tokens)
+    return result

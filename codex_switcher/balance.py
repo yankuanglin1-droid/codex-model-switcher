@@ -142,6 +142,13 @@ def query(record: Dict, api_key: Optional[str] = None, timeout: int = 20) -> Dic
     """查询某个平台的额度。任何异常都会被翻译成给人看的结果。"""
     spec = record.get("balance")
     console_url = record.get("console_url")
+    if spec is None:
+        # 早期记录没有挂适配器；用内置预设兜底，例如 DeepSeek 的官方余额接口
+        from . import registry
+        preset = registry.preset(record.get("preset_id") or record.get("id") or "")
+        if preset:
+            spec = preset.get("balance")
+            console_url = console_url or preset.get("console_url")
     base = {"provider_id": record.get("id"), "console_url": console_url,
             "checked_at": datetime.datetime.now().isoformat(timespec="seconds")}
 

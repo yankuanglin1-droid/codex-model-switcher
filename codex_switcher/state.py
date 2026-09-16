@@ -62,13 +62,16 @@ def get_provider(state: Dict, provider_id: str) -> Optional[Dict]:
 
 def upsert_provider(state: Dict, record: Dict) -> Dict:
     providers = state.setdefault("providers", {})
-    existing = providers.get(record["id"])
+    identifier = record.get("id")
+    if not identifier:
+        raise ValueError("平台记录缺少 id 字段，无法保存")
+    existing = providers.get(identifier)
     if existing:
         merged = dict(existing)
         merged.update(record)
         record = merged
     record.setdefault("added_at", datetime.datetime.now().isoformat(timespec="seconds"))
-    providers[record["id"]] = record
+    providers[identifier] = record
     return record
 
 

@@ -9,6 +9,53 @@ codex-switcher export     # 输出脱敏状态（不含密钥），可以贴出�
 
 ---
 
+## 双击 App 没反应 / 报 Operation not permitted
+
+**原因**：macOS 会保护「文稿 / 桌面 / 下载」这几个目录。如果你的仓库克隆在
+`~/Documents` 下，从访达启动的 App **没有权限执行**里面的脚本，系统直接返回
+`Operation not permitted`，看起来就是「双击没反应」。
+
+**解决**：重新跑一次安装脚本，它会把运行时代码复制到非受保护目录，App 指向那里。
+
+```bash
+bash install.sh
+bash packaging/macos/build_app.sh
+```
+
+之后仓库放在哪里都不影响使用。想确认 App 到底指向哪：
+
+```bash
+cat ~/Applications/"Codex 多模型切换器.app"/Contents/MacOS/launcher | tail -1
+cat ~/.codex/model-switcher/launch.log     # 启动日志，失败原因会写在这里
+```
+
+---
+
+## 界面打开很慢 / 一直转圈
+
+早期版本会整份扫描 Codex 的会话日志来统计用量，机器上会话一多就会卡到超时。
+1.1.0 起改成只读文件开头（判断平台）和结尾（取最后一次 token 统计），
+1360 个会话也只花 0.3 秒。
+
+如果你装的还是旧版：
+
+```bash
+codex-switcher update --pull && bash install.sh
+```
+
+---
+
+## 怎么知道是不是最新版
+
+```bash
+codex-switcher update        # 只检查
+codex-switcher status        # 最后一行也会带版本状态
+```
+
+界面底部同样有「检查更新」按钮。
+
+---
+
 ## 切换后模型列表没有变化
 
 **症状**：切到 DeepSeek 了，但 Codex 里还是原来那批模型。

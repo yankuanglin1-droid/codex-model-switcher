@@ -283,6 +283,18 @@ PRESETS: List[Dict] = [
 
 PRESET_BY_ID = {item["id"]: item for item in PRESETS}
 
+# 常见别名：用户或早期版本可能用了别的名字，这里统一映射到预设
+PRESET_ALIASES = {
+    "glm": "zhipu",
+    "z-ai": "zhipu",
+    "bigmodel": "zhipu",
+    "kimi": "moonshot",
+    "qwen": "dashscope",
+    "bailian": "dashscope",
+    "ollama": "ollama-local",
+    "lmstudio": "lmstudio-local",
+}
+
 # Codex 自己占用的 provider id。用这些名字会让 Codex 忽略我们的模型目录。
 RESERVED_PROVIDER_IDS = frozenset({"openai", "ollama", "lmstudio", "codex", "azure"})
 
@@ -291,7 +303,10 @@ WIRE_API = "responses"
 
 
 def preset(provider_id: str) -> Optional[Dict]:
-    return PRESET_BY_ID.get(provider_id)
+    if not provider_id:
+        return None
+    key = str(provider_id).strip().lower()
+    return PRESET_BY_ID.get(key) or PRESET_BY_ID.get(PRESET_ALIASES.get(key, ""))
 
 
 def preset_list() -> List[Dict]:

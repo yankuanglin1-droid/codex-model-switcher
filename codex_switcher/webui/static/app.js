@@ -16,6 +16,7 @@ const api = (path, body) => {
 
 let STATE = { providers: [], presets: [], current: {} };
 let SELECTED = null;
+const BALANCE_TRIED = new Set();
 
 const $ = (id) => document.getElementById(id);
 
@@ -71,7 +72,23 @@ function renderHeader() {
   $('current-status').textContent = current.model_provider
     ? `当前默认：${current.model_provider} · ${current.model || '未设置'}`
     : '还没有检测到 Codex 配置';
-  $('secret-backend').textContent = `密钥存储：${STATE.secret_backend || '—'}`;
+  $('secret-backend').textContent = `v${STATE.version || '?'} · 密钥存储：${STATE.secret_backend || '—'}`;
+  $('about-version').textContent = `Codex 多模型切换器 v${STATE.version || '?'}`;
+  if (STATE.project_url) $('about-repo').href = STATE.project_url;
+  renderUpdate(STATE.update);
+}
+
+function renderUpdate(info) {
+  const node = $('about-update');
+  if (!info) { node.textContent = ''; return; }
+  if (info.status !== 'ok') { node.textContent = ''; return; }
+  if (info.up_to_date) {
+    node.className = 'hint';
+    node.textContent = '已是最新版本';
+  } else {
+    node.className = 'hint update-new';
+    node.textContent = `有新版本 ${info.latest}（当前 v${info.current}）`;
+  }
 }
 
 function renderProviders() {
@@ -143,7 +160,30 @@ function renderDetail(provider) {
     cards.appendChild(bridgeCard);
   }
 
-  if (provider.local_usage) {
+  if (provider.usage) {
+    const usageCard = el('div', 'card');
+    usageCard.appendChild(el('div', 'label', '本机用量（近似）'));
+    usageCard.appendChild(el('div', 'value', provider.usage.used_tokens_human || '0'));
+    if (provider.usage.percent !== undefined) {
+      usageCard.appendChild(el('div', 'note',
+        `套餐额度 ${provider.usage.quota_tokens_human} · 已用 ${provider.usage.percent}% · 约剩 ${provider.usage.remaining_tokens_human}`));
+      const bar = el('div', 'progress' + (provider.usage.percent >= 90 ? ' err' : (provider.usage.percent >= 70 ? ' warn' : '')));
+      const fill = el('span');
+      fill.style.width = `${Math.max(2, provider.usage.percent)}%`;
+      bar.appendChild(fill);
+      usageCard.appendChild(bar);
+    } else {
+      usageCard.appendChild(el('div', 'note', '没设套餐额度，只能看已用量；点下面按钮可以补上'));
+    }
+    if (provider.local_usage) {
+      usageCard.appendChild(el('div', 'note',
+        `${provider.local_usage.sessions} 个任务 · ${provider.local_usage.turns} 轮对话`));
+    }
+    const quotaButton = el('button', 'btn ghost small', provider.usage.quota_tokens ? '修改套餐额度' : '设置套餐额度');
+    quotaButton.onclick = () => setQuota(provider);
+    usageCard.appendChild(quotaButton);
+    cards.appendChild(usageCard);
+  } else if (provider.local_usage) {
     const usageCard = el('div', 'card');
     usageCard.appendChild(el('div', 'label', '本机用量（近似）'));
     usageCard.appendChild(el('div', 'value', provider.local_usage.total_tokens_human));
@@ -163,6 +203,11 @@ function renderDetail(provider) {
     link.rel = 'noreferrer';
     card.appendChild(link);
     cards.appendChild(card);
+  }
+  // 选中平台后自动查一次额度（每个平台每次打开只自动查一次，避免反复请求）
+  if (!provider.balance && !BALANCE_TRIED.has(provider.id)) {
+    BALANCE_TRIED.add(provider.id);
+    setTimeout(() => queryBalance(provider, null), 80);
   }
   detail.appendChild(cards);
 
@@ -224,17 +269,47 @@ function transportLabel(transport) {
   return '自动探测';
 }
 
+async function setQuota(provider) {
+  const current = provider.usage && provider.usage.quota_tokens;
+  const raw = prompt(
+    `输入这个平台套餐的总 token 数（例如 500000000）。\n留空表示清除设置。\n\n` +
+    `这个数字由你自己填，工具只用它来算本机用量占比，不会去猜。`,
+    current ? String(current) : '');
+  if (raw === null) return;
+  const trimmed = raw.trim();
+  try {
+    const payload = trimmed
+      ? { provider: provider.id, tokens: Number(trimmed) }
+      : { provider: provider.id, clear: true };
+    if (trimmed && (!Number.isFinite(payload.tokens) || payload.tokens <= 0)) {
+      toast('请输入正整数', true);
+      return;
+    }
+    const result = await api('quota', payload);
+    STATE = result.state;
+    const item = STATE.providers.find((p) => p.id === provider.id);
+    if (item) { provider.usage = item.usage; renderDetail(provider); }
+    toast('已更新额度设置');
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 async function queryBalance(provider, button) {
-  button.disabled = true;
-  button.textContent = '查询中…';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '查询中…';
+  }
   try {
     const result = await api('balance', { provider: provider.id });
     provider.balance = result;
     renderDetail(provider);
   } catch (error) {
     toast(error.message, true);
-    button.disabled = false;
-    button.textContent = '查询额度';
+    if (button) {
+      button.disabled = false;
+      button.textContent = '查询额度';
+    }
   }
 }
 
@@ -395,6 +470,21 @@ $('btn-restore').onclick = async () => {
   } catch (error) {
     toast(error.message, true);
   }
+};
+
+$('btn-check-update').onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = '检查中…';
+  try {
+    const result = await api('update-check', {});
+    renderUpdate(result);
+    toast(result.description || '已检查');
+  } catch (error) {
+    toast('检查更新失败：' + error.message, true);
+  }
+  button.disabled = false;
+  button.textContent = '检查更新';
 };
 
 loadState().catch((error) => toast(error.message, true));

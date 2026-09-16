@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -57,6 +58,7 @@ def main() -> int:
         print("没有找到 Chrome / Chromium，跳过截图。")
         return 0
 
+    mock_port = start_mock_balance_server()
     workdir = tempfile.mkdtemp(prefix="codex-switcher-shot-")
     os.environ["CODEX_HOME"] = workdir
     Path(workdir, "config.toml").write_text(
@@ -78,10 +80,39 @@ def main() -> int:
         record["models"] = {name: {} for name in models}
         record["default_model"] = models[0]
         record["models_synced_at"] = stamp
+        # 让截图里的余额卡片有内容：指向本机一个只返回演示数字的小接口。
+        # 真实使用时这里接的是平台自己的余额接口（见 registry.py 的 balance 字段）。
+        if provider_id == "deepseek":
+            record["balance"] = {
+                "kind": "json_path",
+                "url": "http://127.0.0.1:%d/balance" % mock_port,
+                "value_path": "data.balance",
+                "currency_path": "data.currency",
+                "label": "余额",
+            }
+            record["console_url"] = "https://platform.deepseek.com/usage"
         state_module.upsert_provider(state, record)
         secrets.store(provider_id, key)
+    # 给 DeepSeek 设一个演示用的套餐额度，让“用量百分比”这张卡片有内容
+    state["providers"]["deepseek"]["quota_tokens"] = 100_000_000
     state_module.save(state)
     engine.switch_to("deepseek", "deepseek-flash")
+
+    # 造一份本机用量记录，这样进度条不是 0
+    sessions = Path(workdir, "sessions", "2026", "09", "16")
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "rollout-demo.jsonl").write_text(
+        '{"type":"session_meta","payload":{"model_provider":"deepseek"}}\n'
+        '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":'
+        '{"input_tokens":11800000,"output_tokens":640000,"total_tokens":12440000}}}}\n',
+        encoding="utf-8")
+
+    # 预置一份“已是最新版本”的缓存，截图里就不会一直是空白
+    from codex_switcher import __version__, paths as sw_paths, update as update_module
+    sw_paths.ensure_dir(sw_paths.state_dir())
+    sw_paths.state_dir().joinpath("update.json").write_text(json.dumps(
+        {"status": "ok", "current": __version__, "latest": "v" + __version__,
+         "up_to_date": True, "url": update_module.PROJECT_URL + "/releases"}, ensure_ascii=False))
 
     from codex_switcher.webui import server
     token = "screenshot"
@@ -101,6 +132,28 @@ def main() -> int:
     httpd.shutdown()
     print("已生成：%s" % target)
     return 0
+
+
+def start_mock_balance_server() -> int:
+    """截图专用的假余额接口：只监听本机，只返回演示数字。"""
+    import json as _json
+    from http.server import BaseHTTPRequestHandler
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            return
+
+        def do_GET(self):  # noqa: N802
+            body = _json.dumps({"data": {"balance": "42.50", "currency": "CNY"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server.server_address[1]
 
 
 if __name__ == "__main__":

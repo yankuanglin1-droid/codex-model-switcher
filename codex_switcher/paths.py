@@ -59,6 +59,15 @@ def sessions_dir() -> Path:
     return codex_home() / "sessions"
 
 
+def gui_state_file() -> Path:
+    """图形界面运行时写下的端口与进程号，供 `codex-switcher stop` 使用。"""
+    return state_dir() / "gui.json"
+
+
+def bridge_pid_file() -> Path:
+    return state_dir() / "bridge.pid"
+
+
 def ensure_dir(path: Path, mode: int = 0o700) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     try:

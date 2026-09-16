@@ -499,6 +499,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         # 流式：原生平台直接透传，其余边收边翻译
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -534,16 +535,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 def _iter_chat_stream(response) -> Iterator[Dict]:
     """解析上游的 SSE，逐个 yield JSON chunk。"""
-    buffer = b""
+    # 用 readline 按行读，避免一个字节一次系统调用
     while True:
-        block = response.read(1)
-        if not block:
+        raw = response.readline()
+        if not raw:
             break
-        buffer += block
-        if not buffer.endswith(b"\n"):
-            continue
-        line = buffer.decode("utf-8", "replace").strip()
-        buffer = b""
+        line = raw.decode("utf-8", "replace").strip()
         if not line or line.startswith(":"):
             continue
         if line.startswith("data:"):
@@ -572,13 +569,35 @@ def run(port: int = DEFAULT_PORT) -> int:
     print("协议桥已启动：http://127.0.0.1:%d" % port)
     print("只监听本机；密钥不会经过磁盘，由 Codex 每次请求直接带过来。")
     server = ThreadingHTTPServer(("127.0.0.1", port), BridgeHandler)
+    _write_pid(port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止。")
     finally:
         server.server_close()
+        _clear_pid()
     return 0
+
+
+def _write_pid(port: int) -> None:
+    try:
+        import json as _json
+        import os
+        from . import paths
+        paths.ensure_dir(paths.state_dir())
+        paths.bridge_pid_file().write_text(_json.dumps({"pid": os.getpid(), "port": port}) + "\n")
+        os.chmod(paths.bridge_pid_file(), 0o600)
+    except OSError:
+        pass
+
+
+def _clear_pid() -> None:
+    try:
+        from . import paths
+        paths.bridge_pid_file().unlink()
+    except OSError:
+        pass
 
 
 def is_running(port: int = DEFAULT_PORT, timeout: float = 1.5) -> bool:

@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import subprocess
 import sys
 from typing import Dict, List, Optional
 
-from . import __version__, balance as balance_module, engine, paths, registry, secrets, state as state_module, usage
+from . import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
+               secrets, state as state_module, usage)
 from .discovery import DiscoveryError
 
 
@@ -86,6 +90,8 @@ def cmd_add(args) -> int:
         }
 
     keeps_key = (preset or {}).get("requires_key", True)
+    if args.no_key:
+        keeps_key = False
 
     result = engine.add_provider(
         provider_id=args.id or (preset or {}).get("id"),
@@ -188,6 +194,54 @@ def cmd_bridge(args) -> int:
     return bridge.run(port=args.port)
 
 
+def _pid_is_ours(pid: int) -> bool:
+    """确认这个进程号确实是本工具起的服务，避免误杀复用了同一 PID 的其它程序。"""
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                capture_output=True, text=True, timeout=10)
+    except Exception:  # noqa: BLE001
+        return False
+    return "codex_switcher" in (result.stdout or "")
+
+
+def cmd_stop(args) -> int:
+    """停掉后台的图形界面与协议桥。"""
+    targets = [("图形界面", paths.gui_state_file()), ("协议桥", paths.bridge_pid_file())]
+    stopped, skipped = [], []
+    for label, record_path in targets:
+        if not record_path.exists():
+            continue
+        try:
+            pid = int(json.loads(record_path.read_text()).get("pid") or 0)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pid = 0
+        if pid <= 1:
+            skipped.append("%s（记录无效）" % label)
+        elif not _pid_is_ours(pid):
+            skipped.append("%s（PID %d 已不属于本工具，跳过）" % (label, pid))
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped.append("%s（PID %d）" % (label, pid))
+            except ProcessLookupError:
+                stopped.append("%s（已经不在运行）" % label)
+            except PermissionError:
+                skipped.append("%s（没有权限结束 PID %d）" % (label, pid))
+        try:
+            record_path.unlink()
+        except OSError:
+            pass
+
+    if not stopped and not skipped:
+        out("没有正在运行的后台服务。")
+        return 0
+    for item in stopped:
+        out("已停止：%s" % item)
+    for item in skipped:
+        out("已跳过：%s" % item)
+    return 0
+
+
 def cmd_use(args) -> int:
     try:
         result = engine.switch_to(args.provider, args.model, dry_run=args.dry_run)
@@ -204,7 +258,7 @@ def cmd_use(args) -> int:
     out("接下来：完全退出（⌘Q）并重新打开 Codex，然后新建任务。")
     state = state_module.load()
     record = state_module.get_provider(state, args.provider)
-    if record and record.get("transport") != "native":
+    if record and engine.resolve_transport(record) == "bridge":
         port = int(record.get("bridge_port") or 8787)
         if not engine.bridge_module.is_running(port):
             out("")
@@ -291,6 +345,7 @@ def cmd_remove(args) -> int:
 
 def cmd_status(args) -> int:
     from . import install
+    from . import update as update_module
     status = engine.current_status()
     out("配置文件：%s" % status["config_path"])
     out("当前平台：%s" % status.get("model_provider", "unknown"))
@@ -302,6 +357,70 @@ def cmd_status(args) -> int:
     out("密钥存储：%s" % secrets.backend_label())
     version = install.codex_version()
     out("Codex 版本：%s" % (version or "未检测到"))
+    out("切换器版本：v%s · %s" % (__version__, update_module.describe(update_module.check())))
+    return 0
+
+
+def cmd_quota(args) -> int:
+    state = state_module.load()
+    record = state_module.get_provider(state, args.provider)
+    if not record:
+        fail("没有找到平台：%s" % args.provider)
+    if args.clear:
+        engine.set_quota(args.provider, None)
+        out("已清除 %s 的额度设置。" % record.get("label"))
+        return 0
+    if args.tokens is None:
+        stat = usage.local_usage().get(args.provider)
+        used = (stat or {}).get("total_tokens", 0)
+        quota = record.get("quota_tokens")
+        if quota:
+            detail = engine.usage_with_quota(args.provider, quota, used)
+            out("%s：本机已用 %s / %s tokens（%.1f%%），约剩 %s" % (
+                record.get("label"), usage.human_tokens(used), usage.human_tokens(quota),
+                detail["percent"], usage.human_tokens(detail["remaining_tokens"])))
+        else:
+            out("%s：本机已用 %s tokens（没有设置套餐额度，无法算百分比）" % (
+                record.get("label"), usage.human_tokens(used)))
+            out("如果套餐页写了总 token 数，可以这样设置：")
+            out("  codex-switcher quota %s --tokens 500000000" % args.provider)
+        return 0
+    try:
+        engine.set_quota(args.provider, args.tokens)
+    except engine.SwitchError as exc:
+        fail(str(exc))
+    out("已记录 %s 的套餐额度：%s tokens。" % (record.get("label"), usage.human_tokens(args.tokens)))
+    return 0
+
+
+def cmd_update(args) -> int:
+    from . import update as update_module
+    result = update_module.check(force=True)
+    out(update_module.describe(result))
+    if result.get("status") != "ok" or result.get("up_to_date"):
+        return 0
+    if not args.pull:
+        out("")
+        out("更新方式（在仓库目录里）：")
+        out("  git pull          # 然后重跑 bash install.sh")
+        out("  或者：codex-switcher update --pull")
+        return 0
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    if not (repo / ".git").exists():
+        fail("当前不是 git 仓库，无法自动更新。请重新克隆：%s" % result.get("url"))
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                            capture_output=True, text=True, timeout=30)
+    if (status.stdout or "").strip():
+        fail("仓库里有未提交的改动，为避免覆盖你的修改，已停止自动更新。请先手动处理。")
+    out("正在更新：%s" % repo)
+    pull = subprocess.run(["git", "-C", str(repo), "pull", "--ff-only"],
+                          capture_output=True, text=True, timeout=120)
+    out((pull.stdout or "").strip() or (pull.stderr or "").strip())
+    if pull.returncode != 0:
+        fail("更新失败，请手动执行 git pull 查看原因。")
+    out("")
+    out("更新完成。如果提示符没变化，重新运行一次 bash install.sh 即可。")
     return 0
 
 
@@ -371,6 +490,14 @@ def cmd_doctor(args) -> int:
 
 def cmd_app(args) -> int:
     from .webui import server
+    if not getattr(args, "force_new", False):
+        url = server.existing_url()
+        if url:
+            out("图形界面已经在运行：%s" % url)
+            if not args.no_open:
+                import webbrowser
+                webbrowser.open(url)
+            return 0
     return server.run(port=args.port, open_browser=not args.no_open)
 
 
@@ -565,6 +692,8 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--key-stdin", action="store_true", help="从标准输入读取 API Key")
     add.add_argument("--model", action="append", help="手动指定模型名，可重复或用逗号分隔")
     add.add_argument("--no-discover", action="store_true", help="不自动拉取模型列表")
+    add.add_argument("--no-key", action="store_true",
+                     help="这个平台不需要密钥（本机模型或内网中转站）")
     add.add_argument("--console-url")
     add.add_argument("--balance-url", help="自定义余额接口地址")
     add.add_argument("--balance-path", help="余额字段路径，例如 data.balance")
@@ -604,6 +733,16 @@ def build_parser() -> argparse.ArgumentParser:
     bridge.add_argument("--install-agent", action="store_true", help="macOS：安装为开机自启后台服务")
     bridge.add_argument("--uninstall-agent", action="store_true", help="macOS：移除后台服务")
 
+    sub.add_parser("stop", help="停掉后台的图形界面与协议桥")
+
+    quota = sub.add_parser("quota", help="记录套餐额度，用于显示本机用量百分比")
+    quota.add_argument("provider")
+    quota.add_argument("--tokens", type=int, help="套餐总量，例如 500000000")
+    quota.add_argument("--clear", action="store_true", help="清除已记录的额度")
+
+    update = sub.add_parser("update", help="检查是否有新版本")
+    update.add_argument("--pull", action="store_true", help="确认无本地改动后自动 git pull")
+
     remove = sub.add_parser("remove", help="删除平台")
     remove.add_argument("provider")
     remove.add_argument("--keep-key", action="store_true")
@@ -614,6 +753,8 @@ def build_parser() -> argparse.ArgumentParser:
     app = sub.add_parser("app", help="打开图形界面")
     app.add_argument("--port", type=int, default=0)
     app.add_argument("--no-open", action="store_true")
+    app.add_argument("--force-new", action="store_true",
+                     help="已经有界面在运行时，仍然再开一个新的")
 
     export = sub.add_parser("export", help="导出脱敏状态（用于求助）")
     export.add_argument("--output")
@@ -638,6 +779,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "balance": cmd_balance,
         "refresh": cmd_refresh,
         "bridge": cmd_bridge,
+        "stop": cmd_stop,
+        "quota": cmd_quota,
+        "update": cmd_update,
         "remove": cmd_remove,
         "status": cmd_status,
         "doctor": cmd_doctor,

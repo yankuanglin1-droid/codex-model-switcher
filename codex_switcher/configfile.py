@@ -133,12 +133,15 @@ def rewrite_model_settings(text: str, settings: Dict) -> str:
 
     # 第一道校验：顶层模型键之外的文字必须逐字不变（任何 Python 版本都能做）
     def remainder(document: str) -> str:
+        """只剔除文件头部（第一张表之前）的模型键，之后的内容必须一模一样。"""
         output = []
+        seen_table = False
         for line in document.splitlines(keepends=True):
             if line.lstrip().startswith("["):
+                seen_table = True
                 output.append(line)
                 continue
-            if _is_managed_line(line):
+            if not seen_table and _is_managed_line(line):
                 continue
             output.append(line)
         return "".join(output).strip()
@@ -324,3 +327,38 @@ def atomic_write(path: Path, text: str, expected: str) -> None:
 
 def read_settings(config: Path) -> Dict:
     return read_top_level(config.read_text(), MANAGED_KEYS)
+
+
+def provider_block_value(text: str, provider_id: str, key: str):
+    """读 [model_providers.<id>] 里的某个字段。
+
+    老版本的状态文件不保存 base_url（地址只写在 config.toml 里），切换时必须
+    从这里取回来，否则会把地址写成空字符串、把配置弄坏。
+    """
+    if toml_available():
+        try:
+            document = parse(text)
+            block = ((document.get("model_providers") or {}).get(provider_id) or {})
+            value = block.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        except Exception:  # noqa: BLE001 - 解析失败就走下面的逐行兜底
+            pass
+    target = "[model_providers.%s]" % provider_id
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            inside = (stripped.split("#", 1)[0].strip() == target)
+            continue
+        if not inside or "=" not in stripped:
+            continue
+        name, _, raw = stripped.partition("=")
+        if name.strip() != key:
+            continue
+        raw = raw.split(" #", 1)[0].strip()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw.strip().strip('"')
+    return None

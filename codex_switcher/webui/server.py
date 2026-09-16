@@ -18,7 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Optional
 
-from .. import __version__, balance as balance_module, engine, paths, registry, secrets, state as state_module, usage
+from .. import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
+                secrets, state as state_module, update as update_module, usage)
 from ..discovery import DiscoveryError
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -29,6 +30,7 @@ def _state_payload(include_balance: bool = False) -> Dict:
     local = usage.local_usage()
     for item in providers:
         stat = local.get(item["id"])
+        used_tokens = stat["total_tokens"] if stat else 0
         if stat:
             item["local_usage"] = {
                 "sessions": stat["sessions"],
@@ -36,9 +38,17 @@ def _state_payload(include_balance: bool = False) -> Dict:
                 "total_tokens": stat["total_tokens"],
                 "total_tokens_human": usage.human_tokens(stat["total_tokens"]),
             }
+        item["usage"] = engine.usage_with_quota(item["id"], item.get("quota_tokens"), used_tokens)
+        item["usage"]["used_tokens_human"] = usage.human_tokens(used_tokens)
+        if item["usage"].get("quota_tokens"):
+            item["usage"]["quota_tokens_human"] = usage.human_tokens(item["usage"]["quota_tokens"])
+            item["usage"]["remaining_tokens_human"] = usage.human_tokens(
+                item["usage"].get("remaining_tokens", 0))
     current = engine.current_status()
     return {
         "version": __version__,
+        "project_url": PROJECT_URL,
+        "update": update_module.read_cache(),
         "current": current,
         "providers": providers,
         "presets": registry.preset_list(),
@@ -222,6 +232,17 @@ class Handler(BaseHTTPRequestHandler):
             result["state"] = _state_payload()
             return result
 
+        if action == "quota":
+            provider_id = (payload.get("provider") or "").strip()
+            tokens = payload.get("tokens")
+            engine.set_quota(provider_id, None if payload.get("clear") else int(tokens or 0))
+            return {"state": _state_payload()}
+
+        if action == "update-check":
+            result = update_module.check(force=True)
+            result["description"] = update_module.describe(result)
+            return result
+
         raise engine.SwitchError("未知操作：%s" % action)
 
     def _add(self, payload: Dict) -> Dict:
@@ -286,6 +307,7 @@ def run(port: int = 0, open_browser: bool = True, token: Optional[str] = None) -
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     actual_port = server.server_address[1]
     url = "http://127.0.0.1:%d/?t=%s" % (actual_port, Handler.token)
+    _write_runtime_state(actual_port)
     print("图形界面已启动：%s" % url)
     print("（只监听本机，关闭此终端窗口即停止）")
     if open_browser:
@@ -296,4 +318,44 @@ def run(port: int = 0, open_browser: bool = True, token: Optional[str] = None) -
         print("\n已停止。")
     finally:
         server.server_close()
+        _clear_runtime_state()
     return 0
+
+
+def _write_runtime_state(port: int) -> None:
+    """记下端口和进程号，方便 `codex-switcher stop` 关掉它。"""
+    try:
+        import os
+        paths.ensure_dir(paths.state_dir())
+        paths.gui_state_file().write_text(json.dumps(
+            {"port": port, "pid": os.getpid(), "token": Handler.token},
+            ensure_ascii=False, indent=2) + "\n")
+        os.chmod(paths.gui_state_file(), 0o600)
+    except OSError:
+        pass
+
+
+def _clear_runtime_state() -> None:
+    try:
+        paths.gui_state_file().unlink()
+    except OSError:
+        pass
+
+
+def existing_url(timeout: float = 1.0) -> Optional[str]:
+    """如果已经有一个活着的图形界面，返回它的访问地址（供 .app 重复点击时复用）。"""
+    import socket
+    try:
+        record = json.loads(paths.gui_state_file().read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    port = record.get("port")
+    token = record.get("token")
+    if not isinstance(port, int) or not token:
+        return None
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            pass
+    except OSError:
+        return None
+    return "http://127.0.0.1:%d/?t=%s" % (port, token)

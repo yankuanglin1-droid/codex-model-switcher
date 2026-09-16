@@ -15,6 +15,28 @@ from codex_switcher import configfile as configfile_module  # noqa: E402
 
 TOML_OK = configfile_module.toml_available()
 
+_SESSION_HOME = None
+_PREVIOUS_HOME = None
+
+
+def setUpModule() -> None:
+    """整个测试会话强制使用临时 CODEX_HOME。
+
+    这条保险很关键：任何忘了继承 TempCodexHome 的用例都不会再碰用户真实的
+    ~/.codex/config.toml —— 之前正是因为一个类的继承关系写错，把真实配置改掉了。
+    """
+    global _SESSION_HOME, _PREVIOUS_HOME
+    _PREVIOUS_HOME = os.environ.get("CODEX_HOME")
+    _SESSION_HOME = tempfile.mkdtemp(prefix="codex-switcher-tests-")
+    os.environ["CODEX_HOME"] = _SESSION_HOME
+
+
+def tearDownModule() -> None:
+    if _PREVIOUS_HOME is None:
+        os.environ.pop("CODEX_HOME", None)
+    else:
+        os.environ["CODEX_HOME"] = _PREVIOUS_HOME
+
 
 def load_document(text):
     """需要完整 TOML 解析的断言用这个；没有解析库时整条测试标记为跳过。"""
@@ -50,6 +72,9 @@ class TempCodexHome(unittest.TestCase):
         self._old_home = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = self._temp.name
         self.home = Path(self._temp.name)
+        # 防呆：确认真的在临时目录里跑，而不是用户的家目录
+        real_home = Path.home() / ".codex"
+        self.assertNotEqual(Path(self._temp.name).resolve(), real_home.resolve())
         (self.home / "config.toml").write_text(SAMPLE_CONFIG)
 
     def tearDown(self) -> None:
@@ -215,6 +240,15 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("image", registry.hint_for("MiniMax-M3")["modalities"])
         self.assertEqual(registry.hint_for("totally-unknown-model")["context"], 131072)
 
+    def test_preset_aliases(self):
+        from codex_switcher import registry
+        self.assertEqual(registry.preset("glm")["id"], "zhipu")
+        self.assertEqual(registry.preset("GLM")["id"], "zhipu")
+        self.assertEqual(registry.preset("kimi")["id"], "moonshot")
+        self.assertEqual(registry.preset("ollama")["id"], "ollama-local")
+        self.assertIsNone(registry.preset(""))
+        self.assertIsNone(registry.preset("不存在的平台"))
+
 
 class BalanceTests(unittest.TestCase):
     def test_deepseek_adapter_parsing(self):
@@ -267,6 +301,28 @@ class BalanceTests(unittest.TestCase):
         finally:
             balance._http_json = original
         self.assertEqual(result["status"], "error")
+
+    def test_record_without_adapter_falls_back_to_preset(self):
+        """早期记录没挂余额适配器时，用内置预设兜底（DeepSeek 就是这样）。"""
+        from codex_switcher import balance
+        original = balance._http_json
+        balance._http_json = lambda *a, **k: {
+            "is_available": True,
+            "balance_infos": [{"currency": "CNY", "total_balance": "61.55",
+                               "granted_balance": "0", "topped_up_balance": "61.55"}],
+        }
+        try:
+            result = balance.query({"id": "deepseek", "balance": None}, "k")
+        finally:
+            balance._http_json = original
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("61.55", result["display"])
+        self.assertIn("platform.deepseek.com", result.get("console_url") or "")
+
+    def test_unknown_record_stays_unsupported(self):
+        from codex_switcher import balance
+        result = balance.query({"id": "完全没有的平台", "balance": None}, "k")
+        self.assertEqual(result["status"], "unsupported")
 
 
 class SecretsTests(unittest.TestCase):
@@ -336,6 +392,64 @@ class EngineTests(TempCodexHome):
         self.assertEqual(block["wire_api"], "responses")
         self.assertEqual(record["upstream_base_url"], "https://api.moonshot.cn/v1")
 
+    def test_legacy_record_without_transport_stays_direct(self):
+        """旧状态文件里没有 transport 字段，必须按直连处理。
+
+        这条是防回归：曾经因为默认成“走协议桥”，会把用户本来好用的配置
+        改成指向 127.0.0.1。
+        """
+        from codex_switcher import engine, paths, state as state_module
+        legacy = {
+            "id": "glm",
+            "label": "GLM",
+            "base_url": "https://open.bigmodel.cn/api/v1",
+            "requires_key": False,
+            "models": {"glm-5.3": {}, "glm-5-turbo": {}},
+        }
+        state_module.save({"schema_version": 2, "providers": {"glm": legacy}})
+        self.assertEqual(engine.resolve_transport(legacy), "native")
+        self.assertEqual(engine.effective_base_url(legacy), "https://open.bigmodel.cn/api/v1")
+        engine.switch_to("glm", "glm-5.3")
+        block = load_document(paths.config_path().read_text())["model_providers"]["glm"]
+        self.assertEqual(block["base_url"], "https://open.bigmodel.cn/api/v1")
+        self.assertNotIn("127.0.0.1", block["base_url"])
+
+    def test_legacy_record_without_id_or_base_url_uses_config(self):
+        """最老的记录连 id、base_url 都没有，地址只能从 config.toml 里取回来。
+
+        防回归：曾经因为取不到地址，直接把空字符串写进了 base_url。
+        """
+        from codex_switcher import configfile, engine, paths, state as state_module
+        legacy = {
+            "label": "GLM",
+            "default_model": "glm-5.3",
+            "models": {"glm-5.3": {}, "glm-turbo": {}},
+            "requires_key": False,  # 本用例只验证地址解析，不碰钥匙串
+        }
+        state_module.save({"schema_version": 2, "providers": {"zhipu-demo": legacy}})
+        config = paths.config_path()
+        config.write_text(SAMPLE_CONFIG + (
+            '\n[model_providers.zhipu-demo]\n'
+            'name = "GLM"\n'
+            'base_url = "https://open.bigmodel.cn/api/v1"\n'
+            'wire_api = "responses"\n'))
+
+        resolved = engine.resolve_base_url(legacy, config.read_text(), "zhipu-demo")
+        self.assertEqual(resolved, "https://open.bigmodel.cn/api/v1")
+
+        engine.switch_to("zhipu-demo", "glm-5.3")
+        block = configfile.parse(config.read_text())["model_providers"]["zhipu-demo"]
+        self.assertEqual(block["base_url"], "https://open.bigmodel.cn/api/v1")
+
+    def test_switch_refuses_when_base_url_cannot_be_found(self):
+        from codex_switcher import engine, state as state_module
+        mystery = {"id": "mystery", "label": "Mystery", "requires_key": False,
+                   "models": {"m": {}}}
+        state_module.save({"schema_version": 3, "providers": {"mystery": mystery}})
+        with self.assertRaises(engine.SwitchError) as caught:
+            engine.switch_to("mystery", "m")
+        self.assertIn("Base URL", str(caught.exception))
+
     def test_reserved_ids_are_renamed(self):
         from codex_switcher import engine, state as state_module
         state_module.save({"schema_version": 3, "providers": {}})
@@ -343,6 +457,72 @@ class EngineTests(TempCodexHome):
         self.assertEqual(engine.unique_id(state, "ollama"), "ollama-local")
         self.assertEqual(engine.unique_id(state, "openai"), "openai-local")
         self.assertEqual(engine.unique_id(state, "deepseek"), "deepseek")
+
+    def test_quota_is_user_declared_and_optional(self):
+        from codex_switcher import engine, state as state_module
+        record = engine.build_provider_record(
+            provider_id="demo", label="Demo", base_url="https://api.demo.com/v1",
+            models_url="", requires_key=False)
+        record["models"] = {"a": {}}
+        state_module.save({"schema_version": 3, "providers": {"demo": record}})
+
+        # 没设额度时不能凭空给百分比
+        detail = engine.usage_with_quota("demo", None, 250)
+        self.assertNotIn("percent", detail)
+        self.assertEqual(detail["used_tokens"], 250)
+
+        engine.set_quota("demo", 1000)
+        stored = state_module.get_provider(state_module.load(), "demo")
+        self.assertEqual(stored["quota_tokens"], 1000)
+        detail = engine.usage_with_quota("demo", 1000, 250)
+        self.assertEqual(detail["percent"], 25.0)
+        self.assertEqual(detail["remaining_tokens"], 750)
+
+        # 用超了也只显示 100%，不出现负数
+        detail = engine.usage_with_quota("demo", 100, 500)
+        self.assertEqual(detail["percent"], 100.0)
+        self.assertEqual(detail["remaining_tokens"], 0)
+
+        engine.set_quota("demo", None)
+        self.assertNotIn("quota_tokens", state_module.get_provider(state_module.load(), "demo"))
+
+    def test_quota_rejects_bad_values(self):
+        from codex_switcher import engine, state as state_module
+        record = engine.build_provider_record(
+            provider_id="demo", label="Demo", base_url="https://api.demo.com/v1",
+            models_url="", requires_key=False)
+        record["models"] = {"a": {}}
+        state_module.save({"schema_version": 3, "providers": {"demo": record}})
+        with self.assertRaises(engine.SwitchError):
+            engine.set_quota("demo", 0)
+        with self.assertRaises(engine.SwitchError):
+            engine.set_quota("nope", 100)
+
+
+class UpdateTests(unittest.TestCase):
+    def test_version_tuple(self):
+        from codex_switcher import update
+        self.assertEqual(update.version_tuple("v1.2.3"), (1, 2, 3))
+        self.assertEqual(update.version_tuple("1.10.0"), (1, 10, 0))
+        self.assertEqual(update.version_tuple(""), (0,))
+        self.assertGreater(update.version_tuple("1.10.0"), update.version_tuple("1.9.9"))
+
+    def test_describe_outcomes(self):
+        from codex_switcher import update
+        self.assertIn("无法确认", update.describe({"status": "failed"}))
+        self.assertIn("已是最新", update.describe(
+            {"status": "ok", "up_to_date": True, "current": "1.0.0"}))
+        self.assertIn("有新版本", update.describe(
+            {"status": "ok", "up_to_date": False, "latest": "v2.0.0", "current": "1.0.0",
+             "url": "https://example.com"}))
+
+
+class EngineContinueTests(TempCodexHome):
+    """切换相关的后续用例。
+
+    必须继承 TempCodexHome：漏掉继承就会去改用户真实的 ~/.codex。
+    setUpModule 里还有一道兜底。
+    """
 
     def test_switch_rejects_unknown_model(self):
         from codex_switcher import engine, state as state_module
@@ -614,7 +794,27 @@ class WebUITests(TempCodexHome):
         self.assertIn("providers", document)
         self.assertIn("presets", document)
         self.assertIn("current", document)
+        self.assertIn("project_url", document)
+        self.assertIn("update", document)
         self.assertGreater(len(document["presets"]), 10)
+
+    def test_quota_endpoint_round_trip(self):
+        from codex_switcher import engine, state as state_module
+        record = engine.build_provider_record(
+            provider_id="demo", label="Demo", base_url="https://api.demo.com/v1",
+            models_url="", requires_key=False)
+        record["models"] = {"a": {}}
+        state_module.save({"schema_version": 3, "providers": {"demo": record}})
+
+        import urllib.request
+        url = "http://127.0.0.1:%d/api/quota?t=%s" % (self.port, self.token)
+        body = json.dumps({"provider": "demo", "tokens": 1000}).encode()
+        request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            document = json.loads(response.read().decode())
+        item = [p for p in document["state"]["providers"] if p["id"] == "demo"][0]
+        self.assertEqual(item["usage"]["quota_tokens"], 1000)
+        self.assertIn("used_tokens_human", item["usage"])
 
 
 class UsageTests(unittest.TestCase):
@@ -623,6 +823,20 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(usage.human_tokens(950), "950")
         self.assertEqual(usage.human_tokens(1500), "1.5K")
         self.assertEqual(usage.human_tokens(2300000), "2.3M")
+
+
+class SafetyTests(unittest.TestCase):
+    """防止测试误改用户真实配置的保险，必须有。"""
+
+    def test_codex_home_is_temporary_during_tests(self):
+        from codex_switcher import paths
+        real = (Path.home() / ".codex").resolve()
+        self.assertNotEqual(paths.codex_home().resolve(), real,
+                            "测试期间 CODEX_HOME 必须指向临时目录，否则会改到用户的真实配置")
+
+    def test_session_home_is_set_by_module(self):
+        self.assertIsNotNone(_SESSION_HOME)
+        self.assertTrue(str(os.environ.get("CODEX_HOME", "")).startswith(_SESSION_HOME))
 
 
 if __name__ == "__main__":
