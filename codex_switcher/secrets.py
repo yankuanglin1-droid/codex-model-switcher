@@ -75,7 +75,8 @@ def _dpapi(data: bytes, unprotect: bool) -> Optional[bytes]:
     try:
         crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    except ImportError:
+    except (ImportError, AttributeError):
+        # AttributeError：非 Windows 平台上 ctypes.WinDLL 根本不存在
         return None
     buffer = ctypes.create_string_buffer(data, len(data))
     blob_in = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))

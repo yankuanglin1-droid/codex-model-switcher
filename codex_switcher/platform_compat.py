@@ -10,6 +10,7 @@ import contextlib
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -73,7 +74,17 @@ def file_lock(path: Path) -> Iterator[None]:
                 handle.write("\0")
                 handle.flush()
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            # 用 LK_NBLCK 自己重试，而不是 LK_LOCK：LK_LOCK 只会重试 10 次
+            # 就抛异常，界面、协议桥、命令行同时抢锁时可能刚好撞上。
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
             try:
                 yield
             finally:

@@ -933,6 +933,47 @@ class PlatformTests(unittest.TestCase):
             with pc.file_lock(Path(temp) / "x.lock"):
                 pass
 
+    def test_windows_file_lock_retries_instead_of_giving_up(self):
+        """Windows 分支在 macOS 上跑不到，所以拿假 msvcrt 把逻辑走一遍。
+
+        msvcrt.LK_LOCK 只会重试 10 次就抛异常；界面 / 协议桥 / 命令行三方抢锁时
+        可能刚好撞上。现在改成自己重试，这里验证“前几次抢不到、后来抢到”能成功。
+        """
+        import sys
+        import tempfile
+        import types
+        from codex_switcher import platform_compat as pc
+
+        calls = {"lock": 0, "unlock": 0}
+
+        def fake_locking(fd, mode, nbytes):
+            if mode == fake.LK_NBLCK:
+                calls["lock"] += 1
+                if calls["lock"] < 3:          # 前两次被别的进程占着
+                    raise OSError("locked")
+            else:
+                calls["unlock"] += 1
+
+        fake = types.ModuleType("msvcrt")
+        fake.LK_NBLCK, fake.LK_UNLCK, fake.locking = 1, 2, fake_locking
+
+        original_module = sys.modules.get("msvcrt")
+        original_flag = pc.IS_WINDOWS
+        sys.modules["msvcrt"] = fake
+        pc.IS_WINDOWS = True
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                with pc.file_lock(Path(temp) / "w.lock"):
+                    pass
+            self.assertEqual(calls["lock"], 3, "应该重试到第三次才成功")
+            self.assertEqual(calls["unlock"], 1, "退出时必须解锁")
+        finally:
+            pc.IS_WINDOWS = original_flag
+            if original_module is None:
+                sys.modules.pop("msvcrt", None)
+            else:
+                sys.modules["msvcrt"] = original_module
+
     def test_credential_helper_is_portable(self):
         """凭据助手在 Windows 上要用解释器去跑 .py，不能直接当可执行文件。"""
         from codex_switcher import platform_compat as pc, secrets
