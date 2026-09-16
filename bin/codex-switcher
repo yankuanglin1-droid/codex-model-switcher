@@ -1,0 +1,19 @@
+#!/bin/sh
+# Codex Model Switcher 启动器：优先用安装时的 Python，其次用 PATH 里的 python3。
+set -e
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+if [ -n "${CODEX_SWITCHER_PYTHON:-}" ] && [ -x "${CODEX_SWITCHER_PYTHON}" ]; then
+  PYTHON="${CODEX_SWITCHER_PYTHON}"
+elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+  PYTHON="$REPO_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON=$(command -v python3)
+else
+  echo "没有找到 python3，请先安装 Python 3.11 或更高版本。" >&2
+  exit 1
+fi
+
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON" -m codex_switcher "$@"

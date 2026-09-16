@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex 多模型切换器</title>
+<link rel="stylesheet" href="/static/style.css" id="style-link">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <h1>Codex 多模型切换器</h1>
+      <p class="sub" id="current-status">正在读取状态…</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="badge" id="secret-backend">密钥存储：—</span>
+    <button class="btn ghost" id="btn-refresh-all">全部刷新模型</button>
+    <button class="btn ghost" id="btn-restore">恢复官方 OpenAI</button>
+    <button class="btn primary" id="btn-manual">手动添加平台</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="sidebar">
+    <h2 class="panel-title">已接入平台</h2>
+    <div id="provider-list" class="provider-list"></div>
+    <p class="hint" id="empty-hint" hidden>
+      还没有接入任何平台。点右上角「手动添加平台」，或从预设里选一个开始。
+    </p>
+  </aside>
+
+  <section class="detail" id="detail">
+    <div class="placeholder">从左边选一个平台，查看它的模型与额度。</div>
+  </section>
+</main>
+
+<div class="modal" id="manual-modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>手动添加平台</h2>
+      <button class="btn icon" id="btn-close-manual">✕</button>
+    </div>
+    <p class="hint">
+      只需要平台名称和 Base URL 就能接入。API Key 会存进系统钥匙串，不会写进 Codex 配置文件。
+      本机模型（Ollama / LM Studio）可以不填 Key。
+    </p>
+    <div class="form-grid">
+      <label>
+        <span>从预设开始（可选）</span>
+        <select id="f-preset"><option value="">— 自己填写 —</option></select>
+      </label>
+      <label>
+        <span>平台名称 *</span>
+        <input id="f-label" placeholder="例如 我的中转站">
+      </label>
+      <label>
+        <span>Base URL *</span>
+        <input id="f-base-url" placeholder="https://api.example.com/v1">
+      </label>
+      <label>
+        <span>模型列表地址（留空自动推断）</span>
+        <input id="f-models-url" placeholder="https://api.example.com/v1/models">
+      </label>
+      <label>
+        <span>API Key（存进钥匙串）</span>
+        <input id="f-key" type="password" placeholder="sk-…">
+      </label>
+      <label>
+        <span>连接方式</span>
+        <select id="f-transport">
+          <option value="auto">自动探测（推荐）</option>
+          <option value="native">直连 Responses（平台自带）</option>
+          <option value="bridge">本地协议桥（只支持 Chat Completions 的平台）</option>
+        </select>
+      </label>
+      <label class="full">
+        <span>模型清单（每行一个；留空则自动拉取）</span>
+        <textarea id="f-models" rows="4" placeholder="model-a&#10;model-b"></textarea>
+      </label>
+      <label class="full">
+        <span>官网地址（选填，用于查额度）</span>
+        <input id="f-console-url" placeholder="https://example.com/billing">
+      </label>
+      <label>
+        <span>余额接口（选填）</span>
+        <input id="f-balance-url" placeholder="https://api.example.com/balance">
+      </label>
+      <label>
+        <span>余额字段路径</span>
+        <input id="f-balance-path" placeholder="data.balance">
+      </label>
+      <label>
+        <span>币种</span>
+        <input id="f-balance-currency" placeholder="CNY">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="f-requires-key" checked>
+        <span>这个平台需要 API Key</span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <span class="form-message" id="form-message"></span>
+      <button class="btn primary" id="btn-save-manual">保存并拉取模型</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
