@@ -16,6 +16,7 @@ const api = (path, body) => {
 
 let STATE = { providers: [], presets: [], current: {} };
 let SELECTED = null;
+let QUERY = '';
 const BALANCE_TRIED = new Set();
 
 const $ = (id) => document.getElementById(id);
@@ -94,20 +95,31 @@ function renderUpdate(info) {
 function renderProviders() {
   const list = $('provider-list');
   list.innerHTML = '';
-  $('empty-hint').hidden = STATE.providers.length > 0;
-  for (const provider of STATE.providers) {
+  const needle = QUERY.trim().toLowerCase();
+  const visible = STATE.providers.filter((provider) => {
+    if (!needle) return true;
+    const haystack = [provider.id, provider.label, ...(provider.models || [])].join(' ').toLowerCase();
+    return haystack.includes(needle);
+  });
+  $('empty-hint').hidden = visible.length > 0;
+  for (const provider of visible) {
     const card = el('div', 'provider-card' + (provider.id === SELECTED ? ' active' : ''));
+    card.appendChild(el('div', 'provider-avatar', (provider.label || provider.id).slice(0, 1).toUpperCase()));
+    const body = el('div', 'provider-body');
     const row = el('div', 'row');
     row.appendChild(el('span', 'name', provider.label || provider.id));
     row.appendChild(el('span', 'dot' + (provider.is_current ? ' on' : '')));
-    card.appendChild(row);
-    card.appendChild(el('div', 'meta', `${provider.models.length} 个模型 · 密钥 ${provider.has_key ? provider.key_hint : '未配置'}`));
+    body.appendChild(row);
+    body.appendChild(el('div', 'meta',
+      `${provider.models.length} 个模型 · ${provider.has_key ? provider.key_hint : '未配置密钥'}`));
+    card.appendChild(body);
     card.onclick = () => { SELECTED = provider.id; renderProviders(); renderDetail(provider); };
     list.appendChild(card);
   }
 }
 
 function renderDetail(provider) {
+  const models = visibleModels(provider);
   const detail = $('detail');
   detail.innerHTML = '';
 
@@ -141,7 +153,10 @@ function renderDetail(provider) {
   const modelCard = el('div', 'card');
   modelCard.appendChild(el('div', 'label', '可用模型'));
   modelCard.appendChild(el('div', 'value', String(provider.models.length)));
-  modelCard.appendChild(el('div', 'note', provider.models_synced_at ? `更新于 ${provider.models_synced_at.replace('T', ' ')}` : '尚未同步'));
+  // 老记录没有同步时间，但模型是实打实在的，不要显示成“尚未同步”那样的异常状态
+  modelCard.appendChild(el('div', 'note', provider.models_synced_at
+    ? `更新于 ${provider.models_synced_at.replace('T', ' ')}`
+    : '已从平台导入，可随时点「刷新模型」更新'));
   cards.appendChild(modelCard);
 
   if (provider.transport === 'native') {
@@ -225,8 +240,10 @@ function renderDetail(provider) {
   const grid = el('div', 'models');
   if (!provider.models.length) {
     grid.appendChild(el('div', 'hint', '这个平台还没有模型。点「刷新模型」，或用「手动加模型」。'));
+  } else if (!models.length) {
+    grid.appendChild(el('div', 'hint', `没有匹配「${QUERY}」的模型。`));
   }
-  for (const model of provider.models) {
+  for (const model of models) {
     const item = el('div', 'model' + (provider.is_current && provider.default_model === model ? ' current' : ''));
     const left = el('div');
     left.appendChild(el('span', 'id', model));
@@ -267,6 +284,14 @@ function transportLabel(transport) {
   if (transport === 'native') return '原生 Responses 直连';
   if (transport === 'bridge') return '本地协议桥';
   return '自动探测';
+}
+
+function visibleModels(provider) {
+  const needle = QUERY.trim().toLowerCase();
+  if (!needle) return provider.models;
+  const providerMatches = [provider.id, provider.label || ''].join(' ').toLowerCase().includes(needle);
+  if (providerMatches) return provider.models;
+  return provider.models.filter((model) => model.toLowerCase().includes(needle));
 }
 
 async function setQuota(provider) {
@@ -445,6 +470,14 @@ async function saveManual() {
 /* ---------------------------------------------------------------------- 绑定 */
 
 $('btn-manual').onclick = openManual;
+$('platform-search').addEventListener('input', (event) => {
+  QUERY = event.target.value;
+  renderProviders();
+  if (SELECTED) {
+    const item = STATE.providers.find((p) => p.id === SELECTED);
+    if (item) renderDetail(item);
+  }
+});
 $('btn-close-manual').onclick = closeManual;
 $('btn-save-manual').onclick = saveManual;
 $('btn-refresh-all').onclick = async (event) => {

@@ -8,6 +8,14 @@ STATE_DIR="${CODEX_HOME:-$HOME/.codex}/model-switcher"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/launch.log"
 
+# 原生窗口应用会用 --no-browser 调我们：界面装在它自己的窗口里，不需要再开浏览器
+NO_BROWSER=0
+case "${1:-}" in
+  --no-browser) NO_BROWSER=1 ;;
+esac
+APP_ARGS=""
+[ "$NO_BROWSER" = "1" ] && APP_ARGS="--no-open"
+
 fail() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$LOG"
   osascript -e "display alert \"Codex 多模型切换器\" message \"$1\" as critical" >/dev/null 2>&1
@@ -60,14 +68,14 @@ fi
 
 # 2) 图形界面已经在跑：app 命令会自己打开浏览器，然后退出
 if "$PYTHON" -c 'from codex_switcher.webui import server; raise SystemExit(0 if server.existing_url() else 1)' >/dev/null 2>&1; then
-  "$PYTHON" -m codex_switcher app >>"$STATE_DIR/gui.log" 2>&1
+  "$PYTHON" -m codex_switcher app $APP_ARGS >>"$STATE_DIR/gui.log" 2>&1
   exit 0
 fi
 
 # 3) 否则后台起一个新的。
 #    必须后台运行：.app 里的 `do shell script` 会等前台命令结束，
 #    如果这里前台跑服务，双击图标会一直卡住。
-nohup "$PYTHON" -m codex_switcher app >>"$STATE_DIR/gui.log" 2>&1 &
+nohup "$PYTHON" -m codex_switcher app $APP_ARGS >>"$STATE_DIR/gui.log" 2>&1 &
 
 # 等它把端口写出来（最多 6 秒），好让启动失败能被看见
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do

@@ -340,7 +340,11 @@ class EngineTests(TempCodexHome):
     def test_slugify(self):
         from codex_switcher import engine
         self.assertEqual(engine.slugify("My Provider!"), "my-provider")
-        self.assertEqual(engine.slugify("中文平台"), "provider")
+        # 全中文名字用短哈希，避免所有中文平台都叫同一个 id
+        chinese = engine.slugify("中文平台")
+        self.assertTrue(chinese.startswith("platform-"), chinese)
+        self.assertNotEqual(engine.slugify("中文平台"), engine.slugify("另一个平台"))
+        self.assertEqual(engine.slugify("中文平台"), engine.slugify("中文平台"))
         self.assertTrue(engine.slugify("1abc").startswith("p-"))
 
     def test_switch_writes_config_and_catalog(self):

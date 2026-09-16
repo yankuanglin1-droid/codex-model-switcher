@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -29,11 +30,13 @@ DEFAULT_OFFICIAL_MODEL = "gpt-5-codex"
 
 def slugify(value: str) -> str:
     """把用户填的平台名转成安全的 provider id。"""
-    text = (value or "").strip().lower()
+    original = (value or "").strip()
+    text = original.lower()
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     text = re.sub(r"-{2,}", "-", text)
     if not text:
-        text = "provider"
+        # 全中文之类的名字：用短哈希保证唯一且稳定，比一律叫 provider 好
+        text = "platform-" + hashlib.sha1(original.encode("utf-8")).hexdigest()[:6]
     if not text[0].isalpha():
         text = "p-" + text
     return text[:40]

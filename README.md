@@ -85,7 +85,25 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 
 ## 安装
 
-### 一键安装（推荐）
+有两条路，任选一条。
+
+### 方式 A：直接装 App（不用 clone 仓库）
+
+1. 到 [Releases](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
+   下载 `Codex-Model-Switcher-macOS.zip`，解压得到 `Codex 多模型切换器.app`
+2. 把它拖进「应用程序」文件夹
+3. **第一次打开要右键 →「打开」**（App 没有 Apple 开发者签名，直接双击会被
+   Gatekeeper 拦下；点一次「打开」之后就不再问了）
+4. 窗口里点「手动添加平台」，填平台名、Base URL、API Key 即可
+
+App **自带运行时**，不需要另外 clone 仓库。唯一前置条件是本机有 Python 3.11+，
+没有的话 App 会弹窗提示装一个：
+
+```bash
+brew install python@3.12
+```
+
+### 方式 B：从源码安装（推荐给要改代码的人）
 
 ```bash
 git clone https://github.com/yankuanglin1-droid/codex-model-switcher.git
@@ -94,9 +112,14 @@ bash install.sh
 ```
 
 脚本会找一个 Python 3.11+（找不到会提示 `brew install python@3.12`），
-把 `codex-switcher` 命令装到 `~/.local/bin`，然后完成初始化。
+把运行时代码装到 `~/.local/share/codex-switcher`，把 `codex-switcher` 命令装到
+`~/.local/bin`，然后完成初始化。想要图形界面再执行：
 
-### 手动安装
+```bash
+bash packaging/macos/build_app.sh      # 编译原生窗口 App 到 ~/Applications
+```
+
+### 方式 C：完全手动
 
 ```bash
 # 1. 确认 Python 版本（需要 3.11+；3.9/3.10 需要额外装 tomli）
@@ -174,13 +197,25 @@ bash packaging/macos/build_app.sh             # 生成到 ~/Applications
 open ~/Applications/"Codex 多模型切换器.app"   # 或直接在访达里双击
 ```
 
-双击后它会后台拉起协议桥和图形界面，然后自动打开浏览器，**不弹终端窗口**。
+双击得到的是一个**原生窗口应用**（Swift + WKWebView）：自己的窗口、自己的 Dock
+图标、自己的菜单栏，界面装在里面，**不进浏览器、不弹终端窗口**。
+
+菜单栏里有：
+
+- 视图 → 重新载入（⌘R）、在浏览器中打开（⌘B）
+- 服务 → 重启后台服务、停止后台服务
+
+编译需要 Xcode 命令行工具（`xcode-select --install`）。没有 `swiftc` 时会自动退回
+“壳 + 浏览器窗口”的方案，功能一样。
 
 想停掉后台服务：
 
 ```bash
 codex-switcher stop
 ```
+
+退出 App 本身**不会**停掉后台服务——协议桥还要给 Codex 转发请求。要停就用上面的命令，
+或者在「服务」菜单里点「停止后台服务」。
 
 > ⚠️ 应用必须指向**非受保护目录**里的运行时。macOS 会保护「文稿 / 桌面 / 下载」，
 > 从访达启动的 App 无权执行放在 `~/Documents` 里的脚本，报错是

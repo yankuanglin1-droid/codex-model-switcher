@@ -6,7 +6,7 @@
 3. 拿不到的数据就如实说“拿不到”，绝不编造余额或额度。
 """
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 PROJECT_URL = "https://github.com/yankuanglin1-droid/codex-model-switcher"
 
 __all__ = ["__version__", "PROJECT_URL"]

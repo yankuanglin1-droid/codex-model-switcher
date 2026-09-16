@@ -9,13 +9,17 @@
 <body>
 <header class="topbar">
   <div class="brand">
-    <span class="logo">◈</span>
+    <div class="brand-mark">◈</div>
     <div>
       <h1>Codex 多模型切换器</h1>
       <p class="sub" id="current-status">正在读取状态…</p>
     </div>
   </div>
   <div class="topbar-actions">
+    <label class="search">
+      <span>⌕</span>
+      <input id="platform-search" type="search" placeholder="搜索平台或模型…" autocomplete="off">
+    </label>
     <span class="badge" id="secret-backend">密钥存储：—</span>
     <button class="btn ghost" id="btn-refresh-all">全部刷新模型</button>
     <button class="btn ghost" id="btn-restore">恢复官方 OpenAI</button>
