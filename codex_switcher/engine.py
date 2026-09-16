@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +16,7 @@ from . import balance as balance_module
 from . import bridge as bridge_module
 from . import catalog as catalog_module
 from . import configfile, paths, registry, secrets, state as state_module
+from . import platform_compat
 from . import threads as threads_module
 from .discovery import DiscoveryError, fetch_models, probe_responses, rank_models
 
@@ -330,17 +330,14 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
 
     auth = None
     if record.get("requires_key", True):
-        helper = secrets.install_helper()
-        auth = {"command": str(helper), "args": [provider_id], "timeout_ms": 10000,
+        command, arguments = secrets.helper_command(provider_id)
+        auth = {"command": command, "args": arguments, "timeout_ms": 10000,
                 "refresh_interval_ms": 300000}
 
     settings = provider_settings(record, chosen, provider_id)
 
     paths.ensure_dir(paths.state_dir())
-    lock_path = paths.lock_file()
-    with lock_path.open("a+") as lock:
-        os.chmod(lock.name, 0o600)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with platform_compat.file_lock(paths.lock_file()):
         if not config.exists():
             raise SwitchError("找不到 Codex 配置文件：%s" % config)
         text = config.read_text()

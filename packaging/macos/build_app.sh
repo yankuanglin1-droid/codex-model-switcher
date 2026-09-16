@@ -45,18 +45,37 @@ mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 
 NATIVE=0
 if command -v xcrun >/dev/null 2>&1 && xcrun --find swiftc >/dev/null 2>&1 && [ -f "$SWIFT_SOURCE" ]; then
-  ARCH=$(uname -m)
-  echo "正在编译原生窗口应用（Swift + WKWebView）…"
-  if MACOSX_DEPLOYMENT_TARGET=12.0 xcrun swiftc -O \
-      -target "${ARCH}-apple-macos12.0" \
-      -framework Cocoa -framework WebKit \
-      -o "$APP_PATH/Contents/MacOS/CodexSwitcherApp" \
-      "$SWIFT_SOURCE" 2>/tmp/codex-switcher-swift-build.log; then
-    NATIVE=1
+  echo "正在编译原生窗口应用（Swift + WKWebView，macOS 11+ 通用二进制）…"
+  BUILD_DIR=$(mktemp -d)
+  # 分别编 arm64 与 x86_64，再合成通用二进制 —— 这样一台 .app 通吃
+  # Apple Silicon 和 Intel 的 Mac。交叉编译失败就退回本机架构。
+  for arch in arm64 x86_64; do
+    if MACOSX_DEPLOYMENT_TARGET=11.0 xcrun swiftc -O -target "${arch}-apple-macos11.0" \
+        -framework Cocoa -framework WebKit \
+        -o "$BUILD_DIR/$arch" "$SWIFT_SOURCE" 2>"$BUILD_DIR/$arch.log"; then
+      :
+    else
+      echo "  $arch 切片编译失败（换架构时可能缺 SDK），稍后退回本机架构"
+      rm -f "$BUILD_DIR/$arch"
+    fi
+  done
+  if [ -f "$BUILD_DIR/arm64" ] && [ -f "$BUILD_DIR/x86_64" ]; then
+    lipo -create -output "$APP_PATH/Contents/MacOS/CodexSwitcherApp" \
+      "$BUILD_DIR/arm64" "$BUILD_DIR/x86_64" && NATIVE=1
+    echo "  已合成通用二进制：$(lipo -archs "$APP_PATH/Contents/MacOS/CodexSwitcherApp" 2>/dev/null)"
   else
-    echo "编译失败，退回浏览器方案。日志："
-    tail -8 /tmp/codex-switcher-swift-build.log || true
+    ARCH=$(uname -m)
+    if MACOSX_DEPLOYMENT_TARGET=11.0 xcrun swiftc -O -target "${ARCH}-apple-macos11.0" \
+        -framework Cocoa -framework WebKit \
+        -o "$APP_PATH/Contents/MacOS/CodexSwitcherApp" "$SWIFT_SOURCE" 2>"$BUILD_DIR/fallback.log"; then
+      NATIVE=1
+      echo "  仅本机架构：$ARCH"
+    else
+      echo "编译失败，退回浏览器方案。日志："
+      tail -8 "$BUILD_DIR"/fallback.log 2>/dev/null || true
+    fi
   fi
+  rm -rf "$BUILD_DIR"
 fi
 
 if [ "$NATIVE" -eq 1 ]; then
@@ -95,7 +114,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 	<key>CFBundleVersion</key>
 	<string>$TOOL_VERSION</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
+	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>

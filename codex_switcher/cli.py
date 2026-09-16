@@ -196,12 +196,8 @@ def cmd_bridge(args) -> int:
 
 def _pid_is_ours(pid: int) -> bool:
     """确认这个进程号确实是本工具起的服务，避免误杀复用了同一 PID 的其它程序。"""
-    try:
-        result = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
-                                capture_output=True, text=True, timeout=10)
-    except Exception:  # noqa: BLE001
-        return False
-    return "codex_switcher" in (result.stdout or "")
+    from . import platform_compat
+    return platform_compat.is_our_process(pid)
 
 
 def cmd_stop(args) -> int:

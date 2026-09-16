@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import paths
+from . import platform_compat
 
 SCHEMA_VERSION = 3
 
@@ -40,7 +41,7 @@ def save(state: Dict) -> None:
     paths.ensure_dir(target.parent)
     fd, temp = tempfile.mkstemp(prefix="." + target.name + ".", dir=str(target.parent))
     try:
-        os.fchmod(fd, 0o600)
+        platform_compat.chmod_private_fd(fd, 0o600)
         with os.fdopen(fd, "w") as stream:
             json.dump(state, stream, ensure_ascii=False, indent=2)
             stream.write("\n")

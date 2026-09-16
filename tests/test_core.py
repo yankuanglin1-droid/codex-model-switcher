@@ -442,8 +442,9 @@ class EngineTests(TempCodexHome):
         self.assertEqual(resolved, "https://open.bigmodel.cn/api/v1")
 
         engine.switch_to("zhipu-demo", "glm-5.3")
-        block = configfile.parse(config.read_text())["model_providers"]["zhipu-demo"]
-        self.assertEqual(block["base_url"], "https://open.bigmodel.cn/api/v1")
+        # 用 provider_block_value 断言，这样没有 tomllib 的 Python 3.9 也能跑
+        written = configfile.provider_block_value(config.read_text(), "zhipu-demo", "base_url")
+        self.assertEqual(written, "https://open.bigmodel.cn/api/v1")
 
     def test_switch_refuses_when_base_url_cannot_be_found(self):
         from codex_switcher import engine, state as state_module
@@ -859,6 +860,61 @@ class SafetyTests(unittest.TestCase):
     def test_session_home_is_set_by_module(self):
         self.assertIsNotNone(_SESSION_HOME)
         self.assertTrue(str(os.environ.get("CODEX_HOME", "")).startswith(_SESSION_HOME))
+
+
+class PlatformTests(unittest.TestCase):
+    """跨平台回归：Windows / 低版本 macOS 上也要能跑。"""
+
+    def test_modules_import_without_unix_only_modules(self):
+        """模拟 Windows：把 fcntl / termios / pwd / grp / resource / msvcrt 全屏蔽，
+        所有模块仍然必须能导入 —— 早期版本直接在 engine.py 里 import fcntl，
+        Windows 上连启动都起不来。
+
+        用子进程跑，避免污染已经导入的模块状态。
+        """
+        import subprocess
+        script = (
+            "import sys\n"
+            "for name in ['fcntl', 'termios', 'pwd', 'grp', 'resource', 'msvcrt']:\n"
+            "    sys.modules[name] = None\n"
+            "import importlib\n"
+            "for module in ['codex_switcher.engine', 'codex_switcher.cli', 'codex_switcher.bridge',\n"
+            "               'codex_switcher.threads', 'codex_switcher.secrets', 'codex_switcher.install',\n"
+            "               'codex_switcher.platform_compat', 'codex_switcher.webui.server']:\n"
+            "    importlib.import_module(module)\n"
+            "print('ok')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, (result.stderr or "")[-600:])
+        self.assertIn("ok", result.stdout)
+
+    def test_platform_helpers_exist(self):
+        from codex_switcher import platform_compat as pc
+        self.assertTrue(pc.python_ok((3, 9, 0)))
+        self.assertTrue(pc.python_ok((3, 12, 0)))
+        self.assertFalse(pc.python_ok((3, 8, 0)))
+        self.assertTrue(str(pc.runtime_dir()))
+        # 锁在本平台可用
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            with pc.file_lock(Path(temp) / "x.lock"):
+                pass
+
+    def test_credential_helper_is_portable(self):
+        """凭据助手在 Windows 上要用解释器去跑 .py，不能直接当可执行文件。"""
+        from codex_switcher import platform_compat as pc, secrets
+        command, arguments = secrets.helper_command("demo")
+        if pc.IS_WINDOWS:
+            self.assertTrue(command.lower().endswith(("python.exe", "pythonw.exe", "python")))
+        else:
+            self.assertEqual(command, str(secrets.install_helper()))
+        self.assertIn("demo", arguments)
+        source = secrets.helper_source()
+        self.assertIn("sys.path.insert", source)
+        compile(source, "helper", "exec")  # 生成的脚本必须语法正确
 
 
 if __name__ == "__main__":

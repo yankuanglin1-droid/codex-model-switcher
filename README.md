@@ -54,6 +54,7 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 - **协议桥**：内置 Responses ⇄ Chat Completions 转换，让只支持 Chat 的平台也能用。
 - **环境自检**：`codex-switcher doctor` 一次检查 Python、钥匙串、配置、模型、协议桥。
 - **零依赖**：纯标准库，不需要 pip 安装任何东西。
+- **跨平台**：macOS（11+，两种芯片通用）、Windows 10/11、Linux 都能用。
 
 ---
 
@@ -91,6 +92,25 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 
 有两条路，任选一条。
 
+### 先看：支持哪些系统
+
+| 系统 | 界面形态 | 要求 |
+| --- | --- | --- |
+| **macOS 11 及以上**（Apple Silicon / Intel 都行） | 原生窗口 App（双击即用）+ 命令行 | Python 3.9+（推荐 3.11+） |
+| **Windows 10 / 11** | 命令行 + 浏览器界面 | Python 3.9+ |
+| **Linux** | 命令行 + 浏览器界面 | Python 3.9+ |
+
+macOS 的安装包是 **arm64 + x86_64 通用二进制**，一台 .app 通吃两种芯片。
+Python 3.9 也能跑（配置文件校验走降级路径）；3.11+ 更稳，因为能用内置的
+`tomllib` 做完整校验。
+
+自检命令：
+
+```bash
+python3 tools/check_portability.py    # 扫一遍有没有平台专属写法
+python3 -m unittest discover -s tests # 62 项测试
+```
+
 ### 方式 A：直接装 App（不用 clone 仓库）
 
 1. 到 [Releases](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
@@ -100,12 +120,43 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
    Gatekeeper 拦下；点一次「打开」之后就不再问了）
 4. 窗口里点「手动添加平台」，填平台名、Base URL、API Key 即可
 
-App **自带运行时**，不需要另外 clone 仓库。唯一前置条件是本机有 Python 3.11+，
+App **自带运行时**，不需要另外 clone 仓库。唯一前置条件是本机有 Python 3.9+，
 没有的话 App 会弹窗提示装一个：
 
 ```bash
 brew install python@3.12
 ```
+
+### 方式 A-2：Windows
+
+用管理员或普通 PowerShell 都行：
+
+```powershell
+git clone https://github.com/yankuanglin1-droid/codex-model-switcher.git
+cd codex-model-switcher
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+脚本会找到 Python、把运行时复制到 `%LOCALAPPDATA%\codex-switcher`、生成启动器
+并加进用户 PATH。**新开一个终端**之后：
+
+```powershell
+codex-switcher add --preset deepseek --key-stdin
+codex-switcher use deepseek
+```
+
+图形界面双击这个文件即可（不会弹黑框）：
+
+```
+%LOCALAPPDATA%\codex-switcher\bin\codex-switcher-gui.vbs
+```
+
+Windows 上与 macOS 的差异：
+
+- 界面开在浏览器里（原生窗口用的是 macOS 的 WKWebView，Windows 没有），
+  功能完全一样：加平台、切模型、查余额、一键修复任务
+- 密钥用 **Windows DPAPI 加密**后存在本地，只有当前用户能解开
+- 协议桥同样是本地 8787 端口，只监听 127.0.0.1
 
 ### 方式 B：从源码安装（推荐给要改代码的人）
 

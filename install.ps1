@@ -1,0 +1,92 @@
+# codex（ChatGPT App）多平台模型切换 —— Windows 安装脚本
+#
+#   powershell -ExecutionPolicy Bypass -File install.ps1
+#
+# 做四件事：找 Python、把运行时代码复制到 %LOCALAPPDATA%\codex-switcher、
+# 生成 codex-switcher.cmd 启动器、把它加进用户 PATH。
+
+$ErrorActionPreference = "Stop"
+
+$RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AppHome  = if ($env:CODEX_SWITCHER_HOME) { $env:CODEX_SWITCHER_HOME }
+            else { Join-Path $env:LOCALAPPDATA "codex-switcher" }
+$BinDir   = Join-Path $AppHome "bin"
+
+function Write-Step($text) { Write-Host $text }
+
+function Find-Python {
+    $candidates = @()
+    foreach ($name in @("py", "python3", "python")) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { $candidates += $cmd.Source }
+    }
+    foreach ($exe in $candidates) {
+        try {
+            $probe = & $exe -c "import sys; print(1 if sys.version_info >= (3, 9) else 0)" 2>$null
+            if ($probe -eq "1") { return $exe }
+        } catch { }
+    }
+    return $null
+}
+
+$Python = Find-Python
+if (-not $Python) {
+    Write-Host "没有找到 Python 3.9 或更高版本。" -ForegroundColor Yellow
+    Write-Host "请先安装：https://www.python.org/downloads/windows/  （安装时勾选 Add python.exe to PATH）"
+    exit 1
+}
+$version = & $Python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+Write-Step "使用 Python：$Python（$version）"
+
+if (Test-Path $AppHome) {
+    Remove-Item -Recurse -Force (Join-Path $AppHome "codex_switcher") -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force (Join-Path $AppHome "packaging") -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Force -Path $AppHome | Out-Null
+New-Item -ItemType Directory -Force -Path $BinDir  | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $AppHome "packaging\macos") | Out-Null
+
+Copy-Item -Recurse -Force (Join-Path $RepoRoot "codex_switcher") $AppHome
+Copy-Item -Force (Join-Path $RepoRoot "packaging\macos\launch.sh") (Join-Path $AppHome "packaging\macos\launch.sh")
+Write-Step "已安装运行时：$AppHome"
+
+# 启动器：.cmd 给命令行用，.vbs 给「双击不弹黑框」用
+$CmdPath = Join-Path $BinDir "codex-switcher.cmd"
+@"
+@echo off
+setlocal
+set "PYTHONPATH=$AppHome;%PYTHONPATH%"
+"$Python" -m codex_switcher %*
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Encoding ASCII $CmdPath
+
+$VbsPath = Join-Path $BinDir "codex-switcher-gui.vbs"
+@"
+Set shell = CreateObject("WScript.Shell")
+shell.Run "cmd /c """"$CmdPath"""" app", 0, False
+"@ | Set-Content -Encoding ASCII $VbsPath
+
+Set-Content -Encoding ASCII (Join-Path $AppHome "python-path.txt") $Python
+Write-Step "已生成启动器：$CmdPath"
+Write-Step "图形界面快捷方式：$VbsPath（双击不会弹黑框）"
+
+# 加进用户 PATH（只影响当前用户）
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$BinDir*") {
+    $newPath = if ([string]::IsNullOrEmpty($userPath)) { $BinDir } else { "$BinDir;$userPath" }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Step "已把 $BinDir 加进用户 PATH（新开一个终端生效）"
+}
+
+Write-Step ""
+Write-Step "初始化……"
+$env:PYTHONPATH = $AppHome
+& $Python -m codex_switcher init
+
+Write-Step ""
+Write-Step "完成。接下来："
+Write-Step "  1) 新开一个 PowerShell / CMD，运行："
+Write-Step "       codex-switcher add --preset deepseek --key-stdin"
+Write-Step "  2) 切换：codex-switcher use deepseek"
+Write-Step "  3) 图形界面：双击 $VbsPath"
+Write-Step "  4) 完全退出并重新打开 ChatGPT App / Codex"

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import paths
+from . import platform_compat
 
 try:  # Python 3.11+
     import tomllib
@@ -309,17 +310,13 @@ def atomic_write(path: Path, text: str, expected: str) -> None:
         raise ConfigError("配置文件在本次操作期间被其他程序修改，请重新运行")
     fd, temp = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
     try:
-        os.fchmod(fd, 0o600)
+        platform_compat.chmod_private_fd(fd, 0o600)
         with os.fdopen(fd, "w") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp, path)
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        platform_compat.fsync_directory(path.parent)
     finally:
         if os.path.exists(temp):
             os.unlink(temp)

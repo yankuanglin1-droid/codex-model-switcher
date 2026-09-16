@@ -56,6 +56,31 @@ codex-switcher status        # 最后一行也会带版本状态
 
 ---
 
+## Windows 相关
+
+**装完命令找不到？**
+`install.ps1` 把启动器目录加进了「用户 PATH」，但已经开着的终端不会自动刷新。
+**新开一个** PowerShell / CMD 再试。
+
+**图形界面怎么开？**
+双击 `%LOCALAPPDATA%\codex-switcher\bin\codex-switcher-gui.vbs`，
+它会后台拉起服务并打开浏览器（不弹黑框）。也可以直接跑 `codex-switcher app`。
+
+**密钥存哪了？**
+`%LOCALAPPDATA%\codex-switcher\credentials\<平台>.key`，内容是 **Windows DPAPI
+加密**过的，只有当前 Windows 用户能解开。换用户或换电脑都读不出来。
+
+**提示 `No module named codex_switcher`？**
+说明启动器里的 `PYTHONPATH` 没生效。检查
+`%LOCALAPPDATA%\codex-switcher\bin\codex-switcher.cmd` 里的路径，重新跑一次
+`install.ps1` 也能修好。
+
+**界面里点按钮没反应？**
+浏览器可能拦截了弹窗（`confirm` / `prompt`）。在地址栏右侧允许本站弹窗即可。
+原生窗口的 macOS App 不存在这个问题。
+
+---
+
 ## 切换后模型列表没有变化
 
 **症状**：切到 DeepSeek 了，但 Codex 里还是原来那批模型。

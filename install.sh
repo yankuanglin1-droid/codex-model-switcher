@@ -27,7 +27,8 @@ say() { printf '%s\n' "$*"; }
 find_python() {
   for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
-      if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+      # 3.9 也能跑：没有内置 tomllib 时用逐行校验兜底
+      if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
         command -v "$candidate"
         return 0
       fi
@@ -38,15 +39,18 @@ find_python() {
 
 PYTHON=$(find_python || true)
 if [ -z "$PYTHON" ]; then
-  say "需要 Python 3.11 或更高版本。"
+  say "需要 Python 3.9 或更高版本（推荐 3.11+）。"
   if command -v brew >/dev/null 2>&1; then
     say "检测到 Homebrew，可以运行：brew install python@3.12"
   else
-    say "请先安装 Python 3.11+ 后重新运行本脚本。"
+    say "请先安装 Python 3.9+ 后重新运行本脚本。"
   fi
   exit 1
 fi
 say "使用 Python：$PYTHON"
+if ! "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  say "提示：这个 Python 低于 3.11，配置文件校验会走降级路径；升级到 3.11+ 更稳。"
+fi
 
 mkdir -p "$TARGET_DIR"
 

@@ -40,14 +40,14 @@ find_python() {
     /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 \
     /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
     /usr/local/bin/python3.11 /usr/local/bin/python3; do
-    if [ -x "$candidate" ] && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+    if [ -x "$candidate" ] && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
       printf '%s\n' "$candidate"; return 0
     fi
   done
   # 4) PATH 里找
   for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
-      if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+      if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
         command -v "$candidate"; return 0
       fi
     fi
@@ -55,7 +55,7 @@ find_python() {
   return 1
 }
 
-PYTHON=$(find_python) || fail "找不到 Python 3.11 或更高版本。请先执行 brew install python@3.12，然后重新打开本应用。"
+PYTHON=$(find_python) || fail "找不到 Python 3.9 或更高版本。请先执行 brew install python@3.12，然后重新打开本应用。"
 
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 printf '%s 使用解释器 %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PYTHON" >>"$LOG"
