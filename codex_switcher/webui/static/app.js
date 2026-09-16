@@ -1,4 +1,4 @@
-/* Codex 多模型切换器 —— 前端逻辑 */
+/* codex（ChatGPT App）多平台模型切换 —— 前端逻辑 */
 
 const TOKEN = new URLSearchParams(location.search).get('t') || '';
 const api = (path, body) => {

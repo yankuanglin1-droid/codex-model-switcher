@@ -1,6 +1,8 @@
 # codex（ChatGPT App）多平台模型切换
 
-**Codex (ChatGPT App) Multi-Platform Model Switcher**
+**Codex (ChatGPT App) Multi-Provider Model Switcher**
+
+**中文** · [English](README.en.md) · [让 AI 帮我装 →](INSTALL-WITH-AI.md)
 
 把 DeepSeek、MiniMax、智谱 GLM、Kimi、通义千问、硅基流动、OpenRouter、Groq… 接进
 ChatGPT App 里的 Codex，在输入框旁边的模型列表里直接选用，随时一键切回官方 OpenAI。
@@ -16,6 +18,9 @@ codex-switcher add --preset deepseek --key-stdin   # 接入一个平台
 codex-switcher use deepseek                        # 切换过去
 codex-switcher restore                             # 一键切回官方 OpenAI
 ```
+
+> 不想敲命令？把 [INSTALL-WITH-AI.md](INSTALL-WITH-AI.md) 里那段话复制给
+> Codex / Claude Code，它会自己问你要平台名和 Key，然后装好、配好、验证完。
 
 ---
 
@@ -125,7 +130,8 @@ python3 -m unittest discover -s tests # 64 项测试
 ### 方式 A：直接装 App（不用 clone 仓库）
 
 1. 到 [Releases](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
-   下载 `Codex-Model-Switcher-macOS.zip`，解压得到 `Codex 多模型切换器.app`
+   下载 `Codex-Model-Switcher-macOS-v…-full.zip`（推荐）或 `…-macOS-v….zip`，
+   解压得到 `codex（ChatGPT App）多平台模型切换.app`
 2. 把它拖进「应用程序」文件夹
 3. **第一次打开要右键 →「打开」**（App 没有 Apple 开发者签名，直接双击会被
    Gatekeeper 拦下；点一次「打开」之后就不再问了）
@@ -266,7 +272,7 @@ codex-switcher app
 
 ```bash
 bash packaging/macos/build_app.sh             # 生成到 ~/Applications
-open ~/Applications/"Codex 多模型切换器.app"   # 或直接在访达里双击
+open ~/Applications/"codex（ChatGPT App）多平台模型切换.app"   # 或直接在访达里双击
 ```
 
 双击得到的是一个**原生窗口应用**（Swift + WKWebView）：自己的窗口、自己的 Dock
@@ -310,33 +316,12 @@ codex-switcher bridge --uninstall-agent   # 不想要了就卸掉
 
 ## 让 AI 帮你配置
 
-把下面这段直接发给 Codex / Claude Code / 任意能执行命令的 AI，它会照着做完：
+两段现成的指令，复制给 **Codex / Claude Code / Cursor / 任何能执行命令的 AI** 就行：
 
-```text
-请帮我在本机配置 Codex 的第三方模型，按下面步骤做，不要跳步：
-
-1. 克隆并安装：
-   git clone https://github.com/yankuanglin1-droid/codex-model-switcher.git
-   cd codex-model-switcher && bash install.sh
-2. 运行 codex-switcher doctor，把结果贴给我；如果有问题先修好再继续。
-3. 问我这几个信息（缺一不可）：
-   - 平台名称（例如 DeepSeek / MiniMax / 我的中转站）
-   - Base URL（如果我不知道，你按平台名去官方文档查）
-   - API Key
-   - 是否需要指定模型（不指定就自动拉全部）
-4. 用我给的 Key 执行：
-   codex-switcher add --name "<平台名>" --base-url "<地址>" --key-stdin
-   （密钥通过标准输入传，不要写进任何文件，也不要回显给我）
-5. 执行 codex-switcher use <平台ID>，然后 codex-switcher doctor 复验。
-6. 如果 doctor 提示需要协议桥，执行 codex-switcher bridge --install-agent。
-7. 最后告诉我：
-   - 现在 Codex 用哪个平台哪个模型
-   - 我该怎么切回官方 OpenAI（给出确切命令）
-   - 切换后要完全退出并重新打开 Codex 才生效
-
-安全要求：不要把 API Key 写进 config.toml、聊天记录或任何文件；
-密钥只允许进系统钥匙串。
-```
+- **[INSTALL-WITH-AI.md](INSTALL-WITH-AI.md)** —— 中英双语，复制一整段，AI 会自己问你要
+  平台名和 Key，装好、配好、验证完，并告诉你按什么切换。
+- **[docs/ai-setup.md](docs/ai-setup.md)** —— 给 AI 看的详细执行手册：保留名禁忌、协议桥、
+  出问题按什么顺序收证据、什么才算「配置成功」。
 
 给 AI 的补充建议：
 

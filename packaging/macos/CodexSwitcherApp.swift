@@ -1,4 +1,4 @@
-// Codex 多模型切换器 —— 原生 macOS 窗口应用
+// codex（ChatGPT App）多平台模型切换 —— 原生 macOS 窗口应用
 //
 // 为什么不用浏览器：这样才是真正的 App —— 自己的窗口、自己的 Dock 图标、
 // 不占浏览器标签页，也不受浏览器扩展/隐私设置影响。
@@ -13,7 +13,7 @@ import Cocoa
 import WebKit
 import Darwin
 
-let appTitle = "Codex 多模型切换器"
+let appTitle = "codex（ChatGPT App）多平台模型切换"
 
 func homeDirectory() -> String {
     return ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()

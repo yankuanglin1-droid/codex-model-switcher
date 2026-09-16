@@ -612,7 +612,7 @@ def interactive() -> int:
     while True:
         status = engine.current_status()
         out("")
-        out("Codex 多模型切换器 v%s" % __version__)
+        out("codex（ChatGPT App）多平台模型切换 v%s" % __version__)
         out("当前：%s · %s   密钥存储：%s" % (
             status.get("model_provider", "?"), status.get("model") or "-", secrets.backend_label()))
         out("")

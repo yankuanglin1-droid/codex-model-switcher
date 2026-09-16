@@ -25,7 +25,7 @@ bash packaging/macos/build_app.sh
 之后仓库放在哪里都不影响使用。想确认 App 到底指向哪：
 
 ```bash
-cat ~/Applications/"Codex 多模型切换器.app"/Contents/MacOS/launcher | tail -1
+cat ~/Applications/"codex（ChatGPT App）多平台模型切换.app"/Contents/MacOS/launcher | tail -1
 cat ~/.codex/model-switcher/launch.log     # 启动日志，失败原因会写在这里
 ```
 

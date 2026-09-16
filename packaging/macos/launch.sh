@@ -18,7 +18,7 @@ APP_ARGS=""
 
 fail() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$LOG"
-  osascript -e "display alert \"Codex 多模型切换器\" message \"$1\" as critical" >/dev/null 2>&1
+  osascript -e "display alert \"codex（ChatGPT App）多平台模型切换\" message \"$1\" as critical" >/dev/null 2>&1
   exit 1
 }
 
