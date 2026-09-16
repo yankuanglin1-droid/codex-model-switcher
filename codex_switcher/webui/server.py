@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .. import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
-                secrets, state as state_module, update as update_module, usage)
+                secrets, state as state_module, threads as threads_module, update as update_module,
+                usage)
 from ..discovery import DiscoveryError
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -45,10 +46,15 @@ def _state_payload(include_balance: bool = False) -> Dict:
             item["usage"]["remaining_tokens_human"] = usage.human_tokens(
                 item["usage"].get("remaining_tokens", 0))
     current = engine.current_status()
+    try:
+        thread_info = threads_module.summarize()
+    except Exception:  # noqa: BLE001 - 任务统计失败不能拖垮主界面
+        thread_info = {"total": 0, "mismatch": 0, "items": []}
     return {
         "version": __version__,
         "project_url": PROJECT_URL,
         "update": update_module.read_cache(),
+        "threads": thread_info,
         "current": current,
         "providers": providers,
         "presets": registry.preset_list(),
@@ -90,6 +96,8 @@ class Handler(BaseHTTPRequestHandler):
                                 'href="/static/style.css?t=%s"' % self.token)
             text = text.replace('src="/static/app.js"',
                                 'src="/static/app.js?t=%s"' % self.token)
+            text = text.replace('src="/static/logo.svg"',
+                                'src="/static/logo.svg?t=%s"' % self.token)
             body = text.encode("utf-8")
         mime, _ = mimetypes.guess_type(str(path))
         self.send_response(200)
@@ -126,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(403, "invalid token")
                 return
             name = Path(path).name
-            if name not in {"app.js", "style.css"}:
+            if name not in {"app.js", "style.css", "logo.svg"}:
                 self.send_error(404, "not found")
                 return
             self._send_file(STATIC_DIR / name)
@@ -242,6 +250,17 @@ class Handler(BaseHTTPRequestHandler):
             result = update_module.check(force=True)
             result["description"] = update_module.describe(result)
             return result
+
+        if action == "threads":
+            return threads_module.summarize()
+
+        if action == "repair":
+            thread_id = (payload.get("thread") or "").strip() or None
+            report = threads_module.repair(thread_id=thread_id,
+                                           dry_run=bool(payload.get("dry_run")))
+            report["description"] = threads_module.describe(report)
+            report["state"] = _state_payload()
+            return report
 
         raise engine.SwitchError("未知操作：%s" % action)
 

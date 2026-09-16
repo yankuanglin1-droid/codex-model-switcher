@@ -52,6 +52,7 @@ function el(tag, className, text) {
 async function loadState(withBalance = false) {
   STATE = await api('state' + (withBalance ? '?balance=1' : ''));
   renderHeader();
+  renderThreadBanner();
   renderProviders();
   if (SELECTED) {
     const still = STATE.providers.find((p) => p.id === SELECTED);
@@ -68,13 +69,42 @@ async function loadState(withBalance = false) {
   }
 }
 
+function renderThreadBanner() {
+  const info = STATE.threads || {};
+  const banner = $('thread-banner');
+  if (!banner) return;
+  if (!info.mismatch) { banner.hidden = true; return; }
+  banner.hidden = false;
+  $('thread-banner-title').textContent =
+    `${info.mismatch} 个旧任务的服务商和模型对不上`;
+  $('thread-banner-detail').textContent =
+    `在这些任务里换模型会报 “model is not supported”。一键修复后即可正常继续，改动前会自动备份。`;
+}
+
+async function repairThreads(dryRun) {
+  try {
+    const result = await api('repair', dryRun ? { dry_run: true } : {});
+    if (dryRun) {
+      const lines = (result.items || []).map((item) =>
+        `${item.id}  ${item.from} → ${item.to}  （${item.model}）`);
+      alert(`预演：将修复 ${result.items.length} 个任务\n\n` + lines.join('\n'));
+      return;
+    }
+    if (result.state) STATE = result.state;
+    renderThreadBanner();
+    toast(result.fixed ? `已修复 ${result.fixed} 个任务，重启 Codex 后生效` : '没有需要修复的任务');
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 function renderHeader() {
   const current = STATE.current || {};
   $('current-status').textContent = current.model_provider
     ? `当前默认：${current.model_provider} · ${current.model || '未设置'}`
     : '还没有检测到 Codex 配置';
   $('secret-backend').textContent = `v${STATE.version || '?'} · 密钥存储：${STATE.secret_backend || '—'}`;
-  $('about-version').textContent = `Codex 多模型切换器 v${STATE.version || '?'}`;
+  $('about-version').textContent = `codex（ChatGPT App）多平台模型切换 v${STATE.version || '?'}`;
   if (STATE.project_url) $('about-repo').href = STATE.project_url;
   renderUpdate(STATE.update);
 }
@@ -470,6 +500,8 @@ async function saveManual() {
 /* ---------------------------------------------------------------------- 绑定 */
 
 $('btn-manual').onclick = openManual;
+$('btn-repair-threads').onclick = () => repairThreads(false);
+$('btn-thread-preview').onclick = () => repairThreads(true);
 $('platform-search').addEventListener('input', (event) => {
   QUERY = event.target.value;
   renderProviders();

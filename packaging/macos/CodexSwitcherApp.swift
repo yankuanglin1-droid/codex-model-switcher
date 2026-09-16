@@ -41,7 +41,7 @@ func runtimeDirectory() -> URL {
     return URL(fileURLWithPath: homeDirectory()).appendingPathComponent(".local/share/codex-switcher")
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusField: NSTextField!
@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         webView = WKWebView(frame: frame, configuration: configuration)
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         container.addSubview(webView)
 
         // 启动阶段的提示层（服务起来之后移除）
@@ -220,6 +221,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     // -------------------------------------------------------- WKNavigation
 
+    /// 站内的 127.0.0.1 留在窗口里，其它一律交给系统浏览器打开。
+    private func isInternal(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        if scheme == "file" || scheme == "about" { return true }
+        guard let host = url.host?.lowercased() else { return false }
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
+
+    /// 关键：WKWebView 默认不会处理 target="_blank" 的链接，
+    /// 页面上那些「打开官网 ↗」「GitHub 项目主页 ↗」会点了没反应。
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+        // 新窗口 / 新标签
+        if navigationAction.targetFrame == nil {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        // 点了外链（不是本机地址）也交给系统浏览器
+        if navigationAction.navigationType == .linkActivated && !isInternal(url) {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         overlay?.removeFromSuperview()
         overlay = nil
@@ -242,6 +285,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             return
         }
         showFailure("界面载入失败：\(error.localizedDescription)")
+    }
+
+    // ------------------------------------------------------------ JS 弹窗
+    //
+    // WKWebView 默认不实现 alert / confirm / prompt —— 不补上的话，
+    // 「删除平台」「恢复官方 OpenAI」「手动加模型」「设置套餐额度」这些
+    // 依赖弹窗的按钮会静默失效，看起来像没反应。
+
+    private func presentAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        alert.window.level = .floating
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal()
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = appTitle
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        _ = presentAlert(alert)
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = appTitle
+        alert.informativeText = message
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        completionHandler(presentAlert(alert) == .alertFirstButtonReturn)
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = appTitle
+        alert.informativeText = prompt
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
+        field.stringValue = defaultText ?? ""
+        field.placeholderString = ""
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        let response = presentAlert(alert)
+        completionHandler(response == .alertFirstButtonReturn ? field.stringValue : nil)
     }
 
     // ---------------------------------------------------------------- 菜单

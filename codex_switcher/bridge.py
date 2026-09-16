@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import http.client
+import os
 import threading
 import time
 import urllib.parse
@@ -25,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import state as state_module
+from . import threads as threads_module
 
 DEFAULT_PORT = 8787
 
@@ -554,6 +556,33 @@ def _iter_chat_stream(response) -> Iterator[Dict]:
 
 
 _SERVER: Optional[ThreadingHTTPServer] = None
+_WATCHER_STARTED = False
+
+# 多久巡检一次任务绑定。只改「模型和服务商对不上」的任务，其它一律不碰。
+WATCH_INTERVAL_SECONDS = 5.0
+
+
+def start_thread_watcher(interval: float = WATCH_INTERVAL_SECONDS) -> None:
+    """后台巡检：任务绑错服务商就修掉，避免「换个模型就报 not supported」。
+
+    设置环境变量 CODEX_SWITCHER_NO_WATCH=1 可以关掉。
+    """
+    global _WATCHER_STARTED
+    if _WATCHER_STARTED or os.environ.get("CODEX_SWITCHER_NO_WATCH") == "1":
+        return
+    _WATCHER_STARTED = True
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                report = threads_module.watch_once(min_interval=interval - 0.5)
+                if report:
+                    threads_module.log_watch(report)
+            except Exception:  # noqa: BLE001 - 巡检绝不能拖垮主服务
+                pass
+
+    threading.Thread(target=loop, daemon=True, name="thread-watcher").start()
 
 
 def start_in_thread(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
@@ -570,6 +599,7 @@ def run(port: int = DEFAULT_PORT) -> int:
     print("只监听本机；密钥不会经过磁盘，由 Codex 每次请求直接带过来。")
     server = ThreadingHTTPServer(("127.0.0.1", port), BridgeHandler)
     _write_pid(port)
+    start_thread_watcher()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

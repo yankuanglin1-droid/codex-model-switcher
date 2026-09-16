@@ -9,9 +9,9 @@
 <body>
 <header class="topbar">
   <div class="brand">
-    <div class="brand-mark">◈</div>
+    <img class="brand-mark" src="/static/logo.svg" alt="Codex" width="46" height="46">
     <div>
-      <h1>Codex 多模型切换器</h1>
+      <h1>codex（ChatGPT App）多平台模型切换</h1>
       <p class="sub" id="current-status">正在读取状态…</p>
     </div>
   </div>
@@ -26,6 +26,17 @@
     <button class="btn primary" id="btn-manual">手动添加平台</button>
   </div>
 </header>
+
+<div class="banner" id="thread-banner" hidden>
+  <div class="banner-text">
+    <strong id="thread-banner-title">检测到任务绑定异常</strong>
+    <span class="hint" id="thread-banner-detail"></span>
+  </div>
+  <div class="banner-actions">
+    <button class="btn ghost small" id="btn-thread-preview">查看明细</button>
+    <button class="btn primary" id="btn-repair-threads">一键修复</button>
+  </div>
+</div>
 
 <main class="layout">
   <aside class="sidebar">
@@ -42,7 +53,7 @@
 </main>
 
 <footer class="footer">
-  <span id="about-version" class="hint">Codex 多模型切换器</span>
+  <span id="about-version" class="hint">codex（ChatGPT App）多平台模型切换</span>
   <span id="about-update" class="hint"></span>
   <button class="btn ghost small" id="btn-check-update">检查更新</button>
   <a id="about-repo" href="https://github.com/yankuanglin1-droid/codex-model-switcher"

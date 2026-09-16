@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- 底板：白色为主，略带冷灰，模拟玻璃的厚度 -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.52" stop-color="#f4f6f8"/>
+      <stop offset="1" stop-color="#e3e7ec"/>
+    </linearGradient>
+    <!-- 顶部的镜面高光 -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <!-- 云朵玻璃体：中间实、边缘透 -->
+    <!-- 用不透明的浅灰白渐变：既能盖住内部的圆线，又保留玻璃的层次 -->
+    <radialGradient id="glass" cx="0.36" cy="0.26" r="0.95">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.58" stop-color="#fbfcfe"/>
+      <stop offset="1" stop-color="#e6ebf1"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0.55" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.45" stop-color="#ccd4de"/>
+      <stop offset="1" stop-color="#8f99a6"/>
+    </linearGradient>
+    <!-- 注意：描边用渐变必须给 userSpaceOnUse，否则下划线这种零高度的路径会画不出来 -->
+    <linearGradient id="glyph" gradientUnits="userSpaceOnUse" x1="-140" y1="-110" x2="150" y2="120">
+      <stop offset="0" stop-color="#2b2f36"/>
+      <stop offset="1" stop-color="#08090b"/>
+    </linearGradient>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#0b0f16" flood-opacity="0.16"/>
+    </filter>
+    <filter id="blobShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0b0f16" flood-opacity="0.08"/>
+    </filter>
+    <clipPath id="tileClip">
+      <rect x="0" y="0" width="1024" height="1024" rx="228"/>
+    </clipPath>
+  </defs>
+
+  <!-- 底板：白色玻璃方砖 -->
+  <g clip-path="url(#tileClip)">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#tile)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#sheen)"/>
+    <!-- 左上角的一束光，营造玻璃的高光 -->
+    <ellipse cx="250" cy="180" rx="470" ry="300" fill="#ffffff" opacity="0.55" transform="rotate(-24 250 180)"/>
+  </g>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="226" fill="none"
+        stroke="#ffffff" stroke-opacity="0.85" stroke-width="3"/>
+
+  <!-- 云朵：半透明玻璃体 -->
+  <g transform="translate(512.0 512.0)" filter="url(#blobShadow)">
+    <!-- 先给并集描一圈外轮廓，再用填充盖住内部的圆线，得到一整朵云 -->
+    <g fill="none" stroke="url(#rim)" stroke-width="9">
+    <circle cx="0" cy="0" r="190" />
+    <circle cx="195.9" cy="81.1" r="118" />
+    <circle cx="81.1" cy="195.9" r="118" />
+    <circle cx="-81.1" cy="195.9" r="118" />
+    <circle cx="-195.9" cy="81.1" r="118" />
+    <circle cx="-195.9" cy="-81.1" r="118" />
+    <circle cx="-81.1" cy="-195.9" r="118" />
+    <circle cx="81.1" cy="-195.9" r="118" />
+    <circle cx="195.9" cy="-81.1" r="118" />
+    </g>
+    <g fill="url(#glass)">
+    <circle cx="0" cy="0" r="190" />
+    <circle cx="195.9" cy="81.1" r="118" />
+    <circle cx="81.1" cy="195.9" r="118" />
+    <circle cx="-81.1" cy="195.9" r="118" />
+    <circle cx="-195.9" cy="81.1" r="118" />
+    <circle cx="-195.9" cy="-81.1" r="118" />
+    <circle cx="-81.1" cy="-195.9" r="118" />
+    <circle cx="81.1" cy="-195.9" r="118" />
+    <circle cx="195.9" cy="-81.1" r="118" />
+    </g>
+    <!-- 玻璃体内部的高光 -->
+    <ellipse cx="-96" cy="-150" rx="188" ry="118" fill="#ffffff" opacity="0.62"
+             transform="rotate(-28 -96 -150)"/>
+  </g>
+
+  <!-- 终端提示符 >_ -->
+  <g transform="translate(512.0 512.0)" fill="none" stroke="url(#glyph)"
+     stroke-width="48.0" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M -108 -74 L -26 6 L -108 86"/>
+    <path d="M 46 96 L 152 96"/>
+  </g>
+</svg>

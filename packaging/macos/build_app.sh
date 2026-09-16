@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-APP_NAME="${CODEX_SWITCHER_APP_NAME:-Codex 多模型切换器}"
+APP_NAME="${CODEX_SWITCHER_APP_NAME:-codex（ChatGPT App）多平台模型切换}"
 OUT_DIR="${1:-$HOME/Applications}"
 APP_PATH="$OUT_DIR/$APP_NAME.app"
 APP_HOME="${CODEX_SWITCHER_HOME:-$HOME/.local/share/codex-switcher}"
@@ -88,6 +88,8 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 	<string>$EXECUTABLE</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$TOOL_VERSION</string>
 	<key>CFBundleVersion</key>
@@ -112,6 +114,16 @@ cp -R "$REPO_ROOT/codex_switcher" "$RUNTIME_DIR/codex_switcher"
 find "$RUNTIME_DIR/codex_switcher" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 cp "$REPO_ROOT/packaging/macos/launch.sh" "$RUNTIME_DIR/packaging/macos/launch.sh"
 chmod +x "$RUNTIME_DIR/packaging/macos/launch.sh"
+
+# 应用图标：黑白液态玻璃的 Codex 标
+ICON_SRC="$REPO_ROOT/packaging/macos/icon/AppIcon.icns"
+if [ ! -f "$ICON_SRC" ]; then
+  echo "图标还没生成，正在补生成…"
+  python3 "$REPO_ROOT/packaging/macos/icon/make_icon.py" >/dev/null 2>&1 || true
+fi
+if [ -f "$ICON_SRC" ]; then
+  cp "$ICON_SRC" "$APP_PATH/Contents/Resources/AppIcon.icns"
+fi
 
 codesign --force --sign - "$APP_PATH" >/dev/null 2>&1 || true
 

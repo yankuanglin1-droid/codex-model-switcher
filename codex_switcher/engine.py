@@ -17,6 +17,7 @@ from . import balance as balance_module
 from . import bridge as bridge_module
 from . import catalog as catalog_module
 from . import configfile, paths, registry, secrets, state as state_module
+from . import threads as threads_module
 from .discovery import DiscoveryError, fetch_models, probe_responses, rank_models
 
 
@@ -369,7 +370,16 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
     record["upstream_base_url"] = upstream
     state_module.upsert_provider(state, record)
     state_module.save(state)
-    return {"provider": provider_id, "label": record["label"], "model": chosen, "backup": str(backup)}
+
+    # 顺手把「模型和服务商对不上」的旧任务修好，
+    # 否则切完在旧对话里换模型还会报 model is not supported
+    threads_fixed = 0
+    try:
+        threads_fixed = threads_module.repair().get("fixed", 0)
+    except Exception:  # noqa: BLE001 - 修不动也不能影响切换本身
+        threads_fixed = 0
+    return {"provider": provider_id, "label": record["label"], "model": chosen,
+            "backup": str(backup), "threads_fixed": threads_fixed}
 
 
 def remove_provider(provider_id: str, purge_key: bool = True) -> Dict:

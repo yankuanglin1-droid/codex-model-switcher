@@ -1,7 +1,9 @@
-# Codex 多模型切换器
+# codex（ChatGPT App）多平台模型切换
 
-把 DeepSeek、MiniMax、智谱 GLM、Kimi、通义千问、硅基流动、OpenRouter、Groq… 接进 Codex，
-在输入框旁边的模型列表里直接选用，随时一键切回官方 OpenAI。
+**Codex (ChatGPT App) Multi-Platform Model Switcher**
+
+把 DeepSeek、MiniMax、智谱 GLM、Kimi、通义千问、硅基流动、OpenRouter、Groq… 接进
+ChatGPT App 里的 Codex，在输入框旁边的模型列表里直接选用，随时一键切回官方 OpenAI。
 
 **只填平台名称、Base URL、API Key，其余全部自动完成。**
 
@@ -32,7 +34,7 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 | provider id 撞上 Codex 保留名（`ollama`、`lmstudio`…）会导致模型列表被忽略 | 自动改名成 `ollama-local`，并拒绝使用保留名 |
 | API Key 明文写进 config.toml | 只进系统钥匙串（macOS Keychain / Linux Secret Service） |
 | 改配置把插件、MCP、项目信任等设置弄丢 | 只改模型相关字段，改前备份、改后校验，其余内容逐字节保留 |
-| 切换后发现旧对话报 `model is not supported` | 切换时会明确提示，并提供分叉/新建两种续接方式 |
+| 切换后发现旧对话报 `model is not supported`，上下文像丢了 | 自动/一键修复对话的服务商绑定，旧对话直接用新模型继续，内容一字不动 |
 
 ---
 
@@ -47,6 +49,8 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 - **本机用量**：读取 Codex 自己的会话日志统计 token 用量，不联网、不读对话内容，0.3 秒出结果。
 - **版本检查**：`codex-switcher update` 或界面上的「检查更新」，一眼看出是不是最新版。
 - **本地 App**：macOS 双击即用的图形界面，后台常驻，不弹终端窗口。
+- **切换不丢上下文**：自动修复「对话绑着旧平台、却选了新模型」的错配，
+  旧对话可以直接用新模型接着聊（详见 [docs/app.md](docs/app.md)）。
 - **协议桥**：内置 Responses ⇄ Chat Completions 转换，让只支持 Chat 的平台也能用。
 - **环境自检**：`codex-switcher doctor` 一次检查 Python、钥匙串、配置、模型、协议桥。
 - **零依赖**：纯标准库，不需要 pip 安装任何东西。

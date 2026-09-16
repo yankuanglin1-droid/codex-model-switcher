@@ -18,7 +18,7 @@ import sys
 from typing import Dict, List, Optional
 
 from . import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
-               secrets, state as state_module, usage)
+               secrets, state as state_module, threads as threads_module, usage)
 from .discovery import DiscoveryError
 
 
@@ -239,6 +239,36 @@ def cmd_stop(args) -> int:
         out("已停止：%s" % item)
     for item in skipped:
         out("已跳过：%s" % item)
+    return 0
+
+
+def cmd_tasks(args) -> int:
+    """列出任务，并标出服务商和模型对不上的那些。"""
+    info = threads_module.summarize()
+    out("任务总数：%d" % info["total"])
+    if not info["mismatch"]:
+        out("服务商绑定全部正常。")
+        return 0
+    out("发现 %d 个任务的服务商和模型对不上（在这些任务里换模型会报 model is not supported）：" % info["mismatch"])
+    out("")
+    for item in info["items"]:
+        out("  %s  %-24s %s → %s" % (item["id"][:8], item["model"], item["provider"], item["expected"]))
+        out("      %s" % item["title"][:50])
+    out("")
+    out("修复：codex-switcher repair           （先看预演加 --dry-run）")
+    return 1
+
+
+def cmd_repair(args) -> int:
+    try:
+        report = threads_module.repair(thread_id=args.thread, dry_run=args.dry_run,
+                                       deep=getattr(args, "deep", False))
+    except threads_module.ThreadError as exc:
+        fail("修复失败：%s" % exc)
+    out(threads_module.describe(report))
+    if report.get("fixed") and not args.dry_run:
+        out("")
+        out("请完全退出并重新打开 Codex，让改动生效。")
     return 0
 
 
@@ -735,6 +765,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("stop", help="停掉后台的图形界面与协议桥")
 
+    sub.add_parser("tasks", help="列出任务，标出服务商和模型对不上的")
+    repair = sub.add_parser("repair", help="修复任务的服务商绑定（换模型报 not supported）")
+    repair.add_argument("--thread", help="只修一个任务（填任务 ID 前缀）")
+    repair.add_argument("--dry-run", action="store_true", help="只预演，不写入")
+    repair.add_argument("--deep", action="store_true",
+                        help="顺带清理会话文件里残留的旧服务商（较慢，约 30 秒）")
+
     quota = sub.add_parser("quota", help="记录套餐额度，用于显示本机用量百分比")
     quota.add_argument("provider")
     quota.add_argument("--tokens", type=int, help="套餐总量，例如 500000000")
@@ -780,6 +817,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "refresh": cmd_refresh,
         "bridge": cmd_bridge,
         "stop": cmd_stop,
+        "tasks": cmd_tasks,
+        "repair": cmd_repair,
         "quota": cmd_quota,
         "update": cmd_update,
         "remove": cmd_remove,
