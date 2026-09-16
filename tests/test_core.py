@@ -520,6 +520,24 @@ class UpdateTests(unittest.TestCase):
             {"status": "ok", "up_to_date": False, "latest": "v2.0.0", "current": "1.0.0",
              "url": "https://example.com"}))
 
+    def test_fresh_cache_is_rechecked_against_current_version(self):
+        """刚升级完不能还显示旧版本号。"""
+        import datetime
+        from codex_switcher import __version__, paths, update
+        paths.ensure_dir(paths.state_dir())
+        paths.state_dir().joinpath("update.json").write_text(json.dumps({
+            "status": "ok",
+            "current": "0.0.1",                 # 缓存里是升级前的旧版本
+            "latest": "v0.0.1",
+            "up_to_date": True,
+            "url": "https://example.com",
+            "checked_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }))
+        result = update.check(force=False)      # 命中缓存，但应按当前版本重算
+        self.assertEqual(result["current"], __version__)
+        self.assertTrue(result["up_to_date"])   # 0.0.1 <= 当前版本
+        self.assertIn(__version__, update.describe(result))
+
 
 class EngineContinueTests(TempCodexHome):
     """切换相关的后续用例。

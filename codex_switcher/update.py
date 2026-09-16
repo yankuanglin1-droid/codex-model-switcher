@@ -71,6 +71,11 @@ def check(force: bool = False, timeout: int = 12) -> Dict:
     cache = read_cache()
     if not force and cache and _fresh(cache):
         result = dict(cache)
+        # 缓存是上一次运行写的，里面的 current 可能是升级前的旧值；
+        # 按当前版本重新算一遍，否则刚升级完会显示“已是最新 v旧版本号”。
+        result["current"] = __version__
+        if result.get("status") == "ok":
+            result["up_to_date"] = version_tuple(result.get("latest", "")) <= version_tuple(__version__)
     else:
         info = latest_release(timeout=timeout)
         if info.get("status") == "ok":
