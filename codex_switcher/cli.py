@@ -516,6 +516,7 @@ def cmd_doctor(args) -> int:
 
 def cmd_app(args) -> int:
     from .webui import server
+    _ensure_bridge()
     if not getattr(args, "force_new", False):
         url = server.existing_url()
         if url:
@@ -525,6 +526,31 @@ def cmd_app(args) -> int:
                 webbrowser.open(url)
             return 0
     return server.run(port=args.port, open_browser=not args.no_open)
+
+
+def _ensure_bridge() -> None:
+    """界面起来之前，先把需要用到本地协议桥拉起来。
+
+    macOS 的 .app 是走 launch.sh 的，那里已经会拉桥；但 Windows 是从桌面
+    快捷方式直接跑 `app`，没人管桥，走桥的平台就会连不上。
+    没有平台需要桥时不白起进程。
+    """
+    from . import bridge, platform_compat
+    try:
+        overview = engine.provider_overview()
+    except Exception:  # noqa: BLE001
+        return
+    if not any(item.get("transport") != "native" for item in overview):
+        return
+    try:
+        if bridge.is_running():
+            return
+        platform_compat.spawn_detached(
+            [sys.executable, "-m", "codex_switcher.bridge"],
+            paths.state_dir() / "bridge.log")
+    except (OSError, RuntimeError):
+        # 桥起不来不该拦住界面：界面里会显示它没在运行，用户也能手动补
+        pass
 
 
 def cmd_export(args) -> int:

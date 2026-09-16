@@ -988,5 +988,90 @@ class PlatformTests(unittest.TestCase):
         compile(source, "helper", "exec")  # 生成的脚本必须语法正确
 
 
+class AppEnsureBridgeTests(unittest.TestCase):
+    """打开界面时要顺手把协议桥拉起来。
+
+    macOS 靠 launch.sh 拉桥，Windows 是桌面快捷方式直接跑 app，没人管桥，
+    走桥的平台就会连不上。这几条钉住「该起的时候起、不该起的时候别白起」。
+    """
+
+    def _run_ensure(self, overview, running):
+        from codex_switcher import cli, engine, platform_compat
+        spawned = []
+        original_overview = engine.provider_overview
+        original_running = cli.bridge.is_running if hasattr(cli, "bridge") else None
+        original_spawn = platform_compat.spawn_detached
+        engine.provider_overview = lambda: overview
+        platform_compat.spawn_detached = lambda command, log_path=None: spawned.append(command) or 0
+        try:
+            import codex_switcher.bridge as bridge_module
+            bridge_module.is_running = lambda port=8787: running
+            cli._ensure_bridge()
+        finally:
+            engine.provider_overview = original_overview
+            platform_compat.spawn_detached = original_spawn
+            if original_running is not None:
+                bridge_module.is_running = original_running
+        return spawned
+
+    def test_no_bridge_provider_does_not_spawn(self):
+        spawned = self._run_ensure([{"id": "a", "transport": "native"}], running=False)
+        self.assertEqual(spawned, [], "没有平台需要桥，不该白起一个进程")
+
+    def test_bridge_provider_spawns_when_not_running(self):
+        spawned = self._run_ensure([{"id": "a", "transport": "bridge"}], running=False)
+        self.assertEqual(len(spawned), 1, "有平台需要桥且桥没跑，必须拉起来")
+        self.assertIn("codex_switcher.bridge", spawned[0])
+
+    def test_bridge_provider_does_not_spawn_twice(self):
+        spawned = self._run_ensure([{"id": "a", "transport": "bridge"}], running=True)
+        self.assertEqual(spawned, [], "桥已经在跑就不要重复起")
+
+    def test_overview_failure_does_not_break_opening_ui(self):
+        from codex_switcher import cli, engine, platform_compat
+        original = engine.provider_overview
+        engine.provider_overview = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            cli._ensure_bridge()      # 不能抛出去，界面必须还能打开
+        finally:
+            engine.provider_overview = original
+
+
+class OutputEncodingTests(unittest.TestCase):
+    """中文 Windows 的输出不能把命令搞崩。
+
+    控制台代码页 936 里没有 ✅ ❌ ✗ ⚠；一旦输出被重定向，Python 用 cp936
+    编码，打印这些符号会抛 UnicodeEncodeError，把正常命令打断。
+    """
+
+    def test_symbols_do_not_crash_under_gbk(self):
+        import subprocess
+        script = (
+            "from codex_switcher.__main__ import _make_output_never_crash\n"
+            "_make_output_never_crash()\n"
+            "print('✅ 已切换 ✗ 失败 ⚠ 注意')\n"
+            "print('中文照常')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=dict(os.environ, PYTHONIOENCODING="cp936"),
+            capture_output=True, timeout=60)
+        # 子进程按 cp936 输出，这里不能按 UTF-8 解，否则是测试自己炸
+        stderr = (result.stderr or b"").decode("utf-8", "replace")
+        self.assertEqual(result.returncode, 0, stderr[-500:])
+        self.assertNotIn("UnicodeEncodeError", stderr)
+
+    def test_same_script_would_crash_without_the_guard(self):
+        """证明前面那条测试不是白测的：不调兜底就会崩。"""
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, "-c", "print('✅')"],
+            env=dict(os.environ, PYTHONIOENCODING="cp936"),
+            capture_output=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("UnicodeEncodeError", (result.stderr or b"").decode("utf-8", "replace"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
