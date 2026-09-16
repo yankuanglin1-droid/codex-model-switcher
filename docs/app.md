@@ -100,7 +100,13 @@ codex-switcher repair --deep            # 顺带清理会话文件里的历史�
 它最近两分钟还在写入，说明可能正开着。等一会儿再点一次修复即可。
 
 **App 需要什么前置条件？**
-macOS 12+ 和 Python 3.11+。没有 Python 会弹窗提示 `brew install python@3.12`。
+macOS 11+（Apple Silicon / Intel 都行）。
+
+- **完整版**（下载文件名带 `-full`）：什么都不用装，自带 Python，解压双击即可。
+- **标准版**：机器上需要一个 Python 3.9+。没有的话 App 会弹窗给出两条免费做法——
+  终端执行 `xcode-select --install`，或到 python.org 下载安装包。
+
+App 本体是 arm64 + x86_64 通用二进制，两种芯片都能跑。
 
 **第一次打开被系统拦下？**
 App 没有 Apple 开发者签名。右键 →「打开」，点一次之后就不再问了。

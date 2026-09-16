@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 # 把图形界面打包成 macOS 应用。
 #
-#   bash packaging/macos/build_app.sh                    装到 ~/Applications
-#   bash packaging/macos/build_app.sh /Applications      装到指定目录
+#   bash packaging/macos/build_app.sh                         装到 ~/Applications
+#   bash packaging/macos/build_app.sh /Applications           装到指定目录
+#   bash packaging/macos/build_app.sh --with-python           打「完整版」：App 自带 Python
+#   bash packaging/macos/build_app.sh --with-python /Applications
 #
 # 优先编译成**原生窗口应用**（Swift + WKWebView）：独立窗口、独立 Dock 图标，
 # 不进浏览器。没有 swiftc 时退回到“壳 + 浏览器”方案。
+#
+# 标准版（默认）只带运行时代码，靠机器上已有的 Python 3.9+；
+# 完整版（--with-python）额外带一份独立 Python，目标电脑上什么都不用装，双击就能用。
 set -euo pipefail
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 APP_NAME="${CODEX_SWITCHER_APP_NAME:-codex（ChatGPT App）多平台模型切换}"
-OUT_DIR="${1:-$HOME/Applications}"
+
+# 解析参数。这里刻意不用数组 —— macOS 自带的是 bash 3.2，数组 + set -u 会报错。
+BUNDLE_PYTHON="${CODEX_SWITCHER_BUNDLE_PYTHON:-0}"
+OUT_DIR=""
+for arg in "$@"; do
+  case "$arg" in
+    --with-python) BUNDLE_PYTHON=1 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -*) echo "未知参数：$arg" >&2; exit 2 ;;
+    *) OUT_DIR="$arg" ;;
+  esac
+done
+OUT_DIR="${OUT_DIR:-$HOME/Applications}"
 APP_PATH="$OUT_DIR/$APP_NAME.app"
 APP_HOME="${CODEX_SWITCHER_HOME:-$HOME/.local/share/codex-switcher}"
 LAUNCHER="$APP_HOME/packaging/macos/launch.sh"
@@ -115,6 +132,8 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 	<string>$TOOL_VERSION</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>LSMultipleInstancesProhibited</key>
+	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
@@ -134,6 +153,36 @@ find "$RUNTIME_DIR/codex_switcher" -name '__pycache__' -type d -prune -exec rm -
 cp "$REPO_ROOT/packaging/macos/launch.sh" "$RUNTIME_DIR/packaging/macos/launch.sh"
 chmod +x "$RUNTIME_DIR/packaging/macos/launch.sh"
 
+# 完整版：把独立 Python 塞进包里，目标电脑什么都不用装
+BUNDLED_ARCHS=""
+if [ "$BUNDLE_PYTHON" = "1" ]; then
+  PYRT_SRC="${CODEX_SWITCHER_PYTHON_RUNTIME:-$REPO_ROOT/packaging/macos/python-runtime}"
+  if [ ! -x "$PYRT_SRC/python-arm64/bin/python3" ] && [ ! -x "$PYRT_SRC/python-x86_64/bin/python3" ]; then
+    echo "正在准备内置 Python（只下一次，之后复用）…"
+    bash "$REPO_ROOT/packaging/macos/fetch_python_runtime.sh" "$PYRT_SRC" || true
+  fi
+  for arch in arm64 x86_64; do
+    if [ -x "$PYRT_SRC/python-$arch/bin/python3" ]; then
+      rm -rf "$RUNTIME_DIR/python-$arch"
+      # ditto 会保留符号链接与可执行权限，cp -R 在个别文件上会走样
+      ditto "$PYRT_SRC/python-$arch" "$RUNTIME_DIR/python-$arch"
+      BUNDLED_ARCHS="${BUNDLED_ARCHS:+$BUNDLED_ARCHS + }$arch"
+    else
+      echo "  缺少 $arch 的内置 Python，该架构会回退到系统 Python"
+    fi
+  done
+  if [ -n "$BUNDLED_ARCHS" ]; then
+    # 内嵌的可执行文件必须是合法签名才能在 Apple 芯片上运行；
+    # 随包复制后签名会失效，所以要重新签一遍。
+    while IFS= read -r bin; do
+      [ -n "$bin" ] || continue
+      codesign --force --sign - "$bin" >/dev/null 2>&1 || true
+    done <<EOF
+$(find "$RUNTIME_DIR" -path "*/python-*/*" -type f -exec sh -c 'file -b "$1" | grep -q Mach-O && printf "%s\n" "$1"' _ {} \; 2>/dev/null)
+EOF
+  fi
+fi
+
 # 应用图标：黑白液态玻璃的 Codex 标
 ICON_SRC="$REPO_ROOT/packaging/macos/icon/AppIcon.icns"
 if [ ! -f "$ICON_SRC" ]; then
@@ -149,7 +198,13 @@ codesign --force --sign - "$APP_PATH" >/dev/null 2>&1 || true
 echo "已生成：$APP_PATH"
 echo "版本：v$TOOL_VERSION"
 echo "形式：$TRANSPORT_NOTE"
-echo "自带运行时：是（不需要另外 clone 仓库）"
+if [ -n "$BUNDLED_ARCHS" ]; then
+  echo "自带运行时：是（不需要另外 clone 仓库）"
+  echo "自带 Python：$BUNDLED_ARCHS —— 目标电脑不用装 Python"
+else
+  echo "自带运行时：是（不需要另外 clone 仓库）"
+  echo "Python：用目标电脑上的 Python 3.9+（要开箱即用就打完整版，见 --help）"
+fi
 echo
 echo "双击即可打开图形界面。"
 echo "首次打开如果被系统拦下，到「系统设置 → 隐私与安全性」里点「仍要打开」。"

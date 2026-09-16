@@ -12,7 +12,7 @@ elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
 elif command -v python3 >/dev/null 2>&1; then
   PYTHON=$(command -v python3)
 else
-  echo "没有找到 python3，请先安装 Python 3.11 或更高版本。" >&2
+  echo "没有找到 python3，请安装 Python 3.9 或更高版本（推荐 3.11+）。macOS 可运行 xcode-select --install。" >&2
   exit 1
 fi
 

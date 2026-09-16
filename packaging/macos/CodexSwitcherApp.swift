@@ -11,6 +11,7 @@
 
 import Cocoa
 import WebKit
+import Darwin
 
 let appTitle = "Codex 多模型切换器"
 
@@ -50,10 +51,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var startedAt = Date()
     private var triedExisting = false
     private var loadedURL: URL?
+    private var instanceLockFD: Int32 = -1
 
     // ------------------------------------------------------------ 生命周期
 
+    /// 单实例锁：在自己家目录里锁一个文件。
+    /// 三个平台都一样的道理 —— 谁拿到锁谁是唯一的界面进程，拿不到的直接退出。
+    /// 用文件锁而不是“查一遍进程列表”，是因为查列表存在启动瞬间的竞态：
+    /// 两次连点几乎同时启动时，两边可能都还没在系统里登记，就都以为自己第一。
+    private func acquireInstanceLock() -> Bool {
+        let support = URL(fileURLWithPath: homeDirectory())
+            .appendingPathComponent("Library/Application Support/codex-switcher")
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let lockPath = support.appendingPathComponent("ui-instance.lock").path
+        let fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        if fd < 0 { return true }          // 锁不住就先放行，宁可多开也不让用户点不开
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            instanceLockFD = fd
+            ftruncate(fd, 0)
+            let pid = "\(ProcessInfo.processInfo.processIdentifier)\n"
+            _ = pid.withCString { write(fd, $0, strlen($0)) }
+            return true
+        }
+        close(fd)
+        return false
+    }
+
+    /// 锁被别人拿着时，读一下锁里记的 pid 还在不在。
+    private func lockHolderPID() -> pid_t {
+        let support = URL(fileURLWithPath: homeDirectory())
+            .appendingPathComponent("Library/Application Support/codex-switcher")
+        let lockPath = support.appendingPathComponent("ui-instance.lock").path
+        guard let text = try? String(contentsOfFile: lockPath, encoding: .utf8),
+              let value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return -1 }
+        return pid_t(value)
+    }
+
+    /// 把已经在跑的那一个窗口拉到最前面。
+    @discardableResult
+    private func activateRunningPeer() -> Bool {
+        guard let bundleId = Bundle.main.bundleIdentifier else { return false }
+        let mine = ProcessInfo.processInfo.processIdentifier
+        // 刚启动的兄弟进程可能还没在系统里登记，给它最多 1.5 秒
+        for _ in 0..<15 {
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+                .filter { $0.processIdentifier != mine }
+            if let existing = others.first {
+                existing.activate(options: [.activateAllWindows])
+                return true
+            }
+            usleep(100_000)
+        }
+        return false
+    }
+
+    /// 确认自己是唯一实例；如果已经有窗口在跑，就把那个窗口提前并结束本次启动。
+    private func becomePrimaryInstance() {
+        if acquireInstanceLock() { return }
+        // 锁被占着，但持有者已经死了（异常崩溃残留）——放行，别让用户点不开
+        let holder = lockHolderPID()
+        if holder <= 0 || kill(holder, 0) != 0 { return }
+        if activateRunningPeer() {
+            exit(0)                        // 已有的那个已经到前台了，本次直接收摊
+        }
+        // 找不到兄弟进程就正常启动，不让点击落空
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 单实例：重复双击时直接把已有窗口带到前面，而不是再起一套服务
+        becomePrimaryInstance()
         buildMenu()
         buildWindow()
         startOrReuse()

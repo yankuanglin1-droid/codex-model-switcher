@@ -51,24 +51,55 @@ Copy-Item -Force (Join-Path $RepoRoot "packaging\macos\launch.sh") (Join-Path $A
 Write-Step "已安装运行时：$AppHome"
 
 # 启动器：.cmd 给命令行用，.vbs 给「双击不弹黑框」用
+#
+# 编码这里很重要：中文 Windows 的用户名（C:\Users\张三\…）会让路径带中文，
+# 用 -Encoding ASCII 写出来会变成一堆问号，启动器就永远找不到 Python 了。
+# 所以统统一律写 ANSI（系统本地代码页），cmd.exe 和 VBScript 正好都按这个读。
 $CmdPath = Join-Path $BinDir "codex-switcher.cmd"
 @"
 @echo off
 setlocal
-set "PYTHONPATH=$AppHome;%PYTHONPATH%"
-"$Python" -m codex_switcher %*
+rem 用相对路径定位安装目录，避免把可能带中文的绝对路径硬写进来
+set "APPHOME=%~dp0.."
+set "PY="
+if exist "%APPHOME%\python-path.txt" set /p PY=<"%APPHOME%\python-path.txt"
+if not defined PY if exist "%APPHOME%\.venv\Scripts\python.exe" set "PY=%APPHOME%\.venv\Scripts\python.exe"
+if not defined PY (
+  where py >nul 2>nul && set "PY=py -3"
+)
+if not defined PY set "PY=python"
+set "PYTHONPATH=%APPHOME%;%PYTHONPATH%"
+%PY% -m codex_switcher %*
 exit /b %ERRORLEVEL%
-"@ | Set-Content -Encoding ASCII $CmdPath
+"@ | Set-Content -Encoding Default $CmdPath
 
 $VbsPath = Join-Path $BinDir "codex-switcher-gui.vbs"
 @"
 Set shell = CreateObject("WScript.Shell")
 shell.Run "cmd /c """"$CmdPath"""" app", 0, False
-"@ | Set-Content -Encoding ASCII $VbsPath
+"@ | Set-Content -Encoding Default $VbsPath
 
-Set-Content -Encoding ASCII (Join-Path $AppHome "python-path.txt") $Python
+Set-Content -Encoding Default (Join-Path $AppHome "python-path.txt") $Python
 Write-Step "已生成启动器：$CmdPath"
 Write-Step "图形界面快捷方式：$VbsPath（双击不会弹黑框）"
+
+# 桌面快捷方式：不然用户根本找不到 %LOCALAPPDATA% 下面那个 .vbs
+try {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    if ($desktop) {
+        $lnkPath = Join-Path $desktop "Codex 多平台模型切换.lnk"
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($lnkPath)
+        $shortcut.TargetPath = "$env:SystemRoot\System32\wscript.exe"
+        $shortcut.Arguments = '"' + $VbsPath + '"'
+        $shortcut.WorkingDirectory = $AppHome
+        $shortcut.Description = "Codex（ChatGPT App）多平台模型切换"
+        $shortcut.Save()
+        Write-Step "已创建桌面快捷方式：$lnkPath"
+    }
+} catch {
+    Write-Step "（桌面快捷方式没建成，可以直接双击：$VbsPath）"
+}
 
 # 加进用户 PATH（只影响当前用户）
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

@@ -539,6 +539,36 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(result["up_to_date"])   # 0.0.1 <= 当前版本
         self.assertIn(__version__, update.describe(result))
 
+    def test_read_cache_also_reports_current_version(self):
+        """界面是直接读缓存的，所以 read_cache 自己就得算对版本号。
+
+        之前只在 check() 里重算，界面绕过了 check()，导致升级完界面还显示旧版本。
+        """
+        import datetime
+        from codex_switcher import __version__, paths, update
+        paths.ensure_dir(paths.state_dir())
+        paths.state_dir().joinpath("update.json").write_text(json.dumps({
+            "status": "ok",
+            "current": "0.0.1",
+            "latest": "v0.0.1",
+            "up_to_date": True,
+            "url": "https://example.com",
+            "checked_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }))
+        cached = update.read_cache()
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["current"], __version__)
+        self.assertTrue(cached["up_to_date"])
+
+    def test_read_cache_survives_broken_file(self):
+        """缓存文件写坏不能把界面搞崩。"""
+        from codex_switcher import paths, update
+        paths.ensure_dir(paths.state_dir())
+        paths.state_dir().joinpath("update.json").write_text("{ 这不是 json")
+        self.assertIsNone(update.read_cache())
+        paths.state_dir().joinpath("update.json").write_text('["不是对象"]')
+        self.assertIsNone(update.read_cache())
+
 
 class EngineContinueTests(TempCodexHome):
     """切换相关的后续用例。

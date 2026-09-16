@@ -96,19 +96,30 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 
 | 系统 | 界面形态 | 要求 |
 | --- | --- | --- |
-| **macOS 11 及以上**（Apple Silicon / Intel 都行） | 原生窗口 App（双击即用）+ 命令行 | Python 3.9+（推荐 3.11+） |
+| **macOS 11 及以上**（Apple Silicon / Intel 都行） | 原生窗口 App（双击即用）+ 命令行 | 完整版免要求；标准版需要 Python 3.9+ |
 | **Windows 10 / 11** | 命令行 + 浏览器界面 | Python 3.9+ |
 | **Linux** | 命令行 + 浏览器界面 | Python 3.9+ |
 
-macOS 的安装包是 **arm64 + x86_64 通用二进制**，一台 .app 通吃两种芯片。
+macOS 的安装包是 **arm64 + x86_64 通用二进制**，一台 .app 通吃两种芯片，
+最低支持 macOS 11（App 本体和内置 Python 的 minos 都是 11.0，已实测）。
 Python 3.9 也能跑（配置文件校验走降级路径）；3.11+ 更稳，因为能用内置的
 `tomllib` 做完整校验。
+
+macOS 有两个安装包，按需要选一个：
+
+| 包 | 体积 | 适不适合你 |
+| --- | --- | --- |
+| **完整版**（文件名带 `-full`） | 约 50 MB | 推荐。App 自带独立 Python，**目标电脑什么都不用装**，双击就能用 |
+| **标准版**（文件名不带 `-full`） | 约 1 MB | 机器上已经有 Python 3.9+（装了 Xcode 命令行工具或 Homebrew）时用 |
+
+标准版找不到 Python 时不会白屏，会弹窗告诉你两条免费做法：
+终端执行 `xcode-select --install`，或到 python.org 下载安装包。
 
 自检命令：
 
 ```bash
 python3 tools/check_portability.py    # 扫一遍有没有平台专属写法
-python3 -m unittest discover -s tests # 62 项测试
+python3 -m unittest discover -s tests # 64 项测试
 ```
 
 ### 方式 A：直接装 App（不用 clone 仓库）
@@ -145,11 +156,15 @@ codex-switcher add --preset deepseek --key-stdin
 codex-switcher use deepseek
 ```
 
-图形界面双击这个文件即可（不会弹黑框）：
+安装脚本会在**桌面**放一个「Codex 多平台模型切换」快捷方式，双击即可（不会弹黑框）。
+也可以直接双击这个文件：
 
 ```
 %LOCALAPPDATA%\codex-switcher\bin\codex-switcher-gui.vbs
 ```
+
+中文用户名（`C:\Users\张三\…`）没问题：安装脚本用 ANSI 代码页写启动器，
+路径不会被写成乱码。
 
 Windows 上与 macOS 的差异：
 
@@ -166,18 +181,20 @@ cd codex-model-switcher
 bash install.sh
 ```
 
-脚本会找一个 Python 3.11+（找不到会提示 `brew install python@3.12`），
+脚本会找一个 Python 3.9+（优先 Homebrew / python.org 的位置，最后才看系统自带的
+`/usr/bin/python3`；都找不到会提示 `xcode-select --install`），
 把运行时代码装到 `~/.local/share/codex-switcher`，把 `codex-switcher` 命令装到
 `~/.local/bin`，然后完成初始化。想要图形界面再执行：
 
 ```bash
-bash packaging/macos/build_app.sh      # 编译原生窗口 App 到 ~/Applications
+bash packaging/macos/build_app.sh                  # 标准版 → ~/Applications
+bash packaging/macos/build_app.sh --with-python    # 完整版：自带 Python
 ```
 
 ### 方式 C：完全手动
 
 ```bash
-# 1. 确认 Python 版本（需要 3.11+；3.9/3.10 需要额外装 tomli）
+# 1. 确认 Python 版本（3.9+ 即可；3.9/3.10 的 TOML 校验走降级路径）
 python3 --version
 
 # 2. 把命令放进 PATH

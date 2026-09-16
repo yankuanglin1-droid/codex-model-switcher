@@ -27,11 +27,26 @@ def _cache_path():
     return paths.state_dir() / "update.json"
 
 
+def _normalize(cache: Dict) -> Dict:
+    """把缓存里“写的时候的版本”换成“现在正在跑的版本”。
+
+    缓存是上次运行写的，里面的 current 是**升级前**的旧值。界面直接显示这个字段，
+    所以不在这里改一遍的话，用户升级完还会看到“当前版本 1.4.0 / 已是最新”。
+    """
+    cache["current"] = __version__
+    if cache.get("status") == "ok":
+        cache["up_to_date"] = version_tuple(cache.get("latest", "")) <= version_tuple(__version__)
+    return cache
+
+
 def read_cache() -> Optional[Dict]:
     try:
-        return json.loads(_cache_path().read_text())
+        cache = json.loads(_cache_path().read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(cache, dict):
+        return None
+    return _normalize(cache)
 
 
 def _fresh(cache: Dict) -> bool:
@@ -70,12 +85,8 @@ def check(force: bool = False, timeout: int = 12) -> Dict:
     """返回 {status, current, latest, up_to_date, url, checked_at}。"""
     cache = read_cache()
     if not force and cache and _fresh(cache):
+        # read_cache 已经按当前版本归一化过，这里直接用
         result = dict(cache)
-        # 缓存是上一次运行写的，里面的 current 可能是升级前的旧值；
-        # 按当前版本重新算一遍，否则刚升级完会显示“已是最新 v旧版本号”。
-        result["current"] = __version__
-        if result.get("status") == "ok":
-            result["up_to_date"] = version_tuple(result.get("latest", "")) <= version_tuple(__version__)
     else:
         info = latest_release(timeout=timeout)
         if info.get("status") == "ok":

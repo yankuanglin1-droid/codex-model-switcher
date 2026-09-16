@@ -25,6 +25,25 @@ done
 say() { printf '%s\n' "$*"; }
 
 find_python() {
+  # 先看绝对路径：终端 PATH 被改窄时（比如在某些 IDE 里跑），command -v 找不到
+  # Homebrew 或 python.org 装的解释器，但它们其实在。
+  for candidate in \
+    /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
+    /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
+    /usr/local/bin/python3.11 /usr/local/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.9/bin/python3 \
+    /usr/bin/python3; do
+    if [ -x "$candidate" ] && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
   for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
       # 3.9 也能跑：没有内置 tomllib 时用逐行校验兜底
@@ -43,7 +62,7 @@ if [ -z "$PYTHON" ]; then
   if command -v brew >/dev/null 2>&1; then
     say "检测到 Homebrew，可以运行：brew install python@3.12"
   else
-    say "请先安装 Python 3.9+ 后重新运行本脚本。"
+    say "两条免费做法：一、运行 xcode-select --install；二、到 python.org 下载安装包。"
   fi
   exit 1
 fi

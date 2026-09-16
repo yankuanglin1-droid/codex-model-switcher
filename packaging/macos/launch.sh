@@ -22,16 +22,23 @@ fail() {
   exit 1
 }
 
+python_ok() {
+  # 只要 3.9+ 就够用：3.11+ 有内置 tomllib，3.9/3.10 走降级校验
+  [ -x "$1" ] && "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null
+}
+
 find_python() {
+  # 0) App 自带的解释器（下载「完整版」才有）：机器上完全没有 Python 也能跑
+  for bundled in "$REPO_ROOT/python/bin/python3" "$REPO_ROOT/python-$(uname -m)/bin/python3"; do
+    if python_ok "$bundled"; then printf '%s\n' "$bundled"; return 0; fi
+  done
   # 1) 安装时记下的解释器
   if [ -f "$STATE_DIR/python-path" ]; then
     saved=$(cat "$STATE_DIR/python-path")
-    if [ -x "$saved" ] && "$saved" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-      printf '%s\n' "$saved"; return 0
-    fi
+    if python_ok "$saved"; then printf '%s\n' "$saved"; return 0; fi
   fi
   # 2) 显式指定
-  if [ -n "${CODEX_SWITCHER_PYTHON:-}" ] && [ -x "${CODEX_SWITCHER_PYTHON}" ]; then
+  if [ -n "${CODEX_SWITCHER_PYTHON:-}" ] && python_ok "${CODEX_SWITCHER_PYTHON}"; then
     printf '%s\n' "$CODEX_SWITCHER_PYTHON"; return 0
   fi
   # 3) 绝对路径（从访达启动时 PATH 很窄，command -v 找不到 Homebrew）
@@ -39,15 +46,20 @@ find_python() {
     /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
     /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 \
     /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
-    /usr/local/bin/python3.11 /usr/local/bin/python3; do
-    if [ -x "$candidate" ] && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-      printf '%s\n' "$candidate"; return 0
-    fi
+    /usr/local/bin/python3.11 /usr/local/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.9/bin/python3 \
+    /usr/bin/python3; do
+    if python_ok "$candidate"; then printf '%s\n' "$candidate"; return 0; fi
   done
   # 4) PATH 里找
   for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
-      if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+      if python_ok "$(command -v "$candidate")"; then
         command -v "$candidate"; return 0
       fi
     fi
@@ -55,7 +67,7 @@ find_python() {
   return 1
 }
 
-PYTHON=$(find_python) || fail "找不到 Python 3.9 或更高版本。请先执行 brew install python@3.12，然后重新打开本应用。"
+PYTHON=$(find_python) || fail "找不到 Python 3.9 或更高版本。两种免费做法：一、在终端运行 xcode-select --install；二、到 python.org 下载安装包。装好后重新打开本应用。"
 
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 printf '%s 使用解释器 %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PYTHON" >>"$LOG"

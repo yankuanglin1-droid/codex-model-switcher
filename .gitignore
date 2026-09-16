@@ -32,3 +32,6 @@ dist/
 .idea/
 .vscode/
 *.swp
+
+# 打包时下载的独立 Python（体积大，每台机器自己下一次）
+packaging/macos/python-runtime/

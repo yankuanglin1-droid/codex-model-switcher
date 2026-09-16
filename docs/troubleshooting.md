@@ -212,6 +212,36 @@ codex-switcher add --name X --base-url https://api.example.com/v1 \
 
 `install.sh` 会自动在 `python3.14 / 3.13 / 3.12 / 3.11` 里挑一个合适的。
 
+### 找不到 Python（macOS）
+
+报 `找不到 Python 3.9 或更高版本` 时，按顺序看这几处（脚本也是按这个顺序找的）：
+
+1. App 自带的 `runtime/python-<架构>/bin/python3`（只有完整版才有）
+2. `~/.codex/model-switcher/python-path`（安装时记下的）
+3. `$CODEX_SWITCHER_PYTHON`
+4. Homebrew：`/opt/homebrew/bin/python3.x`、`/usr/local/bin/python3.x`
+5. python.org 官方安装：`/Library/Frameworks/Python.framework/Versions/3.x/bin/python3`
+6. 系统自带：`/usr/bin/python3`（装了 Xcode 命令行工具才有，通常是 3.9.6）
+
+都没有的话，任选一条免费路子：
+
+```bash
+xcode-select --install          # 装 Apple 的命令行工具，自带 Python 3.9.6
+# 或者到 https://www.python.org/downloads/macos/ 下安装包双击装
+```
+
+### 找不到 Python（Windows）
+
+装的时候记得勾 **Add python.exe to PATH**。装完可以验证：
+
+```powershell
+py -3 --version
+```
+
+如果用户名是中文（`C:\Users\张三\…`），安装脚本会用 ANSI 代码页写启动器，
+这样命令行才认得这些路径 —— 旧版本用 ASCII 写，会把路径写成 `?` 导致永远找不到
+Python，这个问题已经修掉。
+
 ---
 
 ## 想回到一切都出问题之前
