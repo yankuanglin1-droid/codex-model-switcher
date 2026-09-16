@@ -227,11 +227,36 @@ def check_shell_syntax() -> None:
 
 
 def check_tests() -> None:
-    print("\n[9] 测试套件")
+    print("\n[10] 测试套件")
     r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests"],
                        cwd=ROOT, capture_output=True, text=True, timeout=600)
     tail = [l for l in (r.stderr or "").strip().split("\n") if l.startswith("Ran ") or l == "OK"]
     report("unittest", r.returncode == 0, " / ".join(tail))
+
+
+def check_download_links() -> None:
+    print("\n[9] 下载链接不会过期")
+    # README 里的下载按钮必须指向「固定名」附件（releases/latest/download/<固定名>），
+    # 而不是带版本号的文件名 —— 带版本号的链接每次发新版都会失效，
+    # 而且手写文件名正是当初「文档写 A、实际发 B」那个坑的来源。
+    packer = ROOT / "packaging/macos/package_release.sh"
+    if not packer.exists():
+        report("打包脚本存在", False)
+        return
+    text = packer.read_text(encoding="utf-8")
+    report("打包脚本会生成固定名副本", "-latest$SUFFIX" in text or "-latest" in text)
+
+    missing = []
+    for doc in ["README.md", "README.en.md"]:
+        content = (ROOT / doc).read_text(encoding="utf-8")
+        for name in ["Codex-Model-Switcher-macOS-latest-full.zip",
+                     "Codex-Model-Switcher-macOS-latest.zip"]:
+            if name not in content:
+                missing.append("%s 里没有 %s" % (doc, name))
+        # 带版本号的下载链接不该出现在文档里
+        for hit in re.findall(r"releases/[^\s)\"]*download/[^\s)\"]*v\d+\.\d+\.\d+[^\s)\"]*", content):
+            missing.append("%s 用了带版本号的下载链接：%s" % (doc, hit[:60]))
+    report("首页下载链接是固定名", not missing, missing[0] if missing else "")
 
 
 def main() -> int:
@@ -246,6 +271,7 @@ def main() -> int:
     check_python_floor()
     check_windows_encoding()
     check_shell_syntax()
+    check_download_links()
     if "--fast" not in sys.argv:
         check_tests()
     print("\n" + "=" * 56)

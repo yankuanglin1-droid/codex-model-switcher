@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 让 AI 帮你装 / Let an AI install it
+    url: https://github.com/yankuanglin1-droid/codex-model-switcher/blob/main/INSTALL-WITH-AI.md
+    about: 复制一段话给 Codex / Claude Code，它会把安装配置全做完
+  - name: 装不上、报错先看这里 / Troubleshooting
+    url: https://github.com/yankuanglin1-droid/codex-model-switcher/blob/main/docs/troubleshooting.md
+    about: 常见问题与排查顺序（含 Windows 中文用户名等坑）

@@ -4,7 +4,8 @@
 在一个临时 CODEX_HOME 里造几个演示平台，用无头 Chrome 截一张图。
 **不会写入真实的钥匙串**：脚本会把凭据后端强制切成文件回退，且只写演示用的假密钥。
 
-  python3 tools/make_screenshot.py
+  python3 tools/make_screenshot.py           # 静态图 docs/screenshot.png
+  python3 tools/make_screenshot.py --gif     # 另外生成 docs/demo.gif（动态演示）
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,60 @@ CHROME_CANDIDATES = [
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
 ]
+
+# 动态演示依次展示这几个状态：换平台 → 换模型 → 切回官方。
+# 每一帧都是真实界面截图，只是把切换过程连起来。
+GIF_STATES = [
+    ("deepseek", "deepseek-flash"),
+    ("minimax", "MiniMax-M3"),
+    ("zhipu", "glm-5.3"),
+    ("openai", "gpt-5-codex"),
+]
+
+
+def shoot(chrome: str, url: str, target: Path, timeout: int = 120) -> bool:
+    result = subprocess.run(
+        [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+         "--force-device-scale-factor=2", "--window-size=1360,860",
+         "--virtual-time-budget=4000",
+         "--screenshot=%s" % target, url],
+        capture_output=True, timeout=timeout)
+    return target.exists()
+
+
+def build_gif(frames: list, target: Path) -> bool:
+    """把若干张截图连成一个带交叉淡入的 GIF。
+
+    用 ffmpeg 的 xfade：每张停留 HOLD 秒，相邻两张之间淡入淡出 FADE 秒。
+    先缩到 1100px 宽再生成调色板，否则 2720px 的原图会让 GIF 大到没法用。
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or len(frames) < 2:
+        return False
+
+    HOLD, FADE, WIDTH = 2.2, 0.5, 1100
+    inputs = []
+    for frame in frames:
+        inputs += ["-loop", "1", "-t", "%.2f" % HOLD, "-i", str(frame)]
+
+    # 依次拼接：第 k 次拼接的 offset = 当前总时长 - FADE
+    parts, length, last = [], HOLD, "0:v"
+    for index in range(1, len(frames)):
+        offset = length - FADE
+        label = "x%d" % index
+        parts.append("[%s][%d:v]xfade=transition=fade:duration=%.2f:offset=%.2f[%s]"
+                     % (last, index, FADE, offset, label))
+        length = length + HOLD - FADE
+        last = label
+    chain = ("%s;[%s]scale=%d:-1:flags=lanczos,split[a][b];"
+             "[a]palettegen=max_colors=200[p];[b][p]paletteuse=dither=bayer"
+             % (";".join(parts), last, WIDTH))
+
+    result = subprocess.run(
+        [ffmpeg, "-y", "-loglevel", "error"] + inputs +
+        ["-filter_complex", chain, "-loop", "0", str(target)],
+        capture_output=True, timeout=300)
+    return result.returncode == 0 and target.exists()
 
 
 def find_chrome() -> str:
@@ -122,15 +178,35 @@ def main() -> int:
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     time.sleep(0.4)
 
+    url = "http://127.0.0.1:%d/?t=%s" % (port, token)
     target = ROOT / "docs" / "screenshot.png"
-    subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                    "--force-device-scale-factor=2", "--window-size=1360,860",
-                    "--virtual-time-budget=4000",
-                    "--screenshot=%s" % target,
-                    "http://127.0.0.1:%d/?t=%s" % (port, token)],
-                   capture_output=True, timeout=120)
-    httpd.shutdown()
+    if not shoot(chrome, url, target):
+        print("截图失败", file=sys.stderr)
+        httpd.shutdown()
+        return 1
     print("已生成：%s" % target)
+
+    if "--gif" in sys.argv:
+        frames_dir = Path(tempfile.mkdtemp(prefix="codex-switcher-gif-"))
+        frames = []
+        for index, (provider_id, model_id) in enumerate(GIF_STATES, 1):
+            try:
+                engine.switch_to(provider_id, model_id)
+            except Exception as exc:                      # noqa: BLE001
+                print("  跳过 %s：%s" % (provider_id, exc))
+                continue
+            frame = frames_dir / ("frame-%02d.png" % index)
+            if shoot(chrome, url, frame):
+                frames.append(frame)
+                print("  拍到 %s · %s" % (provider_id, model_id))
+        gif = ROOT / "docs" / "demo.gif"
+        if build_gif(frames, gif):
+            print("已生成：%s（%.1f MB）" % (gif, gif.stat().st_size / 1048576))
+        else:
+            print("GIF 生成失败（需要 ffmpeg 且至少 2 帧）", file=sys.stderr)
+        shutil.rmtree(frames_dir, ignore_errors=True)
+
+    httpd.shutdown()
     return 0
 
 

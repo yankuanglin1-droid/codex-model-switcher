@@ -37,6 +37,24 @@ fi
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$REPO_ROOT/codex_switcher/__init__.py" | head -1)
 [ -n "$VERSION" ] || { echo "读不到版本号" >&2; exit 1; }
 
+# 打包前清掉运行过 App 之后留下的字节码缓存。
+# 不清的话：源码没变，但「跑过 App 的那些机器」打出来的包会比别人的大一圈，
+# 同一个版本号对应两份不同的文件。
+#
+# 这里刻意**不重新签名**：构建时已经签过，签的是「没有 __pycache__」的那份文件表；
+# 把缓存清掉就等于回到被签名的那个状态。再签一次反而会让两份包对不上。
+if [ -d "$APP_PATH/Contents/Resources/runtime" ]; then
+  find "$APP_PATH/Contents/Resources/runtime" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  find "$APP_PATH/Contents/Resources/runtime" -name "*.pyc" -delete 2>/dev/null || true
+  # 注意：macOS 的 codesign 没有 --quiet 参数，传了会以「参数错误(code 2)」退出，
+  # 看上去就像签名坏了。用普通 --verify，把输出丢掉即可。
+  if codesign --verify "$APP_PATH" >/dev/null 2>&1; then
+    echo "  已清掉字节码缓存，签名校验通过"
+  else
+    echo "  已清掉字节码缓存（签名校验没通过，本机自用无妨，但建议重新 build_app.sh）"
+  fi
+fi
+
 SUFFIX=""
 [ "$MODE" = "full" ] && SUFFIX="-full"
 ZIP="$OUT_DIR/Codex-Model-Switcher-macOS-v$VERSION$SUFFIX.zip"
@@ -65,3 +83,13 @@ SHA=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)
 echo "已生成：$ZIP"
 echo "  体积：$SIZE"
 echo "  sha256：$SHA"
+
+# 再复制一份不带版本号的。GitHub 的 releases/latest/download/<文件名> 只会去
+# 「最新那个 Release」里找同名附件，所以只要每次都传一份固定名字的，
+# 这个链接就永久有效 —— README 里的下载按钮不用每发一版就改一次。
+# （之前就是因为手写文件名对不上，用户照着文档根本找不到文件。）
+ALIAS="$OUT_DIR/Codex-Model-Switcher-macOS-latest$SUFFIX.zip"
+[ -e "$ALIAS" ] && rm -f "$ALIAS"
+cp "$ZIP" "$ALIAS"
+echo "  固定名副本：$(basename "$ALIAS")"
+echo "  永久链接：https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest/download/$(basename "$ALIAS")"

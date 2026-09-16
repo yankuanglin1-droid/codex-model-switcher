@@ -1,0 +1,27 @@
+name: 想要一个功能 / Feature request
+description: 说说你卡在哪一步，比直接报方案更有用
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你现在遇到的不方便是什么
+      description: 描述场景，不用先想实现方式。
+      placeholder: 我有 5 个中转站，每次都要手抄 Base URL，很容易抄错。
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你希望它怎么解决（可选）
+    validations:
+      required: false
+
+  - type: input
+    id: platform
+    attributes:
+      label: 跟哪个平台有关（可选）
+      placeholder: 智谱 GLM / 我的自建中转站 / 与平台无关
+    validations:
+      required: false

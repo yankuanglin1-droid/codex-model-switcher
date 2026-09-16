@@ -4,27 +4,53 @@
 
 **中文** · [English](README.en.md) · [让 AI 帮我装 →](INSTALL-WITH-AI.md)
 
-> **macOS 用户直接下载 →  [最新版 Releases](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)**
-> 选 `…-full.zip`（约 52 MB，自带 Python，什么都不用装）解压即用。
-> 安装包不放在仓库里，只在 Releases —— 52 MB 的二进制进 git 会永久留在历史里。
+[![Stars](https://img.shields.io/github/stars/yankuanglin1-droid/codex-model-switcher?style=flat-square&logo=github&label=Stars)](https://github.com/yankuanglin1-droid/codex-model-switcher/stargazers)
+[![Release](https://img.shields.io/github/v/release/yankuanglin1-droid/codex-model-switcher?style=flat-square&label=Release)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
+[![macOS 11+](https://img.shields.io/badge/macOS-11%2B-black?style=flat-square&logo=apple)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
+[![Windows / Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-0078D6?style=flat-square&logo=windows)](INSTALL-WITH-AI.md)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](README.md)
 
 把 DeepSeek、MiniMax、智谱 GLM、Kimi、通义千问、硅基流动、OpenRouter、Groq… 接进
 ChatGPT App 里的 Codex，在输入框旁边的模型列表里直接选用，随时一键切回官方 OpenAI。
 
 **只填平台名称、Base URL、API Key，其余全部自动完成。**
 
-![图形界面](docs/screenshot.png)
+![演示：切换平台后回到官方 OpenAI 也只要一条命令](docs/demo.gif)
 
-<sub>截图里的 API Key 和余额是演示数据；真实使用时 Key 存在系统钥匙串，余额来自平台自己的接口。</sub>
+<sub>演示里是截图脚本造的演示数据（假 Key + 本机假余额接口），不是谁的真实账号。</sub>
+
+## 装上它，三种方式任选
+
+**① macOS：下载就能用（推荐）**
+
+[**⬇︎ 下载完整版 App**](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest/download/Codex-Model-Switcher-macOS-latest-full.zip)
+—— 约 52 MB，**自带 Python**，不用装 Homebrew、不用装命令行工具，解压双击即可。
+机器上已经有 Python 3.9+ 的话，[**下载标准版**](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest/download/Codex-Model-Switcher-macOS-latest.zip) 只要 1 MB。
+
+> 这两个是**固定链接**，永远指向最新版，不会因为发新版而失效。
+> 首次打开如果被系统拦下：右键 App →「打开」，点一次就不再问了。
+
+**② 一条命令（macOS / Linux）**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yankuanglin1-droid/codex-model-switcher/main/tools/bootstrap.sh | bash
+```
+
+**③ 交给 AI（最省事）**
+
+把 [INSTALL-WITH-AI.md](INSTALL-WITH-AI.md) 里那段话整段复制给 Codex / Claude Code，
+它会自己问你要平台名和 Key，装好、配好、验证完，最后告诉你按什么切换。
+
+---
+
+装好之后日常就三条命令：
 
 ```
 codex-switcher add --preset deepseek --key-stdin   # 接入一个平台
 codex-switcher use deepseek                        # 切换过去
 codex-switcher restore                             # 一键切回官方 OpenAI
 ```
-
-> 不想敲命令？把 [INSTALL-WITH-AI.md](INSTALL-WITH-AI.md) 里那段话复制给
-> Codex / Claude Code，它会自己问你要平台名和 Key，然后装好、配好、验证完。
 
 ---
 

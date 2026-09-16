@@ -1,0 +1,68 @@
+name: 出问题了 / Something broke
+description: 切换失败、报错、装不上 —— 用这个
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先把这两条命令的输出贴进来，绝大多数问题一眼就能定位：
+
+        ```bash
+        codex-switcher doctor     # 环境、密钥、模型、协议桥四类检查
+        codex-switcher export     # 脱敏状态，**不含密钥**，可以直接贴
+        ```
+
+        ⚠️ **不要贴 API Key**。`export` 的输出已经脱敏，直接贴是安全的。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 你做了什么、期望什么、实际得到什么。有报错就贴原文。
+      placeholder: |
+        我执行 `codex-switcher use minimax`，然后新建任务选 MiniMax-M3，
+        Codex 报：The 'MiniMax-M3' model is not supported when using Codex with a ChatGPT account.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: codex-switcher doctor 的输出
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: export
+    attributes:
+      label: codex-switcher export 的输出
+      description: 已经脱敏，不含密钥。如果里面有你不方便公开的平台名，删掉那一行即可。
+      render: json
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: 系统
+      placeholder: macOS 15.3 (Apple 芯片) / Windows 11 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 运行 `codex-switcher --version`；装了 App 的话也写下 App 里显示的版本号。
+      placeholder: 1.5.2
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: restart
+    attributes:
+      label: 确认过下面这些了吗
+      options:
+        - label: 切换之后我**完全退出并重新打开**了 Codex（只关窗口不生效）
+        - label: 我是**新建任务**试的，不是在旧任务里换模型（旧任务绑着原来的服务商）

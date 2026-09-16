@@ -8,6 +8,10 @@ STATE_DIR="${CODEX_HOME:-$HOME/.codex}/model-switcher"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/launch.log"
 
+# 不要在 App 包体内写 __pycache__：一来会把代码签名弄脏（包体被改动后
+# codesign 校验就不再匹配），二来会让同一份源码打出来的包每次都不一样。
+export PYTHONDONTWRITEBYTECODE=1
+
 # 原生窗口应用会用 --no-browser 调我们：界面装在它自己的窗口里，不需要再开浏览器
 NO_BROWSER=0
 case "${1:-}" in
