@@ -422,8 +422,7 @@ class DiscoveryTests(unittest.TestCase):
             def __call__(self, request, timeout=None):
                 if self.code is None:
                     raise RuntimeError("boom")
-                import io
-                raise urllib.error.HTTPError(request.full_url, self.code, "x", {}, io.BytesIO(b""))
+                raise urllib.error.HTTPError(request.full_url, self.code, "x", {}, None)
 
         original = discovery.urllib.request.urlopen
         try:
@@ -440,6 +439,8 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class BridgeTests(unittest.TestCase):
+    """协议桥的请求/响应翻译。"""
+
     def test_responses_request_becomes_chat_request(self):
         from codex_switcher import bridge
         payload = bridge.responses_to_chat({
@@ -551,6 +552,69 @@ class FallbackTests(TempCodexHome):
         values = configfile_module.read_top_level(text, ("model_provider", "appearanceTheme"))
         self.assertEqual(values.get("model_provider"), "openai")
         self.assertNotIn("appearanceTheme", values)
+
+
+class WebUITests(TempCodexHome):
+    """图形界面：静态资源必须带令牌，否则页面会变成没样式、永远转圈的空白页。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        import threading
+        from http.server import ThreadingHTTPServer
+        from codex_switcher.webui import server
+
+        self.token = "test-token-123"
+        server.Handler.token = self.token
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        super().tearDown()
+
+    def _get(self, path: str):
+        import urllib.error
+        import urllib.request
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                return response.status, response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def test_page_requires_token(self):
+        status, _ = self._get("/")
+        self.assertEqual(status, 403)
+
+    def test_page_references_assets_with_token(self):
+        status, body = self._get("/?t=" + self.token)
+        self.assertEqual(status, 200)
+        self.assertIn("style.css?t=" + self.token, body)
+        self.assertIn("app.js?t=" + self.token, body)
+
+    def test_assets_are_served_with_token(self):
+        status, body = self._get("/static/style.css?t=" + self.token)
+        self.assertEqual(status, 200)
+        self.assertIn("--accent", body)
+        # 弹窗设了 display:flex，必须显式处理 hidden，否则一进页面就盖住整个界面
+        self.assertIn(".modal[hidden]", body)
+        status, body = self._get("/static/app.js?t=" + self.token)
+        self.assertEqual(status, 200)
+        self.assertIn("loadState", body)
+
+    def test_assets_reject_missing_token(self):
+        self.assertEqual(self._get("/static/app.js")[0], 403)
+
+    def test_api_state_shape(self):
+        status, body = self._get("/api/state?t=" + self.token)
+        self.assertEqual(status, 200)
+        document = json.loads(body)
+        self.assertIn("providers", document)
+        self.assertIn("presets", document)
+        self.assertIn("current", document)
+        self.assertGreater(len(document["presets"]), 10)
 
 
 class UsageTests(unittest.TestCase):

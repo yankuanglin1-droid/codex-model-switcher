@@ -5,6 +5,8 @@
 
 **只填平台名称、Base URL、API Key，其余全部自动完成。**
 
+![图形界面](docs/screenshot.png)
+
 ```
 codex-switcher add --preset deepseek --key-stdin   # 接入一个平台
 codex-switcher use deepseek                        # 切换过去

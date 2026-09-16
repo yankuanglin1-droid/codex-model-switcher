@@ -55,6 +55,14 @@ async function loadState(withBalance = false) {
     const still = STATE.providers.find((p) => p.id === SELECTED);
     if (still) renderDetail(still);
     else { SELECTED = null; $('detail').innerHTML = '<div class="placeholder">从左边选一个平台。</div>'; }
+  } else {
+    // 首次打开时自动展示当前正在使用的平台
+    const current = STATE.providers.find((p) => p.is_current) || STATE.providers[0];
+    if (current) {
+      SELECTED = current.id;
+      renderProviders();
+      renderDetail(current);
+    }
   }
 }
 

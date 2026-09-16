@@ -73,6 +73,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404, "not found")
             return
         body = path.read_bytes()
+        # 页面里的静态资源也要带上令牌，否则样式和脚本会被自己拦下来
+        if path.name == "index.html":
+            text = body.decode("utf-8")
+            text = text.replace('href="/static/style.css"',
+                                'href="/static/style.css?t=%s"' % self.token)
+            text = text.replace('src="/static/app.js"',
+                                'src="/static/app.js?t=%s"' % self.token)
+            body = text.encode("utf-8")
         mime, _ = mimetypes.guess_type(str(path))
         self.send_response(200)
         self.send_header("Content-Type", (mime or "application/octet-stream") + "; charset=utf-8")

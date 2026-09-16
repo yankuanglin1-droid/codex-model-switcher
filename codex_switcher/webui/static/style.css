@@ -162,6 +162,8 @@ h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
   overflow: auto;
   z-index: 50;
 }
+/* 注意：.modal 设了 display:flex，会盖掉 hidden 属性的默认样式，必须显式关掉 */
+.modal[hidden] { display: none; }
 .modal-card {
   width: min(880px, 100%);
   background: var(--surface);
