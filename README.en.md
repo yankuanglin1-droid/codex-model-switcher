@@ -2,6 +2,11 @@
 
 [中文](README.md) · **English** · [Let an AI install it →](INSTALL-WITH-AI.md)
 
+> **macOS: download the app → [latest release](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)**
+> Pick the `…-full.zip` (~52 MB, bundles its own Python, nothing to install).
+> The binaries are not committed to this repo on purpose — a 52 MB zip in git
+> would stay in history forever.
+
 Plug DeepSeek, MiniMax, Zhipu GLM, Kimi, Qwen, SiliconFlow, OpenRouter, Groq and more
 into Codex, pick them from the model dropdown, and switch back to official OpenAI any time.
 
@@ -79,7 +84,7 @@ This tool does all of it in two commands. The pitfalls it handles:
 
 ## Features
 
-- 17 built-in provider presets plus a fully manual "any Base URL" path
+- 17 provider presets, one of which is a fully manual "any Base URL" entry
 - Full model list imported per provider, newest versions first
 - Switch from CLI, interactive menu, or a local-only web UI
 - A native macOS window app (Swift + WKWebView): its own window, Dock icon and menu bar,
@@ -106,6 +111,7 @@ Providers that only speak Chat Completions are routed through a local bridge on
 ## Verification
 
 ```bash
+python3 tools/preflight.py              # full pre-release self-check (runs everything below)
 python3 -m unittest discover -s tests   # 71 tests, green on Python 3.9 / 3.12 / 3.13 / 3.14
 python3 tools/verify_providers.py
 python3 tools/verify_codex_catalog.py

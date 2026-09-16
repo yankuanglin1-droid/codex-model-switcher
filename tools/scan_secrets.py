@@ -30,6 +30,18 @@ ALLOWED = {
 }
 
 SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
+SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".icns", ".ico",
+               ".zip", ".gz", ".whl", ".so", ".dylib", ".pyc"}
+
+
+def scan_text(text: str, where: str, findings: list, allowed: set) -> None:
+    if where in allowed:
+        return
+    for label, pattern in PATTERNS:
+        for match in pattern.finditer(text):
+            line = text[:match.start()].count("\n") + 1
+            # 只打印前 12 个字符做定位，绝不把完整密钥打到终端或日志里
+            findings.append((where, line, label, match.group(0)[:12] + "…"))
 
 
 def scan() -> int:
@@ -42,23 +54,81 @@ def scan() -> int:
         relative = path.relative_to(ROOT).as_posix()
         if relative in ALLOWED:
             continue
+        if path.suffix.lower() in SKIP_SUFFIX:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        for label, pattern in PATTERNS:
-            for match in pattern.finditer(text):
-                line = text[:match.start()].count("\n") + 1
-                findings.append((relative, line, label, match.group(0)[:12] + "…"))
+        scan_text(text, relative, findings, ALLOWED)
 
     if not findings:
-        print("通过：没有发现密钥或个人路径。")
+        print("通过（工作区）：没有发现密钥或个人路径。")
         return 0
-    print("发现 %d 处需要处理的内容：" % len(findings))
+    print("工作区发现 %d 处需要处理的内容：" % len(findings))
     for relative, line, label, sample in findings:
         print("  %s:%d  %s  %s" % (relative, line, label, sample))
     return 1
 
 
+def scan_history() -> int:
+    """扫全部 git 历史。
+
+    只在工作区扫是不够的：密钥就算后来删掉，也仍然留在提交历史里，
+    任何人都能 `git log -p` 翻出来。凡是推到公开仓库过的东西，删掉≠消失。
+    """
+    import subprocess
+
+    try:
+        commits = subprocess.run(
+            ["git", "rev-list", "--all"], cwd=ROOT,
+            capture_output=True, text=True, timeout=120, check=True).stdout.split()
+    except (subprocess.SubprocessError, OSError) as exc:
+        print("读不到 git 历史：%s" % exc, file=sys.stderr)
+        return 2
+
+    findings = []
+    seen_blobs = set()
+    for commit in commits:
+        result = subprocess.run(
+            ["git", "ls-tree", "-r", "-z", commit], cwd=ROOT,
+            capture_output=True, timeout=180)
+        if result.returncode != 0:
+            continue
+        for entry in result.stdout.split(b"\0"):
+            if not entry:
+                continue
+            meta, _, name = entry.partition(b"\t")
+            parts = meta.split()
+            if len(parts) < 3 or parts[1] != b"blob":
+                continue
+            blob = parts[2].decode()
+            if blob in seen_blobs:
+                continue
+            seen_blobs.add(blob)
+            path = name.decode("utf-8", "replace")
+            if path in ALLOWED or Path(path).suffix.lower() in SKIP_SUFFIX:
+                continue
+            content = subprocess.run(
+                ["git", "cat-file", "-p", blob], cwd=ROOT,
+                capture_output=True, timeout=60).stdout
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            scan_text(text, path, findings, ALLOWED)
+
+    if not findings:
+        print("通过（git 历史 %d 个提交 / %d 个文件版本）：没有发现密钥或个人路径。"
+              % (len(commits), len(seen_blobs)))
+        return 0
+    print("git 历史里发现 %d 处需要处理的内容：" % len(findings))
+    for path, line, label, sample in findings:
+        print("  %s:%d  %s  %s" % (path, line, label, sample))
+    return 1
+
+
 if __name__ == "__main__":
+    if "--history" in sys.argv:
+        raise SystemExit(scan_history())
     raise SystemExit(scan())

@@ -4,6 +4,10 @@
 
 **中文** · [English](README.en.md) · [让 AI 帮我装 →](INSTALL-WITH-AI.md)
 
+> **macOS 用户直接下载 →  [最新版 Releases](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)**
+> 选 `…-full.zip`（约 52 MB，自带 Python，什么都不用装）解压即用。
+> 安装包不放在仓库里，只在 Releases —— 52 MB 的二进制进 git 会永久留在历史里。
+
 把 DeepSeek、MiniMax、智谱 GLM、Kimi、通义千问、硅基流动、OpenRouter、Groq… 接进
 ChatGPT App 里的 Codex，在输入框旁边的模型列表里直接选用，随时一键切回官方 OpenAI。
 
@@ -123,8 +127,10 @@ macOS 有两个安装包，按需要选一个：
 自检命令：
 
 ```bash
-python3 tools/check_portability.py    # 扫一遍有没有平台专属写法
-python3 -m unittest discover -s tests # 64 项测试
+python3 tools/preflight.py            # 发布前总自检：命名、链接、密钥历史、可移植性、测试
+python3 tools/check_portability.py    # 只扫平台专属写法
+python3 tools/scan_secrets.py --history   # 连 git 历史一起扫（密钥删了也可能还在历史里）
+python3 -m unittest discover -s tests # 71 项测试
 ```
 
 ### 方式 A：直接装 App（不用 clone 仓库）
