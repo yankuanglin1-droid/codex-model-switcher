@@ -440,15 +440,33 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
                  "session": False, "meta": 0, "settings": 0, "db": []}
         path = Path(item["rollout_path"]) if item["rollout_path"] else None
         if path and path.exists():
-            changed, meta, settings, cleaned = _rewrite_session_file(
-                path, item["provider"], item["expected"], backup_dir)
-            entry.update(session=changed, meta=meta, settings=settings, history=cleaned)
+            try:
+                # 活动文件保护与 follow_switch 一致：Codex 正写着的文件不碰
+                # （替换 inode 会丢它后续的写入），数据库照样改，
+                # 文件留给后台巡检在 Codex 退出后补上。
+                if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
+                    entry["active"] = True
+                    report["skipped_active"].append(
+                        {"id": entry["id"], "title": entry["title"]})
+                else:
+                    changed, meta, settings, cleaned = _rewrite_session_file(
+                        path, item["provider"], item["expected"], backup_dir)
+                    entry.update(session=changed, meta=meta, settings=settings, history=cleaned)
+            except OSError:
+                pass
         entry["db"] = _update_databases(item["id"], item["provider"], item["expected"], backup_dir)
         report["items"].append(entry)
         report["fixed"] += 1
 
     for item in stale_files:
         path = Path(item["rollout_path"])
+        try:
+            if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
+                report["skipped_active"].append(
+                    {"id": item["id"][:8], "title": item["title"][:40]})
+                continue
+        except OSError:
+            continue
         changed, meta, settings, cleaned = _rewrite_session_file(
             path, None, item["provider"], backup_dir)  # 深度模式：全部对齐到数据库的值
         if changed:

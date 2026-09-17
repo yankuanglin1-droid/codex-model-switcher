@@ -2135,6 +2135,46 @@ class ThreadBindingTests(TempCodexHome):
         self.assertEqual(self._read_thread("old02"), ("MiniMax-M3", "minimax"))
         self.assertEqual(totals["exec_followed"], 1)
 
+    def test_follow_back_to_openai_moves_exec_and_strips_third_party_history(self):
+        """切回官方 OpenAI：定时任务照搬，第三方产生的垃圾条目同一次清掉。
+
+        MiniMax 执行 web_search 产出的条目（只有 id 没有 call_id）回放给
+        OpenAI 同样可能 400 —— 「切回去」不是免检通道。
+        """
+        from codex_switcher import threads
+        path = self._make_dirty_rollout("task-back-openai", "minimax")
+        self._make_db([self._thread_row("iii999", "MiniMax-M3", "minimax", path,
+                                        age=7 * 86400, source="exec")])
+        report = threads.follow_switch("minimax", "openai", "gpt-5-codex")
+        self.assertEqual(report["moved"], 1, report)
+        self.assertEqual(report["exec_followed"], 1)
+        text = path.read_text()
+        self.assertIn('"model_provider":"openai"', text)
+        self.assertNotIn("web_search_call", text)
+        self.assertNotIn("function_call_output", text)
+        # 加密思考是 OpenAI 专有，第三方不会有；目标是 openai 时 reasoning 不误删
+        self.assertEqual(report["items"][0].get("history"), 2, report["items"][0])
+
+    def test_repair_skips_active_session_file(self):
+        """看门狗每 12 秒跑一次 repair：Codex 正写着的文件绝不能改写。
+
+        替换 inode 会让正在追加的写入丢失。数据库照样修（没有这个风险），
+        会话文件留给后台在 Codex 退出后补上。
+        """
+        import time
+        from codex_switcher import threads
+        path = self._make_rollout("task-hot", "minimax")
+        # mtime 保持最新（_make_rollout 把它拨到 1 小时前，这里拨回来）
+        os.utime(path, (time.time(), time.time()))
+        self._make_db([self._thread_row("jjj000", "deepseek-flash", "minimax", path)])
+        report = threads.repair()
+        self.assertEqual(report["fixed"], 1, report)
+        # 数据库已对齐
+        self.assertEqual(self._read_thread("jjj000"), ("deepseek-flash", "deepseek"))
+        # 但文件原样未动：不是活动文件保护失效后那种被改写的样子
+        self.assertIn('"model_provider": "minimax"', path.read_text())
+        self.assertTrue(report["skipped_active"], report)
+
 
 class IntegrationsTests(TempCodexHome):
     """平台全量能力环境：MCP 写入 config.toml、CLI 环境变量文件。"""

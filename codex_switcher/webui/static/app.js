@@ -205,6 +205,8 @@ async function fitSwitch(pick) {
     const item = STATE.providers.find((p) => p.id === pick.provider);
     if (item) renderDetail(item);
     toast(t('guard.fit_done', { label: pick.label, model: pick.model }));
+    // fit_switch 也是切换：Codex 要重启才能用上新模型
+    openRestartModal();
   } catch (error) {
     toast(error.message, true);
   }
@@ -1169,6 +1171,8 @@ $('btn-restore').onclick = async () => {
     await api('restore', {});
     await loadState();
     toast(t('toast.restored'));
+    // 切回官方也是切换：Codex 只在启动时读配置
+    openRestartModal();
   } catch (error) {
     toast(error.message, true);
   }

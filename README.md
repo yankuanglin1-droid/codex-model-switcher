@@ -8,7 +8,7 @@
 [![macOS 11+](https://img.shields.io/badge/macOS-11%2B-black?style=flat-square&logo=apple)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
 [![Windows / Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-0078D6?style=flat-square&logo=windows)](INSTALL-WITH-AI.md)
 [![Python 3.9+](https://img.shields.io/badge/Python%203.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](README.md)
-[![Tests](https://img.shields.io/badge/tests-148%20passing-2ea44f?style=flat-square)](#development)
+[![Tests](https://img.shields.io/badge/tests-150%20passing-2ea44f?style=flat-square)](#development)
 
 **Codex (ChatGPT App) can officially only talk to OpenAI. This tool opens it up to
 any provider with an OpenAI-compatible API** — DeepSeek, MiniMax, Zhipu GLM, Moonshot

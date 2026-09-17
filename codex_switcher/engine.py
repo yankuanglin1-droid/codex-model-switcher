@@ -369,6 +369,9 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
             repaired = threads_module.repair().get("fixed", 0)
         except Exception:  # noqa: BLE001
             repaired = 0
+        # 注意：切回官方**不做** auto_clean —— 官方解析器认自家的条目类型，
+        # 保留完整历史（test_switching_to_openai_does_not_touch_history 锁定）。
+        # 跨平台清洗只在「任务真的搬家」时发生（_rewrite_session_file 内联）。
         return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "backup": str(backup),
                 "threads_fixed": repaired, "threads_followed": followed,
                 "full_follow": {"scheduled": full_follow_scheduled}}
