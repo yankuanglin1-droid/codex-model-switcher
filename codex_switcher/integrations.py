@@ -131,6 +131,10 @@ def _upsert_mcp_block(provider_id: str, table_text: Optional[str]) -> Path:
     if configfile._text_without_blocks(text, targets).strip() != \
             configfile._text_without_blocks(new_text, targets).strip():
         raise configfile.ConfigError("写入 MCP 配置时改动了不该改的内容")
+    # 内容已经一致就别再动文件：切换是高频操作，每次都写会白白刷 mtime、
+    # 堆一目录毫无意义的备份
+    if new_text == text:
+        return None
     if configfile.toml_available():
         after = configfile.parse(new_text)
         block = (after.get("mcp_servers") or {}).get(provider_id) or {}
@@ -166,7 +170,7 @@ def sync(provider_id: str, record: Dict, api_key: Optional[str] = None) -> Dict:
                              "args": list(config.get("args") or []),
                              "env_key": config.get("env_key"),
                              "table": _mcp_table_name(provider_id),
-                             "backup": str(backup)}
+                             "backup": str(backup) if backup else None}
         except Exception as exc:  # noqa: BLE001 - 周边配置失败不影响主流程
             result["errors"].append("mcp: %s" % exc)
 

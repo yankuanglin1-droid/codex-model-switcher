@@ -621,6 +621,17 @@ def cmd_use(args) -> int:
     out("配置备份：%s" % result["backup"])
     out("")
     out("接下来：完全退出（⌘Q）并重新打开 Codex，然后新建任务。")
+    # 后台全量迁移在 CLI 里必须同步跑：daemon 线程会随进程退出被杀，
+    # 排队了却没跑等于没搬。GUI 服务常驻才用得上后台线程。
+    follow_report = result.get("threads_followed") or {}
+    if (result.get("full_follow") or {}).get("scheduled") and follow_report.get("to"):
+        out("")
+        out("正在把 %s 平台的全部任务（含每日定时任务）搬到 %s，任务多时会花一点时间…"
+            % (follow_report.get("from"), follow_report.get("to")))
+        totals = engine.full_follow_all(follow_report["from"], follow_report["to"],
+                                        follow_report.get("model"))
+        out("任务迁移完成：%d 个任务已搬到 %s（含定时任务 %d 个）。"
+            % (totals["moved"], follow_report["to"], totals["exec_followed"]))
     if result["provider"] != engine.OFFICIAL_PROVIDER:
         # 跨平台自动清洗：别家产生的服务端工具条目（web_search_call 等）
         # 回放到新平台必然 400，切换时已经自动剥掉（先备份）。这里报告结果。
@@ -643,8 +654,8 @@ def cmd_use(args) -> int:
         if not engine.bridge_module.is_running(port):
             out("")
             out("⚠ 这个平台走本地协议桥，但桥还没在运行。先执行：codex-switcher bridge")
-    out("注意：已经存在的旧任务仍绑定原来的平台，不会跟着切换；")
-    out("     要在旧对话里继续，请对它使用「分叉」，或换个新任务。")
+    out("任务绑定：最近在用的旧任务、每日定时任务，以及其余任务（后台分批）"
+        "都已经或正在搬到 %s，旧对话可以直接继续。" % result.get("label", result["provider"]))
 
     # 切到窗口更小的第三方模型时，旧会话可能根本装不下。
     # 装不下又不说，用户就会看到「反复压缩」：压完还超、超限又压。
@@ -672,6 +683,15 @@ def cmd_restore(args) -> int:
         return 0
     out("已恢复官方 OpenAI 登录 · %s" % result["model"])
     out("配置备份：%s" % result["backup"])
+    # CLI 里同步跑全量迁移（daemon 线程会随进程退出被杀，理由同 cmd_use）
+    follow_report = result.get("threads_followed") or {}
+    if (result.get("full_follow") or {}).get("scheduled") and follow_report.get("to"):
+        out("正在把 %s 平台的全部任务搬回官方，任务多时会花一点时间…"
+            % follow_report.get("from"))
+        totals = engine.full_follow_all(follow_report["from"], follow_report["to"],
+                                        follow_report.get("model"))
+        out("任务迁移完成：%d 个任务已搬回官方（含定时任务 %d 个）。"
+            % (totals["moved"], totals["exec_followed"]))
     out("完全退出并重新打开 Codex 后生效。")
     return 0
 
