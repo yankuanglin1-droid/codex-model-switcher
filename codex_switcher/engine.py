@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -29,6 +31,15 @@ class SwitchError(RuntimeError):
 
 OFFICIAL_PROVIDER = "openai"
 DEFAULT_OFFICIAL_MODEL = "gpt-5-codex"
+
+# 后台全量迁移：切换成功后，把上一个平台的全部任务（含 ChatGPT 的老任务）
+# 分批搬到新平台。前台只搬最近在用的（切换秒回），剩下的在这里慢慢补齐 ——
+# 这是「切完之后所有任务（含每日定时任务）都能正常跑」的保证，不是可选项。
+_FULL_FOLLOW_BATCH = 25
+_FULL_FOLLOW_MAX_ROUNDS = 400
+_FULL_FOLLOW_RUNNING = threading.Lock()
+# 测试环境把后台迁移关掉：测试要求全同步，后台线程会和临时目录的清理打架
+ALLOW_BACKGROUND_FOLLOW = True
 
 
 def slugify(value: str) -> str:
@@ -289,7 +300,17 @@ def add_provider(
             switch_to(identifier, chosen)
             record = state_module.get_provider(state_module.load(), identifier) or record
 
-    return {"record": record, "models": model_ids, "discovery_error": discovery_error}
+    # 同一把 Key 还能干的事（生图 / 生视频 / 语音 / 联网搜索 / MCP / CLI）
+    # 也一并配好 —— 用户要求「配 API 时同步配好全部能力」，不是只配对话。
+    integrations_result = None
+    try:
+        from . import integrations as integrations_module
+        integrations_result = integrations_module.sync(identifier, record, api_key)
+    except Exception:  # noqa: BLE001 - 周边配置失败不影响添加本身
+        integrations_result = None
+
+    return {"record": record, "models": model_ids, "discovery_error": discovery_error,
+            "integrations": integrations_result}
 
 
 def refresh_models(provider_id: str) -> Dict:
@@ -330,19 +351,27 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         # 切回官方同样要把旧任务搬过来：任务还记着第三方，恢复时就会拿
         # gpt 的模型名去敲第三方的门，那边一样回 unknown model。
         followed = None
+        full_follow_scheduled = False
         if previous_provider and previous_provider != OFFICIAL_PROVIDER:
             try:
                 followed = threads_module.follow_switch(
                     previous_provider, OFFICIAL_PROVIDER, settings["model"])
             except Exception:  # noqa: BLE001
                 followed = None
+            # 第三方平台的任务总量不大，后台把它们全部搬回官方，不留死角
+            try:
+                full_follow_scheduled = schedule_full_follow(
+                    previous_provider, OFFICIAL_PROVIDER, settings["model"])
+            except Exception:  # noqa: BLE001
+                full_follow_scheduled = False
         repaired = 0
         try:
             repaired = threads_module.repair().get("fixed", 0)
         except Exception:  # noqa: BLE001
             repaired = 0
         return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "backup": str(backup),
-                "threads_fixed": repaired, "threads_followed": followed}
+                "threads_fixed": repaired, "threads_followed": followed,
+                "full_follow": {"scheduled": full_follow_scheduled}}
 
     record = state_module.get_provider(state, provider_id)
     if not record:
@@ -438,9 +467,93 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
                 moving_off_openai=(previous_provider == OFFICIAL_PROVIDER))
         except Exception:  # noqa: BLE001 - 清洗失败绝不影响切换
             history_clean = None
+
+    # 切到哪家，就把哪家的 MCP / CLI 环境配好（幂等：已配置就原地刷新）
+    integrations_result = None
+    try:
+        from . import integrations as integrations_module
+        integrations_result = integrations_module.sync(provider_id, record)
+    except Exception:  # noqa: BLE001 - 周边配置失败绝不影响切换
+        integrations_result = None
+
+    # 前台只搬了最近在用的（秒回）；剩下的老任务（含 ChatGPT 的）和
+    # 每日定时任务在后台分批搬完，保证「切完之后所有任务都能正常跑」。
+    full_follow_scheduled = False
+    if previous_provider and previous_provider != provider_id:
+        try:
+            full_follow_scheduled = schedule_full_follow(previous_provider, provider_id, chosen)
+        except Exception:  # noqa: BLE001 - 后台迁移排队失败不影响切换本身
+            full_follow_scheduled = False
     return {"provider": provider_id, "label": record["label"], "model": chosen,
             "backup": str(backup), "threads_fixed": threads_fixed,
-            "threads_followed": threads_followed, "history_clean": history_clean}
+            "threads_followed": threads_followed, "history_clean": history_clean,
+            "integrations": integrations_result,
+            "full_follow": {"scheduled": full_follow_scheduled}}
+
+
+def sync_integrations(provider_id: str) -> Dict:
+    """手动触发一次平台全量能力环境的配置（MCP / CLI 环境变量）。"""
+    state = state_module.load()
+    record = state_module.get_provider(state, provider_id)
+    if not record:
+        raise SwitchError("没有找到平台：%s" % provider_id)
+    from . import integrations as integrations_module
+    result = integrations_module.sync(provider_id, record)
+    result["status"] = integrations_module.status(provider_id)
+    return result
+
+
+def integrations_status(provider_id: str) -> Dict:
+    """某个平台的全量能力环境当前配置状态。"""
+    from . import integrations as integrations_module
+    return integrations_module.status(provider_id)
+
+
+def full_follow_all(from_provider: str, to_provider: str, model: Optional[str] = None) -> Dict:
+    """分批把旧平台的**全部**任务搬到新平台（后台用，含 ChatGPT 老任务）。
+
+    每批拿一次文件锁：用户在迁移中途再切一次，也不会被卡住。
+    没有实际进展就停（全是活动文件改不动 / 绑定已经搬完），避免空转。
+    """
+    totals = {"moved": 0, "rounds": 0, "exec_followed": 0}
+    if not from_provider or from_provider == to_provider:
+        return totals
+    for _ in range(_FULL_FOLLOW_MAX_ROUNDS):
+        with platform_compat.file_lock(paths.lock_file()):
+            report = threads_module.follow_switch(
+                from_provider, to_provider, model,
+                window_seconds=None, include_openai=True, limit=_FULL_FOLLOW_BATCH)
+        totals["rounds"] += 1
+        totals["moved"] += report.get("moved", 0)
+        totals["exec_followed"] += report.get("exec_followed", 0)
+        progress = any(item.get("session") or item.get("db")
+                       for item in report.get("items") or [])
+        if not progress or not report.get("moved"):
+            break
+        time.sleep(0.2)
+    return totals
+
+
+def schedule_full_follow(from_provider: str, to_provider: str, model: Optional[str] = None) -> bool:
+    """把全量迁移排到后台线程。已有迁移在跑就跳过（幂等）。"""
+    if not ALLOW_BACKGROUND_FOLLOW:
+        return False
+    if not from_provider or from_provider == to_provider:
+        return False
+    if not _FULL_FOLLOW_RUNNING.acquire(blocking=False):
+        return False
+
+    def _job():
+        try:
+            full_follow_all(from_provider, to_provider, model)
+        except Exception:  # noqa: BLE001 - 后台迁移失败不能影响任何前台功能
+            pass
+        finally:
+            _FULL_FOLLOW_RUNNING.release()
+
+    threading.Thread(target=_job, daemon=True,
+                     name="switcher-full-follow").start()
+    return True
 
 
 def remove_provider(provider_id: str, purge_key: bool = True) -> Dict:
@@ -466,6 +579,12 @@ def remove_provider(provider_id: str, purge_key: bool = True) -> Dict:
         catalog_target.unlink()
     if purge_key:
         secrets.delete(provider_id)
+    # MCP 配置和环境变量文件一起清掉，不留指向已删除平台的死配置
+    try:
+        from . import integrations as integrations_module
+        integrations_module.remove(provider_id)
+    except Exception:  # noqa: BLE001 - 清理失败不影响删除本身
+        pass
     state_module.remove_provider(state, provider_id)
     state_module.save(state)
     return {"provider": provider_id, "backup": str(backup) if backup else None, "key_purged": purge_key}

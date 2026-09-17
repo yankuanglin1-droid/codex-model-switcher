@@ -26,6 +26,7 @@ from .. import (PROJECT_URL, __version__, balance as balance_module, engine, pat
 from .. import catalog as catalog_module
 from .. import capabilities as capabilities_module
 from .. import contextguard as contextguard_module
+from .. import integrations as integrations_module
 from ..discovery import DiscoveryError
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -177,6 +178,11 @@ def _state_payload(include_balance: bool = False) -> Dict:
         item["model_capabilities"] = _model_capabilities(item["id"])
         # 「能力查看」页要顺带告诉用户这个平台官方文档在哪、怎么接进 Codex
         item["platform_docs"] = capabilities_module.platform_docs(item["id"])
+        # 同一把 API Key 在 Codex 之外还能干什么：生图 / 生视频 / 语音 /
+        # 联网搜索 / 官方 MCP 与 CLI。能力页要把全量能力面摆出来。
+        item["api_surface"] = capabilities_module.platform_surface(item["id"])
+        # MCP / CLI 环境配好了没（add / switch 时自动配置，这里只报状态）
+        item["integrations"] = integrations_module.status(item["id"])
         item["usage"] = engine.usage_with_quota(item["id"], item.get("quota_tokens"), used_tokens)
         item["usage"]["used_tokens_human"] = usage.human_tokens(used_tokens)
         if item["usage"].get("quota_tokens"):
@@ -380,6 +386,22 @@ class Handler(BaseHTTPRequestHandler):
                     provider_id, model_id, key=key,
                     value=None if value is None else str(value))
             except (engine.SwitchError, ValueError) as exc:
+                return {"error": str(exc)}
+            result["state"] = _state_payload()
+            return result
+
+        if action == "restart_codex":
+            # Codex 只在启动时读一次配置：切完模型点确认，由这里代劳重启
+            from .. import appctl
+            return appctl.restart_codex()
+
+        if action == "sync_integrations":
+            provider_id = (payload.get("provider") or "").strip()
+            if not provider_id:
+                return {"error": "缺少平台"}
+            try:
+                result = engine.sync_integrations(provider_id)
+            except engine.SwitchError as exc:
                 return {"error": str(exc)}
             result["state"] = _state_payload()
             return result

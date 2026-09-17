@@ -275,10 +275,17 @@ Codex 会把整段会话历史**原样回放**到下一次请求里。历史里�
 
 ### 怎么修
 
+**v1.6.3 起，绝大多数情况已经自动修好**：任务从一个平台改绑到另一个平台时
+（切换跟随 / `repair` / 深度修复），会话历史里的跨平台条目和孤儿输出会在
+**同一次改写里剥掉**——不存在「只改绑、不清洗」的路径。ChatGPT 的老任务
+（含每日定时任务）会在切换后的后台迁移中一并处理。
+
+存量文件（机制上线前就已经搬过的）用命令手动清：
+
 ```bash
 codex-switcher history                     # 检查最近 30 个会话（只读）
 codex-switcher history --clean --dry-run   # 预演，看看会删什么
-codex-switcher history --clean             # 真的清（自动备份）
+codex-switcher history --clean --cross-provider  # 真的清（自动备份）
 ```
 
 清洗规则刻意保守：**只删“确定是坏的”和“确定对方用不上”的**，

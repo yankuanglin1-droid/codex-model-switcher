@@ -315,6 +315,19 @@ function renderProviderDocs() {
     link.rel = 'noreferrer';
     node.appendChild(link);
   }
+  // 全量能力提醒：这个平台的 MCP / CLI 环境还没配齐的话，别让用户不知道
+  const integrations = provider.integrations || {};
+  const surface = provider.api_surface || [];
+  if (integrations.available && !integrations.mcp) {
+    const warn = el('div', 'docs-reminder');
+    warn.appendChild(el('p', 'docs-reminder-text', t('docs.integrations_missing')));
+    const btn = el('button', 'btn small docs-reminder-btn', t('caps.sync_button'));
+    btn.addEventListener('click', () => syncIntegrations(provider));
+    warn.appendChild(btn);
+    node.appendChild(warn);
+  } else if (integrations.mcp && surface.length) {
+    node.appendChild(el('p', 'docs-hint', t('caps.mcp_ready')));
+  }
 }
 
 function renderDetail(provider) {
@@ -775,6 +788,10 @@ function renderCapsPage() {
     else if (!models.length) table.appendChild(el('div', 'hint', t('caps.focus_gone')));
     section.appendChild(table);
 
+    // 平台全量 API 能力：同一把 Key 在 Codex 之外还能干什么
+    // （生图 / 生视频 / 语音 / 联网搜索 / 官方 MCP / CLI）
+    section.appendChild(capsSurfaceBlock(provider));
+
     const hint = el('div', 'caps-section-note');
     if (provider.notes) hint.appendChild(el('div', 'note', provider.notes));
     hint.appendChild(el('div', 'note', t('caps.probe_cost')));
@@ -783,6 +800,56 @@ function renderCapsPage() {
     section.appendChild(hint);
     body.appendChild(section);
   }
+}
+
+function capsSurfaceBlock(provider) {
+  const wrap = el('div', 'caps-surface');
+  const head = el('div', 'caps-surface-head');
+  head.appendChild(el('h4', null, t('caps.surface_title')));
+  head.appendChild(el('span', 'note', t('caps.surface_hint')));
+  wrap.appendChild(head);
+  const surface = provider.api_surface || [];
+  if (!surface.length) {
+    wrap.appendChild(el('div', 'hint', t('caps.surface_empty')));
+    return wrap;
+  }
+  const list = el('div', 'caps-surface-list');
+  for (const item of surface) {
+    const row = el('div', 'caps-surface-row');
+    const chip = el('span', 'chip ' + (item.status === 'yes' ? 'yes' : item.status === 'no' ? 'no' : 'unknown'),
+      t('caps.' + item.status));
+    row.appendChild(chip);
+    row.appendChild(el('span', 'caps-surface-name', t('surface.' + item.key)));
+    if (item.note) row.appendChild(el('span', 'caps-surface-note', item.note));
+    if (item.url) {
+      const link = el('a', 'caps-surface-link', t('caps.docs_link'));
+      link.href = item.url;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      row.appendChild(link);
+    }
+    list.appendChild(row);
+  }
+  wrap.appendChild(list);
+  const status = provider.integrations || {};
+  if (status.mcp) wrap.appendChild(el('div', 'note', t('caps.mcp_ready')));
+  else if (status.available) {
+    const btn = el('button', 'btn small', t('caps.sync_button'));
+    btn.addEventListener('click', () => syncIntegrations(provider));
+    wrap.appendChild(btn);
+  }
+  return wrap;
+}
+
+async function syncIntegrations(provider) {
+  toast(t('caps.syncing'));
+  try {
+    const result = await api('sync_integrations', { provider: provider.id });
+    if (result.error) { toast(t('caps.sync_failed', { error: result.error }), true); return; }
+    if (result.state) STATE = result.state;
+    if (VIEW === 'caps') renderCapsPage();
+    toast(t('caps.sync_done'));
+  } catch (error) { toast(t('caps.sync_failed', { error: error.message }), true); }
 }
 
 async function runProbe(provider, doApply, model) {
@@ -907,6 +974,11 @@ async function switchTo(provider, model) {
         : t('toast.followed', { n: followed.moved, label: result.label || result.provider }),
       ), 900);
     }
+    // 后台还在分批搬老任务（含每日定时任务），也要让用户知道
+    if (result.full_follow && result.full_follow.scheduled) {
+      setTimeout(() => toast(t('toast.follow_background',
+        { label: result.label || result.provider })), 1800);
+    }
     STATE = result.state;
     SELECTED = provider;
     // 刚切过去的模型就是用户关心的那个，能力查看跟着切过去
@@ -915,8 +987,36 @@ async function switchTo(provider, model) {
     const item = STATE.providers.find((p) => p.id === provider);
     if (item) renderDetail(item);
     if (VIEW === 'caps') renderCapsPage();
+    // Codex 只在启动时读一次配置：切完弹窗提醒重启，点确认自动重启
+    openRestartModal();
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+function openRestartModal() {
+  const node = $('restart-modal');
+  if (!node) return;
+  node.hidden = false;
+  const body = $('restart-modal-body');
+  if (body) body.textContent = t('restart.body');
+}
+
+function closeRestartModal() {
+  const node = $('restart-modal');
+  if (node) node.hidden = true;
+}
+
+async function restartCodexNow() {
+  closeRestartModal();
+  toast(t('restart.doing'));
+  try {
+    const result = await api('restart_codex', {});
+    if (result.error) { toast(t('restart.failed', { error: result.error }), true); return; }
+    if (result.restarted) toast(t('restart.done'));
+    else toast(result.detail || t('restart.manual'), true);
+  } catch (error) {
+    toast(t('restart.failed', { error: error.message }), true);
   }
 }
 
@@ -1040,6 +1140,15 @@ $('platform-search').addEventListener('input', (event) => {
 });
 $('btn-close-manual').onclick = closeManual;
 $('btn-save-manual').onclick = saveManual;
+const restartModal = $('restart-modal');
+if (restartModal) {
+  $('btn-restart-now').onclick = restartCodexNow;
+  $('btn-restart-later').onclick = closeRestartModal;
+  $('btn-close-restart').onclick = closeRestartModal;
+  restartModal.addEventListener('click', (event) => {
+    if (event.target === restartModal) closeRestartModal();
+  });
+}
 $('btn-refresh-all').onclick = async (event) => {
   const button = event.currentTarget;
   button.disabled = true;

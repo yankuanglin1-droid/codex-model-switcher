@@ -507,6 +507,28 @@ h1 {
 .caps-section-title h3 { margin: 0; font-size: 18px; }
 .caps-section-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .caps-section-note { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+
+/* 平台全量 API 能力板块 */
+.caps-surface {
+  margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border, #d8dbe0);
+  border-radius: 12px; background: var(--surface-soft, #f6f7f9);
+}
+.caps-surface-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.caps-surface-head h4 { margin: 0; font-size: 13px; }
+.caps-surface-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.caps-surface-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.caps-surface-name { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+.caps-surface-note { font-size: 12px; color: var(--text-dim, #5a616c); flex: 1 1 auto; min-width: 200px; }
+.caps-surface-link { font-size: 12px; white-space: nowrap; }
+
+/* 接入说明面板（渐变磨砂玻璃）里的全量能力提醒 */
+.docs-reminder {
+  margin-top: 10px; padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 10px; background: rgba(255, 255, 255, 0.10);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.docs-reminder-text { margin: 0; font-size: 12px; color: rgba(255, 255, 255, 0.92); }
+.docs-reminder-btn { align-self: flex-start; }
 .caps-table-full { margin-top: 12px; }
 .caps-table-row {
   display: grid;

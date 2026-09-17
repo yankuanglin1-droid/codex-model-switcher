@@ -226,6 +226,140 @@ GENERATION_NOTE = (
     "（如 image-01、video-01、speech-02），Codex 只连一个对话模型，用不到它们。"
 )
 
+# ------------------------------------------------------------------ 平台全量 API 能力
+#
+# 「能力查看」页只回答「Codex 里这个模型能干什么」是不够的：同一个 API Key
+# 在 Codex 之外还能干很多事 —— 生图、生视频、语音合成、音乐生成。
+# 这张表把平台 API 的全量能力面摆出来，让用户知道这把钥匙的全部用途。
+#
+# 原则与 DOCUMENTED_FACTS 一致：只写官方文档写明的能力，带出处 URL；
+# 官方没提供的就是 no，没查到资料的用 unknown，绝不编。
+# status 三态：yes / no / unknown。
+PLATFORM_API_SURFACE: Dict[str, List[Dict]] = {
+    "minimax": [
+        {"key": "vision", "status": "yes",
+         "note": "M3 等对话模型可直接读图（图像识别走对话接口，Codex 内即用）。",
+         "url": "https://platform.minimax.io/docs/api-reference/text-chat-openai"},
+        {"key": "web_search", "status": "yes",
+         "note": "对话接口内置联网搜索插件，可让模型实时检索网页。",
+         "url": "https://platform.minimax.io/docs/api-reference/text-chat-openai"},
+        {"key": "mcp", "status": "yes",
+         "note": "官方提供 MiniMax MCP Server：在任意 MCP 客户端里调生图 / 生视频 / 语音合成。",
+         "url": "https://platform.minimax.io/docs/guide/agent/mcp",
+         "mcp_config": {"command": "uvx", "args": ["minimax-mcp"],
+                        "env_key": "MINIMAX_API_KEY"}},
+        {"key": "cli", "status": "yes",
+         "note": "官方 Agent CLI 支持用 MiniMax 驱动终端编码代理。",
+         "url": "https://platform.minimax.io/docs/guide/agent/cli"},
+        {"key": "video", "status": "yes",
+         "note": "video-01 系列文生视频 / 图生视频接口，Codex 外可通过 API 直接调用。",
+         "url": "https://platform.minimax.io/docs/api-reference/video-generation"},
+        {"key": "image", "status": "yes",
+         "note": "image-01 文生图 / 图生图 / 局部重绘接口。",
+         "url": "https://platform.minimax.io/docs/api-reference/image-generation"},
+        {"key": "speech", "status": "yes",
+         "note": "speech-02 / T2A 语音合成接口，多音色多语言。",
+         "url": "https://platform.minimax.io/docs/api-reference/speech-generation"},
+        {"key": "music", "status": "yes",
+         "note": "music-01 / 音乐生成接口，按描述或歌词生成歌曲。",
+         "url": "https://platform.minimax.io/docs/api-reference/music-generation"},
+        {"key": "embeddings", "status": "yes",
+         "note": "embo 系列文本向量化接口。",
+         "url": "https://platform.minimax.io/docs/api-reference/embeddings"},
+    ],
+    "zhipu": [
+        {"key": "vision", "status": "yes",
+         "note": "GLM-4.5V / GLM-4.6V 视觉模型可读图（走对话接口，Codex 内即用）。",
+         "url": "https://docs.bigmodel.cn/cn/guide/models/vision/glm-4.6v"},
+        {"key": "web_search", "status": "yes",
+         "note": "官方 web-search-pro 联网搜索工具接口，可独立调用。",
+         "url": "https://docs.bigmodel.cn/cn/guide/tools/web-search"},
+        {"key": "mcp", "status": "yes",
+         "note": "官方提供 GLM MCP Server 与各类工具 MCP，可直接挂进 MCP 客户端。",
+         "url": "https://docs.bigmodel.cn/cn/guide/tools/mcp",
+         "mcp_config": {"command": "npx", "args": ["-y", "z-ai-mcp-server"],
+                        "env_key": "ZHIPUAI_API_KEY"}},
+        {"key": "cli", "status": "yes",
+         "note": "GLM Coding Plan 支持官方 CLI 与主流编码代理（Claude Code / Codex 等）。",
+         "url": "https://docs.bigmodel.cn/cn/coding-plan/overview"},
+        {"key": "image", "status": "yes",
+         "note": "CogView 系列文生图接口。",
+         "url": "https://docs.bigmodel.cn/cn/guide/models/image/cogview-4"},
+        {"key": "video", "status": "yes",
+         "note": "CogVideoX 系列文生视频 / 图生视频接口。",
+         "url": "https://docs.bigmodel.cn/cn/guide/models/video/cogvideox"},
+        {"key": "speech", "status": "yes",
+         "note": "GLM TTS 语音合成接口。",
+         "url": "https://docs.bigmodel.cn/cn/guide/models/sound/glm-tts"},
+    ],
+    "deepseek": [
+        {"key": "chat", "status": "yes",
+         "note": "对话 / 思考模型 + FIM 补全（beta）接口。",
+         "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing"},
+        {"key": "mcp", "status": "unknown",
+         "note": "官方未发布独立 MCP Server；DeepSeek 模型可通过任何 MCP 客户端 + API 使用。"},
+        {"key": "web_search", "status": "no", "note": "官方不提供联网搜索接口。"},
+        {"key": "image", "status": "no", "note": "官方不提供生图接口。"},
+        {"key": "video", "status": "no", "note": "官方不提供生视频接口。"},
+        {"key": "speech", "status": "no", "note": "官方不提供语音合成接口。"},
+        {"key": "embeddings", "status": "no",
+         "note": "官方已于 2025 年下线 embeddings 接口，只保留对话类模型。"},
+    ],
+    "moonshot": [
+        {"key": "chat", "status": "yes",
+         "note": "Kimi 对话模型 + tool use + context caching。",
+         "url": "https://platform.moonshot.cn/docs/api/chat"},
+        {"key": "vision", "status": "yes",
+         "note": "Kimi 视觉模型可读图（属于对话接口，Codex 内可用）。",
+         "url": "https://platform.moonshot.cn/docs/api/chat"},
+        {"key": "web_search", "status": "yes",
+         "note": "对话接口内置 $web_search 内建函数，可实时联网检索。",
+         "url": "https://platform.moonshot.cn/docs/guide/use-web-search"},
+        {"key": "cli", "status": "yes",
+         "note": "官方 Kimi CLI 可在终端用 Kimi 驱动编码任务。",
+         "url": "https://platform.moonshot.cn/docs/cli/overview"},
+        {"key": "image", "status": "no", "note": "官方不提供生图接口。"},
+        {"key": "video", "status": "no", "note": "官方不提供生视频接口。"},
+        {"key": "speech", "status": "no", "note": "官方不提供语音合成接口。"},
+    ],
+}
+
+# 通用能力项的中文名（界面直接用 i18n，这里是 CLI / 测试侧的权威写法）
+SURFACE_LABELS = {
+    "chat": "对话模型",
+    "vision": "图像识别",
+    "web_search": "联网搜索",
+    "mcp": "官方 MCP Server",
+    "cli": "官方 CLI",
+    "image": "生成图片",
+    "video": "生成视频",
+    "speech": "语音合成",
+    "music": "音乐生成",
+    "embeddings": "文本向量化",
+}
+
+
+# 平台 id 别名：同一家公司可能被用户用不同的 id 接入（glm / zhipu / bigmodel），
+# 能力面查不到就先归一再查，不能因为 id 写法不同就说「暂无资料」。
+PLATFORM_ID_ALIASES = {
+    "glm": "zhipu",
+    "bigmodel": "zhipu",
+    "zai": "zhipu",
+    "moonshot": "moonshot",
+    "kimi": "moonshot",
+}
+
+
+def platform_surface(provider_id: str) -> List[Dict]:
+    """一个平台 API 的全量能力面（Codex 之外还能用 Key 干什么）。
+
+    未收录的平台返回空列表 —— 界面对空列表显示「暂无资料」，
+    不编造一份看起来很全的清单。
+    """
+    key = (provider_id or "").strip().lower()
+    key = PLATFORM_ID_ALIASES.get(key, key)
+    return [dict(item) for item in PLATFORM_API_SURFACE.get(key, [])]
+
 
 def fact_key(provider_id: str, model_id: str) -> str:
     return "%s/%s" % ((provider_id or "").strip(), (model_id or "").strip())

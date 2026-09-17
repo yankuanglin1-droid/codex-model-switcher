@@ -258,6 +258,13 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
 
 # --------------------------------------------------------------- 切换时自动清洗
 
+# 注意分工（2026-09-17 起）：
+#   · 正确性由 threads._rewrite_session_file 保证 —— 任何改绑路径
+#     （follow_switch / repair）都在同一次改写里剥掉跨平台条目，
+#     不存在「只改绑、不清洗」的路径；
+#   · 本函数是兜底扫描：清掉这个机制上线之前就已经被搬过、历史上还挂着
+#     别家条目的存量文件，以及没有任何改绑动作时的漏网之鱼。
+#
 # 为什么需要它：
 #   实测（2026-09-17）：MiniMax 的 Responses API 能真的执行 web_search，
 #   产出的 web_search_call 条目只有 id 没有 call_id；deepseek 对同一类型
@@ -269,8 +276,8 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
 #   所以 switch_to 切换成功后自动跑一遍最近的会话。
 
 LEDGER_NAME = "history-autoclean.json"
-AUTO_CLEAN_LIMIT = 12          # 每次最多处理最近多少份会话
-AUTO_CLEAN_BUDGET_SECONDS = 8.0  # 总时间预算：巨文件拖不慢切换，剩下的下次接着清
+AUTO_CLEAN_LIMIT = 30          # 每次最多处理最近多少份会话
+AUTO_CLEAN_BUDGET_SECONDS = 10.0  # 总时间预算：巨文件拖不慢切换，剩下的下次接着清
 
 
 def _ledger_path() -> Path:

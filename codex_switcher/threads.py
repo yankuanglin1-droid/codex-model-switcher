@@ -107,24 +107,40 @@ def _connect(path: Path, readonly: bool = True) -> Optional[sqlite3.Connection]:
 
 
 def list_threads(limit: Optional[int] = None) -> List[Dict]:
-    """从 state_5.sqlite 读任务，附带会话文件路径。"""
+    """从 state_5.sqlite 读任务，附带会话文件路径。
+
+    source 字段标记任务来源：``exec`` 是定时/自动化任务（将来会自动开跑），
+    切换平台时必须无条件跟着搬，所以这里尽量把它读出来；老库里没有这个
+    列就退回不带 source 的查询。
+    """
     db = paths.codex_home() / STATE_DB
     connection = _connect(db)
     if connection is None:
         return []
+    base = ("SELECT id, title, model, model_provider, rollout_path, updated_at%s "
+            "FROM threads ORDER BY updated_at DESC")
     try:
-        sql = ("SELECT id, title, model, model_provider, rollout_path, updated_at "
-               "FROM threads ORDER BY updated_at DESC")
+        sql = base % ", source"
         if limit:
             sql += " LIMIT %d" % int(limit)
-        rows = connection.execute(sql).fetchall()
+        try:
+            rows = connection.execute(sql).fetchall()
+            has_source = True
+        except sqlite3.Error:
+            sql = base % ""
+            if limit:
+                sql += " LIMIT %d" % int(limit)
+            rows = connection.execute(sql).fetchall()
+            has_source = False
     except sqlite3.Error:
+        connection.close()
         return []
     finally:
         connection.close()
     return [
         {"id": row[0], "title": row[1] or "", "model": row[2] or "",
-         "provider": row[3] or "", "rollout_path": row[4] or "", "updated_at": row[5]}
+         "provider": row[3] or "", "rollout_path": row[4] or "", "updated_at": row[5],
+         "source": (row[6] or "") if has_source else ""}
         for row in rows
     ]
 
@@ -170,13 +186,28 @@ def _line_may_hold_provider(line: str) -> bool:
 
 
 def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider: str,
-                          backup_dir: Path) -> Tuple[bool, int, int]:
-    """改写会话文件里的服务商记录。返回 (是否改动, 会话头改动数, 设置改动数)。
+                          backup_dir: Path) -> Tuple[bool, int, int, int]:
+    """改写会话文件里的服务商记录。返回 (是否改动, 会话头改动数, 设置改动数, 历史剥离数)。
 
     from_provider 为 None 时表示“深度模式”：任何不等于 to_provider 的记录都改。
+
+    历史剥离与绑定改写同一次完成，这是刻意的：凡是把任务从一个平台搬到另一个
+    平台的路径（follow_switch / repair / 深度修复），会话历史里上一层平台留下的
+    服务端工具条目（web_search_call / image_generation_call 等）和孤儿输出
+    （function_call_output 缺 call_id）在目标平台必然 400
+    （实测：ChatGPT 任务搬到 MiniMax 后继续，报 missing field call_id）。
+    清洗必须与改绑不可分割，否则任何一条只改绑不清洗的路径都是事故。
+
+    剥离规则：
+      · 孤儿输出 —— 任何平台都不认，必删；
+      · 服务端工具成对条目 —— 显式跨平台搬（from_provider 非 None）时必删；
+        深度模式不删（目标平台自己产生的条目是合法历史，不能误伤）；
+      · encrypted_content 的 reasoning —— OpenAI 专有，目标不是 openai 时必删。
     """
+    from . import history as history_module
+
     if not path.exists():
-        return False, 0, 0
+        return False, 0, 0, 0
 
     def should_replace(value) -> bool:
         if value is None:
@@ -185,13 +216,18 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
             return value != to_provider
         return value == from_provider
 
+    strip_reasoning = (from_provider == OFFICIAL_PROVIDER_ID) or (
+        from_provider is None and to_provider != OFFICIAL_PROVIDER_ID)
+
     raw_lines: List[str] = []
     meta_changed = 0
     settings_changed = 0
+    history_removed = 0
     changed = False
     with path.open("r", encoding="utf-8", errors="surrogateescape") as stream:
         for line in stream:
-            if not _line_may_hold_provider(line):
+            is_response = '"response_item"' in line
+            if not _line_may_hold_provider(line) and not is_response:
                 raw_lines.append(line)
                 continue
             try:
@@ -199,9 +235,21 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
             except json.JSONDecodeError:
                 raw_lines.append(line)
                 continue
-            payload = document.get("payload")
-            if not isinstance(payload, dict):
+            if not isinstance(document, dict) or not isinstance(document.get("payload"), dict):
                 raw_lines.append(line)
+                continue
+            payload = document["payload"]
+            # ---- 跨平台历史清洗（与下面的改绑同一事务，不存在漏网路径）
+            kind = payload.get("type")
+            if kind == "function_call_output" and not payload.get("call_id"):
+                history_removed += 1
+                continue
+            if kind in history_module.CROSS_PROVIDER_TYPES and from_provider is not None:
+                history_removed += 1
+                continue
+            if (kind == "reasoning" and payload.get("encrypted_content")
+                    and strip_reasoning):
+                history_removed += 1
                 continue
             touched = False
             if document.get("type") == "session_meta" and should_replace(payload.get("model_provider")):
@@ -218,8 +266,8 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
                 raw_lines.append(json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n")
             else:
                 raw_lines.append(line)
-    if not changed:
-        return False, 0, 0
+    if not (changed or history_removed):
+        return False, 0, 0, 0
 
     # 备份原文件（保留目录结构，方便对照）
     relative = path.name
@@ -236,7 +284,7 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
-    return True, meta_changed, settings_changed
+    return True, meta_changed, settings_changed, history_removed
 
 
 def file_has_stale_provider(path: Path, expected: str) -> bool:
@@ -392,29 +440,31 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
                  "session": False, "meta": 0, "settings": 0, "db": []}
         path = Path(item["rollout_path"]) if item["rollout_path"] else None
         if path and path.exists():
-            changed, meta, settings = _rewrite_session_file(
+            changed, meta, settings, cleaned = _rewrite_session_file(
                 path, item["provider"], item["expected"], backup_dir)
-            entry.update(session=changed, meta=meta, settings=settings)
+            entry.update(session=changed, meta=meta, settings=settings, history=cleaned)
         entry["db"] = _update_databases(item["id"], item["provider"], item["expected"], backup_dir)
         report["items"].append(entry)
         report["fixed"] += 1
 
     for item in stale_files:
         path = Path(item["rollout_path"])
-        changed, meta, settings = _rewrite_session_file(
+        changed, meta, settings, cleaned = _rewrite_session_file(
             path, None, item["provider"], backup_dir)  # 深度模式：全部对齐到数据库的值
         if changed:
             report["items"].append({
                 "id": item["id"][:8], "title": item["title"][:40], "model": item["model"],
                 "from": "会话文件旧值", "to": item["provider"],
-                "session": True, "meta": meta, "settings": settings, "db": []})
+                "session": True, "meta": meta, "settings": settings, "db": [],
+                "history": cleaned})
             report["fixed"] += 1
     return report
 
 
 def follow_switch(from_provider: str, to_provider: str, model: Optional[str] = None,
-                  window_seconds: float = FOLLOW_WINDOW_SECONDS,
-                  include_openai: bool = False, dry_run: bool = False) -> Dict:
+                  window_seconds: Optional[float] = FOLLOW_WINDOW_SECONDS,
+                  include_openai: bool = False, dry_run: bool = False,
+                  limit: Optional[int] = None) -> Dict:
     """切换平台时，把「还在用」的旧任务一起搬过去。
 
     为什么非搬不可
@@ -430,23 +480,42 @@ def follow_switch(from_provider: str, to_provider: str, model: Optional[str] = N
     也就是说：只改 ``config.toml`` 根本不算切换完，旧任务的绑定也得跟着走，
     否则用户切完一继续任务就炸。所以这里把最近还在动的任务整条搬过去：
     会话文件里的服务商 + 两个数据库里的服务商与模型名，改前全部备份。
+
+    挑选规则（2026-09-17 起，保证「切换后所有任务都能正常跑」）：
+      · **定时/自动化任务（source = exec）无条件跟随** —— 它们不靠人点开，
+        到点自动开跑，绑定不对就是静默炸掉；不管多老、不管从哪家搬，必搬；
+      · 其余任务：window_seconds 窗口内的跟着搬（默认 36h）；
+      · window_seconds=None + include_openai=True：全部搬 —— 这是后台全量
+        迁移用的组合，把 ChatGPT 的老任务也搬干净；
+      · limit：一次最多搬多少条（后台分批迁移用，避免一次改动太多文件）。
     """
     empty = {"checked": 0, "moved": 0, "items": [], "skipped_active": [],
              "dry_run": dry_run, "backup_dir": None}
     if not from_provider or not to_provider or from_provider == to_provider:
         return empty
-    # OpenAI 的任务不跟着搬：它们是「默认老家」，用户多半还要切回来，
-    # 而且一搬就是成百上千条，动静太大。第三方之间才搬。
-    if from_provider == OFFICIAL_PROVIDER_ID and not include_openai:
-        return empty
 
     threads = list_threads()
-    cutoff = time.time() - max(0.0, window_seconds)
-    candidates = [item for item in threads
-                  if item["provider"] == from_provider and (item["updated_at"] or 0) >= cutoff]
+    cutoff = None if window_seconds is None else time.time() - max(0.0, window_seconds)
+
+    def eligible(item: Dict) -> bool:
+        if item["provider"] != from_provider:
+            return False
+        is_exec = (item.get("source") or "").strip() == "exec"
+        if from_provider == OFFICIAL_PROVIDER_ID and not include_openai:
+            # ChatGPT 的任务不默认搬：那是「老家」，一搬就是上千条。
+            # 唯独自动化任务例外 —— 它们到点自己跑，必须保证能跑。
+            return is_exec
+        if is_exec:
+            return True
+        return True if cutoff is None else (item["updated_at"] or 0) >= cutoff
+
+    candidates = [item for item in threads if eligible(item)]
+    if limit is not None:
+        candidates = candidates[:max(0, int(limit))]
     report = {"checked": len(threads), "moved": 0, "items": [], "skipped_active": [],
               "dry_run": dry_run, "backup_dir": None,
-              "from": from_provider, "to": to_provider, "model": model}
+              "from": from_provider, "to": to_provider, "model": model,
+              "exec_followed": 0}
     if dry_run:
         report["items"] = [{"id": item["id"][:8], "title": item["title"][:40],
                             "model": item["model"], "from": from_provider, "to": to_provider}
@@ -472,13 +541,16 @@ def follow_switch(from_provider: str, to_provider: str, model: Optional[str] = N
                     entry["active"] = True
                     report["skipped_active"].append(entry["id"])
                 else:
-                    changed, meta, settings = _rewrite_session_file(
+                    changed, meta, settings, cleaned = _rewrite_session_file(
                         path, from_provider, to_provider, backup_dir)
-                    entry.update(session=changed, meta=meta, settings=settings)
+                    entry.update(session=changed, meta=meta, settings=settings,
+                                 history=cleaned)
             except OSError:
                 pass
         entry["db"] = _update_databases(
             item["id"], from_provider, to_provider, backup_dir, model=model)
+        if (item.get("source") or "").strip() == "exec":
+            report["exec_followed"] += 1
         report["items"].append(entry)
         report["moved"] += 1
     return report
@@ -497,6 +569,8 @@ def describe_follow(report: Dict) -> str:
         extra = []
         if item.get("session"):
             extra.append("会话 %d 处头 / %d 处轮次" % (item["meta"], item["settings"]))
+        if item.get("history"):
+            extra.append("剥离跨平台条目 %d 条" % item["history"])
         if item.get("db"):
             extra.append("数据库 " + "、".join(item["db"]))
         if item.get("active"):
@@ -522,6 +596,8 @@ def describe(report: Dict) -> str:
         extra = []
         if item["session"]:
             extra.append("会话文件 %d 处会话头 / %d 处轮次设置" % (item["meta"], item["settings"]))
+        if item.get("history"):
+            extra.append("剥离跨平台条目 %d 条" % item["history"])
         if item["db"]:
             extra.append("数据库 " + "、".join(item["db"]))
         lines.append("  %s  %s → %s  %s" % (item["id"], item["from"], item["to"],

@@ -94,6 +94,22 @@
   <span class="hint" id="footer-help"></span>
 </footer>
 
+<div class="modal" id="restart-modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 data-i18n="restart.title">重启 Codex</h2>
+      <button class="btn icon" id="btn-close-restart">✕</button>
+    </div>
+    <p class="hint" id="restart-modal-body" data-i18n="restart.body">
+      Codex 只在启动时读取一次模型配置。现在重启，刚切换的模型和迁移好的任务立即生效。
+    </p>
+    <div class="form-actions">
+      <button class="btn" id="btn-restart-later" data-i18n="restart.later">稍后自己重启</button>
+      <button class="btn primary" id="btn-restart-now" data-i18n="restart.now">重启 Codex</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="manual-modal" hidden>
   <div class="modal-card">
     <div class="modal-head">

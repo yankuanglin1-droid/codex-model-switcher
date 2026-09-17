@@ -48,12 +48,24 @@ MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自
 - **一键接入**：17 个内置预设，也能手动填任意 Base URL（中转站、自建网关都行）。
 - **全部模型可选**：自动拉取完整清单生成 Codex 模型目录。
 - **一键切换 / 还原**：命令行、菜单、图形界面三种方式。
-- **旧任务跟着走**：切换时把最近在用的任务整体搬到新平台（会话文件 + 两个数据库，
-  先备份），后台巡检几秒内自愈错位；OpenAI 的任务刻意不动（那是「老家」）。
+- **旧任务全跟着走**：切换时把最近在用的任务整体搬到新平台（会话文件 + 两个数据库，
+  先备份）；其余任务——**包括每日定时（`exec`）自动化任务**——由后台线程分批搬完，
+  不会留下指向旧平台的死绑定。只有 OpenAI 认识的历史条目（`web_search_call`、加密
+  思考、缺 `call_id` 的孤儿输出）在同一次改写里剥掉：ChatGPT 的任务搬到 MiniMax
+  继续不再报 `missing field call_id`。切换成功后弹窗提醒「Codex 只在启动时读配置」，
+  点确认**自动重启 Codex**。
 - **上下文守卫会动手**：切换前体检会话体量；过了建议压缩线会告诉你 Codex 会自动
   压缩、无需操作；真装不下时横幅上直接给「**一键换成装得下的模型**」。
 - **能力看得见、测得准**：读图 / 思考 / 工具标注「实测 / 官方 / 推断」，
   实测用两张数方块图（两张都对才算真看得见），结论写回模型目录。
+- **平台全量 API 能力，自动配好**：同一把 API Key 不只能对话——生图、生视频、
+  语音合成、音乐、联网搜索、向量化。能力页列出全部能力面（带出处）；添加或切换
+  平台时自动把**平台官方 MCP Server** 写进 Codex（`[mcp_servers.*]`），并生成
+  `0600` 环境变量文件（`~/.codex/model-switcher/env/<id>.sh`），官方 CLI、SDK、
+  `curl` 立即可用；删除平台时一并清理。
+- **OpenAI 插件全模型可用**：Codex 请求里的 OpenAI 插件原样下发——免费类插件
+  （联网搜索）由平台原生执行（MiniMax 实测可用）；需要向 OpenAI 按量计费的插件
+  （图片生成等服务端付费工具）需要**额外提供 OpenAI API Key**，费用记在那把钥匙上。
 - **余额 / 额度 / 用量**：能查就给真实数字，查不到就明说；本机用量读 Codex 自己的日志。
 - **原生 macOS App**：双击即用，后台常驻；Windows / Linux 用浏览器界面，功能一致。
 - **中英双语，零依赖**：纯标准库，不需要 pip 装任何东西。
@@ -110,7 +122,7 @@ codex-switcher restore               # 一键切回官方 OpenAI
 | --- | --- | --- |
 | `unknown model 'xxx'` / `invalid params (2013)` | 任务还绑着上一个平台 | 几秒内自动修复，或 `codex-switcher repair --follow`；重开 Codex |
 | `model is not supported ... ChatGPT account` | 在绑着官方 OpenAI 的旧任务里选第三方模型（这类任务刻意不搬） | 对它「分叉」，或新建任务 |
-| `missing field call_id` | 历史里有 OpenAI 专有条目 | `codex-switcher history --clean`（先备份） |
+| `missing field call_id`（任务原先在 ChatGPT 上跑） | 历史里有 OpenAI 专有条目 | **v1.6.3 起自动修复**（任务改绑平台时同一次清洗）；存量文件用 `codex-switcher history --clean --cross-provider`（先备份） |
 | 一直「压缩上下文」毫无进展 | 会话比目标模型的窗口还大 | `codex-switcher guard`，或点横幅上的「**一键换成装得下的模型**」 |
 | `wire_api = "chat" is no longer supported` | 旧的手工配置残留 | `codex-switcher use <平台>` 重写 |
 | 502 / 连接被拒 | 协议桥没在跑 | `codex-switcher bridge --install-agent` |

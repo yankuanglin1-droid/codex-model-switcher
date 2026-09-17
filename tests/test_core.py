@@ -72,10 +72,18 @@ class TempCodexHome(unittest.TestCase):
         self._old_home = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = self._temp.name
         self.home = Path(self._temp.name)
+        # 后台全量迁移是守护线程，会和临时目录的清理打架；测试要求全同步
+        from codex_switcher import engine as _engine
+        self._old_allow_background = _engine.ALLOW_BACKGROUND_FOLLOW
+        _engine.ALLOW_BACKGROUND_FOLLOW = False
         # 防呆：确认真的在临时目录里跑，而不是用户的家目录
         real_home = Path.home() / ".codex"
         self.assertNotEqual(Path(self._temp.name).resolve(), real_home.resolve())
         (self.home / "config.toml").write_text(SAMPLE_CONFIG)
+
+    def tearDown(self) -> None:
+        from codex_switcher import engine as _engine
+        _engine.ALLOW_BACKGROUND_FOLLOW = self._old_allow_background
 
     def tearDown(self) -> None:
         if self._old_home is None:
@@ -1903,9 +1911,9 @@ class ThreadBindingTests(TempCodexHome):
         connection = sqlite3.connect(str(db))
         connection.execute(
             "CREATE TABLE threads (id TEXT, title TEXT, model TEXT, model_provider TEXT,"
-            " rollout_path TEXT, updated_at REAL)")
+            " rollout_path TEXT, updated_at REAL, source TEXT)")
         for row in rows:
-            connection.execute("INSERT INTO threads VALUES (?,?,?,?,?,?)", row)
+            connection.execute("INSERT INTO threads VALUES (?,?,?,?,?,?,?)", row)
         connection.commit()
         connection.close()
         catalog = self.home / "sqlite"
@@ -1936,9 +1944,9 @@ class ThreadBindingTests(TempCodexHome):
         os.utime(path, (old, old))
         return path
 
-    def _thread_row(self, thread_id, model, provider, path, age=60.0):
+    def _thread_row(self, thread_id, model, provider, path, age=60.0, source=""):
         import time
-        return (thread_id, "标题", model, provider, str(path), time.time() - age)
+        return (thread_id, "标题", model, provider, str(path), time.time() - age, source)
 
     def _read_thread(self, thread_id):
         import sqlite3
@@ -2028,6 +2036,192 @@ class ThreadBindingTests(TempCodexHome):
         followed = result.get("threads_followed") or {}
         self.assertEqual(followed.get("moved"), 1, followed)
         self.assertEqual(self._read_thread("fff666"), ("deepseek-flash", "deepseek"))
+
+    # ---- 绑定改写必须连带清洗跨平台历史（missing field call_id 的根治） ----
+
+    def _make_dirty_rollout(self, name, provider):
+        """带 OpenAI 服务端工具条目的会话文件：搬到第三方平台必然 400。"""
+        import time
+        path = self._make_rollout(name, provider)
+        lines = [
+            json.dumps({"type": "response_item",
+                        "payload": {"type": "web_search_call", "id": "ws_1"}}),
+            json.dumps({"type": "response_item",
+                        "payload": {"type": "reasoning", "encrypted_content": "zzz"}}),
+            json.dumps({"type": "response_item",
+                        "payload": {"type": "function_call_output", "output": "ok"}}),
+            json.dumps({"type": "response_item",
+                        "payload": {"type": "message",
+                                    "content": [{"type": "output_text", "text": "hi"}]}}),
+        ]
+        with path.open("a") as stream:
+            stream.write("\n".join(lines) + "\n")
+        # 追加行会把 mtime 变新，重新装成「早已不在写入」的样子，绕开活动保护
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        return path
+
+    def test_repair_of_chatgpt_task_strips_openai_only_history(self):
+        """ChatGPT 任务被修绑到第三方时，历史里的 OpenAI 专有条目必须同一次清掉。
+
+        用户实测：ChatGPT 执行过的任务切到第三方继续，报
+        missing field `call_id` —— 根因是 repair 只改了绑定、没洗历史。
+        """
+        from codex_switcher import threads
+        path = self._make_dirty_rollout("task-gpt-dirty", "openai")
+        self._make_db([self._thread_row("ggg777", "MiniMax-M3", "openai", path)])
+        report = threads.repair()
+        self.assertEqual(report["fixed"], 1, report)
+        text = path.read_text()
+        self.assertIn('"model_provider":"minimax"', text)
+        # 这些条目在第三方平台上必然 400，改绑的同一事务里必须剥掉
+        self.assertNotIn("web_search_call", text)
+        self.assertNotIn("encrypted_content", text)
+        self.assertNotIn("function_call_output", text)
+        # 正常对话条目不能误伤
+        self.assertIn('"output_text"', text)
+        item = report["items"][0]
+        self.assertEqual(item.get("history"), 3, item)
+
+    def test_follow_switch_between_third_parties_strips_history_too(self):
+        """第三方之间互搬：上一层平台的服务端工具条目同样必须剥掉。"""
+        from codex_switcher import threads
+        path = self._make_dirty_rollout("task-mini-dirty", "minimax")
+        self._make_db([self._thread_row("hhh888", "MiniMax-M3", "minimax", path)])
+        report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
+        self.assertEqual(report["moved"], 1, report)
+        text = path.read_text()
+        self.assertNotIn("web_search_call", text)
+        self.assertNotIn("function_call_output", text)
+        self.assertIn('"model_provider":"deepseek"', text)
+        # web_search_call + 孤儿 function_call_output，共 2 条
+        self.assertEqual(report["items"][0].get("history"), 2, report["items"][0])
+
+    def test_exec_scheduled_task_follows_switch_even_from_openai(self):
+        """每日定时任务（source=exec）必须无条件跟随切换，哪怕来自 ChatGPT。
+
+        它们不靠人点开、到点自动跑，绑定不对就是静默炸掉 —— 而且可能
+        已经很久没更新过（36h 窗口罩不住），所以要单独豁免。
+        """
+        from codex_switcher import threads
+        path = self._make_rollout("task-cron", "openai")
+        # age = 7 天：远超 36h 窗口，普通任务不会被搬
+        self._make_db([
+            self._thread_row("cron01", "gpt-5-codex", "openai", path, age=7 * 86400,
+                             source="exec"),
+            self._thread_row("old02", "gpt-5-codex", "openai",
+                             self.home / "old02.jsonl", age=7 * 86400),
+        ])
+        report = threads.follow_switch("openai", "minimax", "MiniMax-M3")
+        self.assertEqual(report["moved"], 1, report)
+        self.assertEqual(report["exec_followed"], 1)
+        self.assertEqual(self._read_thread("cron01"), ("MiniMax-M3", "minimax"))
+        # 普通 ChatGPT 老任务不动（留给后台全量迁移）
+        self.assertEqual(self._read_thread("old02"), ("gpt-5-codex", "openai"))
+
+    def test_full_background_pass_moves_old_openai_tasks(self):
+        """后台全量迁移：window=None + include_openai 把 ChatGPT 老任务搬干净。"""
+        from codex_switcher import engine
+        path_a = self._make_rollout("task-old-1", "openai")
+        path_b = self._make_rollout("task-old-2", "openai")
+        self._make_db([
+            self._thread_row("old01", "gpt-5-codex", "openai", path_a, age=30 * 86400),
+            self._thread_row("old02", "gpt-5-codex", "openai", path_b, age=90 * 86400,
+                             source="exec"),
+        ])
+        totals = engine.full_follow_all("openai", "minimax", "MiniMax-M3")
+        self.assertEqual(totals["moved"], 2, totals)
+        self.assertEqual(self._read_thread("old01"), ("MiniMax-M3", "minimax"))
+        self.assertEqual(self._read_thread("old02"), ("MiniMax-M3", "minimax"))
+        self.assertEqual(totals["exec_followed"], 1)
+
+
+class IntegrationsTests(TempCodexHome):
+    """平台全量能力环境：MCP 写入 config.toml、CLI 环境变量文件。"""
+
+    @staticmethod
+    def _record():
+        return {"id": "minimax", "label": "MiniMax",
+                "base_url": "https://api.minimax.cn/v1",
+                "upstream_base_url": "https://api.minimax.cn/v1",
+                "transport": "native"}
+
+    def test_surface_lists_generation_and_mcp(self):
+        from codex_switcher import capabilities as caps
+        keys = {item["key"] for item in caps.platform_surface("minimax")}
+        for expected in ("video", "image", "speech", "music", "web_search", "mcp", "cli"):
+            self.assertIn(expected, keys)
+        # 没收录的平台返回空列表，不编数据
+        self.assertEqual(caps.platform_surface("no-such-platform"), [])
+        # 平台 id 别名：用户用 glm/bigmodel 接入智谱时，能力面照样能查到
+        self.assertEqual(len(caps.platform_surface("glm")),
+                         len(caps.platform_surface("zhipu")))
+        # MCP 项必须带可执行的配置，否则自动配置无从下手
+        mcp = caps.platform_surface("minimax")
+        mcp_config = next(i for i in mcp if i["key"] == "mcp")["mcp_config"]
+        self.assertTrue(mcp_config.get("command"))
+        self.assertTrue(mcp_config.get("env_key"))
+
+    def test_sync_writes_mcp_block_and_env_file(self):
+        from codex_switcher import integrations as integ
+        result = integ.sync("minimax", self._record(), api_key="sk-test-123")
+        self.assertIsNotNone(result["mcp"], result)
+        self.assertEqual(result.get("errors") or [], [])
+        env_path = Path(result["env_file"])
+        self.assertTrue(env_path.exists())
+        self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+        env_text = env_path.read_text()
+        self.assertIn("MINIMAX_API_KEY", env_text)
+        self.assertIn("sk-test-123", env_text)
+        # MCP 表写进了 config.toml，且原有内容原样保留
+        config_text = (self.home / "config.toml").read_text()
+        document = load_document(config_text)
+        block = (document.get("mcp_servers") or {}).get("minimax") or {}
+        self.assertEqual(block.get("command"), "uvx")
+        self.assertEqual((block.get("env") or {}).get("MINIMAX_API_KEY"), "sk-test-123")
+        self.assertIn("[model_providers.existing]", config_text)
+        self.assertIn("[mcp_servers.example]", config_text)
+
+    def test_sync_is_idempotent(self):
+        from codex_switcher import integrations as integ
+        for _ in range(2):
+            integ.sync("minimax", self._record(), api_key="sk-test-123")
+        config_text = (self.home / "config.toml").read_text()
+        self.assertEqual(config_text.count("[mcp_servers.minimax]"), 1)
+        document = load_document(config_text)
+        self.assertIn("minimax", document.get("mcp_servers") or {})
+
+    def test_remove_cleans_mcp_and_env(self):
+        from codex_switcher import integrations as integ
+        result = integ.sync("minimax", self._record(), api_key="sk-test-123")
+        env_path = Path(result["env_file"])
+        integ.remove("minimax")
+        self.assertFalse(env_path.exists())
+        document = load_document((self.home / "config.toml").read_text())
+        self.assertNotIn("minimax", document.get("mcp_servers") or {})
+        # 别家的 MCP 不能被误伤
+        self.assertIn("example", document.get("mcp_servers") or {})
+
+    def test_status_reports_configuration_state(self):
+        from codex_switcher import integrations as integ
+        before = integ.status("minimax")
+        self.assertTrue(before["available"])
+        self.assertFalse(before["mcp"])
+        integ.sync("minimax", self._record(), api_key="sk-test-123")
+        after = integ.status("minimax")
+        self.assertTrue(after["mcp"])
+        self.assertIsNotNone(after["env_file"])
+
+    def test_provider_without_mcp_only_gets_env_file(self):
+        from codex_switcher import integrations as integ
+        record = dict(self._record(), id="deepseek")
+        result = integ.sync("deepseek", record, api_key="sk-ds-1")
+        self.assertIsNone(result["mcp"])
+        self.assertIsNotNone(result["env_file"])
+        # 环境文件里要有平台自己认的正式变量名（这里没有 -> 只写前缀变量）
+        env_text = Path(result["env_file"]).read_text()
+        self.assertIn("DEEPSEEK_API_KEY", env_text)
+        self.assertIn("sk-ds-1", env_text)
 
 
 if __name__ == "__main__":
