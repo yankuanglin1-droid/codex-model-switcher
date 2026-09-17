@@ -319,13 +319,30 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         if not config.exists():
             raise SwitchError("找不到 Codex 配置文件：%s" % config)
         text = config.read_text()
+        previous_provider = configfile.read_top_level(
+            text, ["model_provider"]).get("model_provider")
         settings = official_settings(model_id or DEFAULT_OFFICIAL_MODEL)
         new_text = configfile.rewrite_model_settings(text, settings)
         if dry_run:
             return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "dry_run": True}
         backup = configfile.backup(config)
         configfile.atomic_write(config, new_text, text)
-        return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "backup": str(backup)}
+        # 切回官方同样要把旧任务搬过来：任务还记着第三方，恢复时就会拿
+        # gpt 的模型名去敲第三方的门，那边一样回 unknown model。
+        followed = None
+        if previous_provider and previous_provider != OFFICIAL_PROVIDER:
+            try:
+                followed = threads_module.follow_switch(
+                    previous_provider, OFFICIAL_PROVIDER, settings["model"])
+            except Exception:  # noqa: BLE001
+                followed = None
+        repaired = 0
+        try:
+            repaired = threads_module.repair().get("fixed", 0)
+        except Exception:  # noqa: BLE001
+            repaired = 0
+        return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "backup": str(backup),
+                "threads_fixed": repaired, "threads_followed": followed}
 
     record = state_module.get_provider(state, provider_id)
     if not record:
@@ -361,6 +378,9 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         if not config.exists():
             raise SwitchError("找不到 Codex 配置文件：%s" % config)
         text = config.read_text()
+        # 记住切换前用的是哪家：决定要不要剥 encrypted reasoning
+        previous_provider = configfile.read_top_level(
+            text, ["model_provider"]).get("model_provider")
         # 地址要在这里确定：老状态文件不带 base_url，需要从现有配置里取回来
         upstream = resolve_base_url(record, text, provider_id)
         if not upstream:
@@ -388,6 +408,16 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
     state_module.upsert_provider(state, record)
     state_module.save(state)
 
+    # 旧任务跟着一起搬到新平台。不做这一步，切完继续任务就会报
+    # 「unknown model xxx」：Codex 恢复旧任务时取的是任务自己记的服务商，
+    # 发出去的却是当前配置里的模型名，新旧一分家请求就打错门了。
+    threads_followed = None
+    if previous_provider and previous_provider != provider_id:
+        try:
+            threads_followed = threads_module.follow_switch(previous_provider, provider_id, chosen)
+        except Exception:  # noqa: BLE001 - 搬不动也不能影响切换本身
+            threads_followed = None
+
     # 顺手把「模型和服务商对不上」的旧任务修好，
     # 否则切完在旧对话里换模型还会报 model is not supported
     threads_fixed = 0
@@ -395,8 +425,22 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         threads_fixed = threads_module.repair().get("fixed", 0)
     except Exception:  # noqa: BLE001 - 修不动也不能影响切换本身
         threads_fixed = 0
+
+    # 跨平台自动清洗会话历史。实测：MiniMax 执行 web_search 产出的
+    # web_search_call 条目（只有 id 没有 call_id）在 deepseek 那边直接
+    # 400（missing field call_id / queries）。切换后用户多半会 resume
+    # 旧会话，所以这里自动把别家的服务端工具条目剥掉（先备份）。
+    history_clean = None
+    if previous_provider != provider_id:
+        try:
+            from . import history as history_module
+            history_clean = history_module.auto_clean(
+                moving_off_openai=(previous_provider == OFFICIAL_PROVIDER))
+        except Exception:  # noqa: BLE001 - 清洗失败绝不影响切换
+            history_clean = None
     return {"provider": provider_id, "label": record["label"], "model": chosen,
-            "backup": str(backup), "threads_fixed": threads_fixed}
+            "backup": str(backup), "threads_fixed": threads_fixed,
+            "threads_followed": threads_followed, "history_clean": history_clean}
 
 
 def remove_provider(provider_id: str, purge_key: bool = True) -> Dict:
@@ -586,12 +630,21 @@ def set_reasoning_effort(provider_id: str, model_id: str, effort: Optional[str])
             "config_updated": applied}
 
 
-def set_model_capability(provider_id: str, model_id: str, vision: Optional[bool],
-                         tools: Optional[bool] = None) -> Dict:
-    """手动修正一个模型的能力声明。
+def set_model_capability(provider_id: str, model_id: str,
+                         key: Optional[str] = None, value: Optional[str] = None,
+                         vision: Optional[bool] = None,
+                         tools: Optional[bool] = None,
+                         reasoning: Optional[bool] = None) -> Dict:
+    """手动标注一个模型的能力声明（三项：读图 / 思考 / 工具调用）。
 
-    典型场景：实测发现这个模型读不了图，但目录里还写着支持图片，
-    Codex 就会一直把图塞给它，然后得到空回答。改完立刻重生成目录。
+    两种调用方式：
+      · 新：set_model_capability(pid, mid, key="vision", value="yes"|"no"|"unknown")
+        —— 界面上的「点标签标注」走这条，unknown 表示清掉标注。
+      · 旧：set_model_capability(pid, mid, vision=True/False/None, tools=...)
+        —— 保留兼容。
+
+    标完立刻重生成目录：标成「不支持」必须真的关掉目录里的开关，
+    否则 Codex 还会照样把图塞过去（那是另一种形式的误报）。
     """
     state = state_module.load()
     record = state_module.get_provider(state, provider_id)
@@ -601,31 +654,35 @@ def set_model_capability(provider_id: str, model_id: str, vision: Optional[bool]
     if model_id not in models:
         raise SwitchError("该平台没有名为 %s 的模型" % model_id)
 
-    overrides = record.setdefault("model_overrides", {})
-    entry = dict(overrides.get(model_id) or {})
-    saved = dict(entry.get("capabilities") or {})
-    if vision is None:
-        entry.pop("input_modalities", None)
-        saved.pop("vision", None)
+    if key is not None:
+        if key not in capabilities_module.CAPABILITY_KEYS:
+            raise SwitchError("未知的能力项：%s" % key)
+        chosen = (value or "unknown").strip().lower()
+        if chosen not in capabilities_module.CAPABILITY_VALUES:
+            raise SwitchError("未知的取值：%s" % value)
+        outcome = capabilities_module.set_manual_capability(
+            provider_id, record, model_id, key, chosen)
     else:
-        entry["input_modalities"] = ["text", "image"] if vision else ["text"]
-        saved["vision"] = "yes" if vision else "no"
-        saved["verified_at"] = capabilities_module._today()
-        saved["note"] = "手动指定"
-    if tools is not None:
-        saved["tools"] = "yes" if tools else "no"
-        entry["supports_parallel_tool_calls"] = bool(tools)
-    if saved:
-        entry["capabilities"] = saved
-    if entry:
-        overrides[model_id] = entry
-    else:
-        overrides.pop(model_id, None)
-    record["model_overrides"] = overrides
+        # 旧写法：vision= / tools= / reasoning= 直接给 True/False。
+        # 只想改哪项就传哪项（None 视为「不动」）；要清成「未测出」
+        # 请用 key/value 形式传 "unknown"。
+        changed_keys = []
+        for name, flag in (("vision", vision), ("reasoning", reasoning), ("tools", tools)):
+            if flag is None:
+                continue
+            outcome = capabilities_module.set_manual_capability(
+                provider_id, record, model_id, name, "yes" if flag else "no")
+            changed_keys.append(name)
+        if not changed_keys:
+            outcome = {"provider": provider_id, "model": model_id, "capabilities": {}}
+
+    record["model_overrides"] = record.get("model_overrides") or {}
+    state_module.upsert_provider(state, record)
     state_module.save(state)
     catalog_module.write_catalog(record["id"], record, list(models.keys()))
-    return {"provider": provider_id, "model": model_id,
-            "vision": saved.get("vision"), "tools": saved.get("tools")}
+    outcome["provider"] = provider_id
+    outcome["model"] = model_id
+    return outcome
 
 
 def capability_matrix(provider_id: Optional[str] = None) -> List[Dict]:

@@ -293,6 +293,39 @@ def describe(report: Dict) -> str:
     return "\n".join(lines)
 
 
+def fitting_models(tokens: int, state: Optional[Dict] = None,
+                   max_ratio: float = 0.9, limit: int = 6) -> List[Dict]:
+    """列出装得下这个会话的模型，余量大的排前面。
+
+    这是「自动解决」的一半：与其让人挨个点开模型看窗口数字，
+    不如直接算好「这个会话还能搬去哪」，界面上给一个一键切换。
+    max_ratio 收得比 TIGHT_RATIO 紧：搬过去之后用户还要继续干活，
+    贴着 100% 的模型只会把「反复压缩」换个地方继续。
+    """
+    if not tokens or tokens <= 0:
+        return []
+    from . import catalog as catalog_module
+    from . import state as state_module
+    state = state or state_module.load()
+    found: List[Dict] = []
+    for provider_id, record in (state.get("providers") or {}).items():
+        catalog = catalog_module.catalog_path(provider_id)
+        if not Path(catalog).exists():
+            continue
+        label = record.get("label") or provider_id
+        for model_id in (record.get("models") or {}):
+            window = window_for_model(catalog, model_id)
+            if not window:
+                continue
+            ratio = tokens / float(window)
+            if ratio > max_ratio:
+                continue
+            found.append({"provider": provider_id, "label": label, "model": model_id,
+                          "window": int(window), "ratio": round(ratio, 3)})
+    found.sort(key=lambda item: item["ratio"])
+    return found[:limit]
+
+
 def latest_rollouts(limit: int = 3) -> List[Path]:
     """取最近修改的几个会话文件。
 

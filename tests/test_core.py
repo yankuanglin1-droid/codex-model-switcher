@@ -412,6 +412,75 @@ class EngineTests(TempCodexHome):
         self.assertTrue(catalog_path.exists())
         self.assertEqual(json.loads(catalog_path.read_text())["models"][0]["slug"], "qwen3:32b")
 
+    def test_switch_to_third_party_auto_cleans_old_sessions(self):
+        """切换平台的副作用：把旧会话里别家的服务端工具条目自动剥掉。
+
+        实测事故：MiniMax 跑 web_search 产出的 web_search_call 只有 id 没有
+        call_id，切到 deepseek 后 resume 旧会话直接 400（missing field call_id）。
+        用户不会记得手动跑 history --clean，所以这一步必须自动。
+        """
+        from codex_switcher import configfile, engine, history, paths
+        from codex_switcher import state as state_module
+        record = engine.build_provider_record(
+            provider_id="deepseek", label="DeepSeek",
+            base_url="https://api.deepseek.com",
+            models_url="https://api.deepseek.com/models",
+            transport="native", requires_key=False)
+        record["models"] = {"deepseek-flash": {}}
+        state_module.save({"schema_version": 3, "providers": {"deepseek": record}})
+
+        # 造一份带 web_search_call 的旧会话（像 MiniMax 留下的那样）
+        day = paths.sessions_dir() / "2026" / "09" / "17"
+        day.mkdir(parents=True, exist_ok=True)
+        rollout = day / "rollout-auto-switch.jsonl"
+        payloads = [
+            {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "查一下 Pro x20"}]},
+            {"type": "web_search_call", "id": "call_ccecac98e000400aaf9cfa",
+             "status": "completed", "action": {"type": "search", "query": "Pro x20"}},
+        ]
+        rollout.write_text("\n".join(
+            json.dumps({"type": "response_item", "payload": item}) for item in payloads)
+            + "\n", encoding="utf-8")
+        import os as _os
+        import time as _time
+        old = _time.time() - 3600
+        _os.utime(rollout, (old, old))
+
+        result = engine.switch_to("deepseek", "deepseek-flash")
+        report = result.get("history_clean")
+        self.assertIsNotNone(report)
+        self.assertEqual(report["cleaned"], 1)
+        self.assertNotIn("web_search_call", rollout.read_text(encoding="utf-8"))
+        self.assertTrue(report["backup_dir"])
+
+    def test_switching_to_openai_does_not_touch_history(self):
+        """官方的解析器认自家的条目，切回官方时不该动历史。"""
+        from codex_switcher import engine, paths
+        from codex_switcher import state as state_module
+        record = engine.build_provider_record(
+            provider_id="deepseek", label="DeepSeek",
+            base_url="https://api.deepseek.com",
+            models_url="https://api.deepseek.com/models",
+            transport="native", requires_key=False)
+        record["models"] = {"deepseek-flash": {}}
+        state_module.save({"schema_version": 3, "providers": {"deepseek": record}})
+        engine.switch_to("deepseek", "deepseek-flash")   # 先切到第三方
+
+        day = paths.sessions_dir() / "2026" / "09" / "17"
+        day.mkdir(parents=True, exist_ok=True)
+        rollout = day / "rollout-openai-back.jsonl"
+        rollout.write_text(json.dumps({"type": "response_item", "payload": {
+            "type": "web_search_call", "id": "ws_9"}}) + "\n", encoding="utf-8")
+        import os as _os
+        import time as _time
+        old = _time.time() - 3600
+        _os.utime(rollout, (old, old))
+
+        result = engine.switch_to(engine.OFFICIAL_PROVIDER)
+        self.assertIsNone(result.get("history_clean"))
+        self.assertIn("web_search_call", rollout.read_text(encoding="utf-8"))
+
     def test_bridge_transport_points_codex_at_local_bridge(self):
         from codex_switcher import engine, paths, state as state_module
         record = engine.build_provider_record(
@@ -905,6 +974,82 @@ class CapabilityTests(TempCodexHome):
         engine.set_model_capability("minimax", "MiniMax-M3", vision=False)
         entry = catalog.model_entry(catalog.catalog_path("minimax"), "MiniMax-M3")
         self.assertEqual(entry["input_modalities"], ["text"])
+
+    def test_manual_annotation_cycles_and_shows_its_source(self):
+        """界面上点标签标注：三态可循环，来源标成「手动指定」。"""
+        from codex_switcher import catalog, engine
+        self._provider("minimax", ("MiniMax-M2",))
+
+        engine.set_model_capability("minimax", "MiniMax-M2", key="vision", value="yes")
+        rows = engine.capability_matrix("minimax")
+        self.assertEqual(rows[0]["vision"], "yes")
+        self.assertEqual(rows[0]["source"], "manual")
+        entry = catalog.model_entry(catalog.catalog_path("minimax"), "MiniMax-M2")
+        self.assertIn("image", entry["input_modalities"])
+
+        engine.set_model_capability("minimax", "MiniMax-M2", key="vision", value="no")
+        rows = engine.capability_matrix("minimax")
+        self.assertEqual(rows[0]["vision"], "no")
+        entry = catalog.model_entry(catalog.catalog_path("minimax"), "MiniMax-M2")
+        self.assertEqual(entry["input_modalities"], ["text"])
+
+        # 再点一下回到「未测出」：手写标注清掉，回落到按名字/官方推断的值
+        engine.set_model_capability("minimax", "MiniMax-M2", key="vision", value="unknown")
+        rows = engine.capability_matrix("minimax")
+        self.assertNotEqual(rows[0].get("source"), "manual")
+
+    def test_manual_annotation_rejects_nonsense(self):
+        from codex_switcher import engine
+        self._provider("minimax", ("MiniMax-M2",))
+        with self.assertRaises(engine.SwitchError):
+            engine.set_model_capability("minimax", "MiniMax-M2", key="telepathy", value="yes")
+        with self.assertRaises(engine.SwitchError):
+            engine.set_model_capability("minimax", "MiniMax-M2", key="vision", value="maybe")
+
+    def test_manual_tools_annotation_flips_the_catalog_switch(self):
+        from codex_switcher import catalog, engine
+        self._provider("moonshot", ("kimi-k2",))
+        engine.set_model_capability("moonshot", "kimi-k2", key="tools", value="no")
+        entry = catalog.model_entry(catalog.catalog_path("moonshot"), "kimi-k2")
+        self.assertFalse(entry["supports_parallel_tool_calls"])
+
+    def test_measured_unknown_never_overrides_official_docs(self):
+        """实测的「未测出」不能盖掉官方写明的结论。
+
+        真实踩坑：deepseek-v4-pro 官方明确写「图像理解不支持」，我们发图片块
+        被平台 400 拒掉，于是实测结论是 unknown —— 结果界面上显示成「未测出」，
+        看着像谁都不知道，反而比官方文档还含糊。
+        """
+        from codex_switcher import capabilities
+        row = capabilities.capability_row("deepseek", "deepseek-v4-pro")
+        # 关键：读图这一项必须保留官方结论，不能被 unknown 盖成「未测出」
+        self.assertEqual(row["vision"], "no")
+        self.assertIn(row["source"], ("documented", "verified"))
+        # 真正测出来的项照样采纳（tool/reasoning 实测为 yes）
+        self.assertEqual(row["tools"], "yes")
+        # 明确的冲突才记进 conflict：unknown 不算冲突
+        self.assertNotIn("vision", row.get("conflict") or [])
+
+    def test_documented_facts_carry_official_sources(self):
+        """每条官方结论都必须带出处链接，否则以后没人能核对。"""
+        from codex_switcher import capabilities
+        self.assertTrue(capabilities.DOCUMENTED_FACTS)
+        for key, fact in capabilities.DOCUMENTED_FACTS.items():
+            self.assertIn("/", key)
+            self.assertTrue(fact.get("url", "").startswith("http"), key)
+            self.assertTrue(fact.get("source"), key)
+        for pattern, fact in capabilities.DOCUMENTED_RULES:
+            self.assertTrue(fact.get("url", "").startswith("http"), pattern)
+            self.assertTrue(fact.get("source"), pattern)
+
+    def test_platform_docs_explain_how_to_connect(self):
+        """能力页要能回答「这个平台怎么配进 Codex」，所以接入说明不能空。"""
+        from codex_switcher import capabilities
+        for provider in ("minimax", "deepseek", "glm", "moonshot"):
+            docs = capabilities.platform_docs(provider)
+            self.assertTrue(docs, provider)
+            self.assertTrue(docs["docs"].startswith("http"))
+            self.assertTrue(docs["hint"])
 
     def test_probe_refuses_without_base_url(self):
         from codex_switcher import capabilities
@@ -1417,6 +1562,71 @@ class HistoryTests(TempCodexHome):
             if line.strip():
                 json.loads(line)      # 解不动就抛
 
+    # ---------------------------------------------------------- 自动清洗
+
+    def test_auto_clean_strips_cross_provider_items_and_backs_up(self):
+        """切换平台后自动执行：别家的服务端工具条目必须消失，且留有备份。"""
+        from codex_switcher import history
+        path = self._backdate(self._write_rollout(self._cross_provider_sample(),
+                                                  name="rollout-auto1.jsonl"))
+        before = path.read_text(encoding="utf-8")
+        report = history.auto_clean(moving_off_openai=False)
+
+        self.assertEqual(report["cleaned"], 1)
+        self.assertEqual(report["removed"]["cross_provider"], 3)
+        self.assertTrue(report["backup_dir"])
+        self.assertTrue(Path(report["backup_dir"]).exists())
+        after = path.read_text(encoding="utf-8")
+        self.assertLess(len(after), len(before))
+        # web_search_call 与 custom_tool_call 成对消失，普通工具调用原样保留
+        self.assertNotIn("web_search_call", after)
+        self.assertNotIn("custom_tool_call", after)
+        self.assertIn("call_1", after)
+        # 备份里还留着原文，随时能回溯
+        backups = list(Path(report["backup_dir"]).glob("*" + path.name))
+        self.assertEqual(len(backups), 1)
+        self.assertIn("web_search_call", backups[0].read_text(encoding="utf-8"))
+
+    def test_auto_clean_remembers_what_it_already_cleaned(self):
+        """账本缓存：清过的文件不再动，切换才能秒回。"""
+        from codex_switcher import history
+        path = self._backdate(self._write_rollout(self._cross_provider_sample(),
+                                                  name="rollout-auto2.jsonl"))
+        history.auto_clean(moving_off_openai=False)
+        second = history.auto_clean(moving_off_openai=False)
+        self.assertEqual(second["cleaned"], 0)      # 账本命中，直接跳过
+        self.assertEqual(second["checked"], 0)
+        # 文件再被写过（Codex 追加了新的对话）就要重新检查。
+        # 追加后先"放凉"：刚写完的文件会命中"还在写就不碰"的护栏，那是另一条边界。
+        path.write_text(path.read_text(encoding="utf-8")
+                        + json.dumps({"type": "response_item",
+                                      "payload": {"type": "web_search_call",
+                                                  "id": "ws_2"}}) + "\n",
+                        encoding="utf-8")
+        self._backdate(path)
+        third = history.auto_clean(moving_off_openai=False)
+        self.assertEqual(third["cleaned"], 1)
+
+    def test_auto_clean_leaves_the_file_it_is_still_writing(self):
+        """正在写，就是活的会话：不碰，只在报告里说一声。"""
+        from codex_switcher import history
+        path = self._write_rollout(self._cross_provider_sample(),
+                                   name="rollout-auto3.jsonl")
+        original = path.read_text(encoding="utf-8")
+        report = history.auto_clean(moving_off_openai=False)
+        self.assertEqual(report["skipped_active"], 1)
+        self.assertEqual(report["cleaned"], 0)
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_auto_clean_respects_its_time_budget(self):
+        """时间预算耗尽就收工，剩下的下次接着清 —— 不能让切换卡在扫盘上。"""
+        from codex_switcher import history
+        self._backdate(self._write_rollout(self._cross_provider_sample(),
+                                           name="rollout-auto4.jsonl"))
+        report = history.auto_clean(moving_off_openai=False, budget_seconds=0)
+        self.assertTrue(report["budget_exhausted"])
+        self.assertEqual(report["cleaned"], 0)
+
 
 class ContextGuardTests(TempCodexHome):
     """上下文窗口守卫。
@@ -1676,6 +1886,148 @@ class OutputEncodingTests(unittest.TestCase):
             capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("UnicodeEncodeError", (result.stderr or b"").decode("utf-8", "replace"))
+
+
+class ThreadBindingTests(TempCodexHome):
+    """任务绑定：切完平台继续任务报 unknown model 这一类事故。
+
+    实测：Codex 恢复旧任务时取的是任务自己记的服务商（会话文件里的
+    session_meta / thread_settings），模型名却取当前配置里的那个。只改
+    config.toml 不改任务绑定，请求就会带着新平台的模型名敲进旧平台的接口，
+    服务端回 unknown model。所以旧任务必须跟着一起搬。
+    """
+
+    def _make_db(self, rows):
+        import sqlite3
+        db = self.home / "state_5.sqlite"
+        connection = sqlite3.connect(str(db))
+        connection.execute(
+            "CREATE TABLE threads (id TEXT, title TEXT, model TEXT, model_provider TEXT,"
+            " rollout_path TEXT, updated_at REAL)")
+        for row in rows:
+            connection.execute("INSERT INTO threads VALUES (?,?,?,?,?,?)", row)
+        connection.commit()
+        connection.close()
+        catalog = self.home / "sqlite"
+        catalog.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(catalog / "codex-dev.db"))
+        connection.execute(
+            "CREATE TABLE local_thread_catalog (thread_id TEXT, model_provider TEXT)")
+        for row in rows:
+            connection.execute("INSERT INTO local_thread_catalog VALUES (?,?)",
+                               (row[0], row[3]))
+        connection.commit()
+        connection.close()
+        return db
+
+    def _make_rollout(self, name, provider):
+        import time
+        path = self.home / (name + ".jsonl")
+        lines = [
+            json.dumps({"type": "session_meta",
+                        "payload": {"model_provider": provider, "id": name}}),
+            json.dumps({"type": "turn_context", "payload": {"model": "whatever"}}),
+            json.dumps({"type": "event_msg",
+                        "payload": {"thread_settings": {"model_provider_id": provider}}}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        # 装成「早就不在写入」的样子，绕开活动文件保护
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        return path
+
+    def _thread_row(self, thread_id, model, provider, path, age=60.0):
+        import time
+        return (thread_id, "标题", model, provider, str(path), time.time() - age)
+
+    def _read_thread(self, thread_id):
+        import sqlite3
+        connection = sqlite3.connect(str(self.home / "state_5.sqlite"))
+        row = connection.execute(
+            "SELECT model, model_provider FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        connection.close()
+        return row
+
+    def test_follow_switch_moves_the_whole_task_to_the_new_provider(self):
+        from codex_switcher import threads
+        path = self._make_rollout("task-a", "minimax")
+        self._make_db([self._thread_row("aaa111", "MiniMax-M3", "minimax", path)])
+        report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
+        self.assertEqual(report["moved"], 1)
+        model, provider = self._read_thread("aaa111")
+        self.assertEqual(provider, "deepseek")
+        # 模型名也得换：只换服务商不换模型，下次还是拿旧模型名敲新平台的门
+        self.assertEqual(model, "deepseek-flash")
+        text = path.read_text()
+        self.assertIn('"model_provider":"deepseek"', text)
+        self.assertIn('"model_provider_id":"deepseek"', text)
+        self.assertNotIn("minimax", text)
+        self.assertTrue(report["backup_dir"])
+
+    def test_follow_switch_leaves_openai_tasks_alone(self):
+        """ChatGPT 账号的任务不跟着搬：那是老家，用户多半还要切回来。"""
+        from codex_switcher import threads
+        path = self._make_rollout("task-b", "openai")
+        self._make_db([self._thread_row("bbb222", "gpt-5.6-sol", "openai", path)])
+        report = threads.follow_switch("openai", "deepseek", "deepseek-flash")
+        self.assertEqual(report["moved"], 0)
+        self.assertEqual(self._read_thread("bbb222")[1], "openai")
+
+    def test_follow_switch_skips_a_file_codex_is_still_writing(self):
+        """Codex 正在写的文件不能替换 inode，数据库照改，文件留到巡检补。"""
+        from codex_switcher import threads
+        path = self._make_rollout("task-c", "minimax")
+        self._make_db([self._thread_row("ccc333", "MiniMax-M3", "minimax", path)])
+        os.utime(path, None)  # 刚刚写过 → 活动文件
+        report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
+        self.assertEqual(report["moved"], 1)
+        self.assertEqual(report["items"][0]["active"], True)
+        self.assertEqual(self._read_thread("ccc333")[1], "deepseek")
+        self.assertIn("minimax", path.read_text())
+
+    def test_repair_fixes_a_stale_session_file_without_the_deep_flag(self):
+        """数据库已经对了、文件里还留着旧服务商 —— 这是切换后继续任务报错的
+        真实现场，以前只有 --deep 才管，默认得自动修掉。"""
+        from codex_switcher import threads
+        path = self._make_rollout("task-d", "minimax")
+        self._make_db([self._thread_row("ddd444", "deepseek-flash", "deepseek", path)])
+        report = threads.repair()
+        self.assertEqual(report["fixed"], 1, report)
+        self.assertNotIn("minimax", path.read_text())
+        self.assertIn('"model_provider":"deepseek"', path.read_text())
+
+    def test_repair_ignores_threads_without_a_provider(self):
+        """服务商是空值时不能拿空串去对齐，否则会把会话文件里的值抹掉。"""
+        from codex_switcher import threads
+        path = self._make_rollout("task-e", "minimax")
+        self._make_db([self._thread_row("eee555", "MiniMax-M3", "", path)])
+        threads.repair()
+        # 文件保持原样（json.dumps 默认带空格），没有被空串抹掉
+        self.assertIn('"model_provider": "minimax"', path.read_text())
+
+    def test_switch_to_moves_recent_tasks_onto_the_new_provider(self):
+        """端到端：切换平台时，最近在用的任务跟着搬过去。"""
+        from codex_switcher import engine, threads
+        from codex_switcher import state as state_module
+        path = self._make_rollout("task-f", "minimax")
+        self._make_db([self._thread_row("fff666", "MiniMax-M3", "minimax", path)])
+        state = state_module.load()
+        for provider_id, label, url in (
+                ("minimax", "MiniMax", "https://api.minimaxi.com/v1"),
+                ("deepseek", "DeepSeek", "https://api.deepseek.com")):
+            record = engine.build_provider_record(
+                provider_id=provider_id, label=label, base_url=url,
+                models_url=url + "/models", transport="native", requires_key=False)
+            record["models"] = {"MiniMax-M3": {}} if provider_id == "minimax" \
+                else {"deepseek-flash": {}}
+            state_module.upsert_provider(state, record)
+        state_module.save(state)
+        # 先切到 minimax，再从 minimax 切到 deepseek
+        engine.switch_to("minimax", "MiniMax-M3")
+        result = engine.switch_to("deepseek", "deepseek-flash")
+        followed = result.get("threads_followed") or {}
+        self.assertEqual(followed.get("moved"), 1, followed)
+        self.assertEqual(self._read_thread("fff666"), ("deepseek-flash", "deepseek"))
 
 
 if __name__ == "__main__":

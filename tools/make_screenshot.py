@@ -46,24 +46,64 @@ CHROME_CANDIDATES = [
     "/usr/bin/chromium",
 ]
 
-# 动态演示依次展示这几个状态：换平台 → 换模型 → 切回官方。
+# 兜底截图器：Chrome 的 GPU/沙箱在某些机器上起不来（报
+# "GPU process isn't usable" / "sandbox initialization failed"），
+# agent-browser（Playwright 系）不受影响，有就用它顶上。
+AGENT_BROWSER_CANDIDATES = [
+    "/opt/homebrew/bin/agent-browser",
+    "/usr/local/bin/agent-browser",
+]
+
+# 动态演示依次展示这几个状态：换平台 → 换模型 → 能力查看 → 切回官方。
 # 每一帧都是真实界面截图，只是把切换过程连起来。
+# 第三个元素是附加视图："caps" 表示拍「能力查看」页（只看选中的那个模型）。
 GIF_STATES = [
-    ("deepseek", "deepseek-flash"),
-    ("minimax", "MiniMax-M3"),
-    ("zhipu", "glm-5.3"),
-    ("openai", "gpt-5-codex"),
+    ("deepseek", "deepseek-flash", ""),
+    ("minimax", "MiniMax-M3", ""),
+    ("minimax", "MiniMax-M3", "caps"),
+    ("zhipu", "glm-5.3", ""),
+    ("openai", "gpt-5-codex", ""),
 ]
 
 
-def shoot(chrome: str, url: str, target: Path, timeout: int = 120) -> bool:
-    result = subprocess.run(
-        [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-         "--force-device-scale-factor=2", "--window-size=1360,860",
-         "--virtual-time-budget=4000",
-         "--screenshot=%s" % target, url],
-        capture_output=True, timeout=timeout)
-    return target.exists()
+_CHROME_BROKEN = False
+
+
+def shoot(chrome: str, url: str, target: Path, timeout: int = 60) -> bool:
+    """截一张图落到 target。成功返回 True。
+
+    注意：先写到临时文件、成功后再替换过去。直接对 target 截图的话，
+    「文件存在」判断会被上一次运行的旧图骗过去 —— Chrome 明明失败了，
+    脚本却报成功，README 上就一直挂着旧界面。
+    """
+    global _CHROME_BROKEN
+    staging = target.with_suffix(".shooting%s" % target.suffix)
+    staging.unlink(missing_ok=True)
+    # Chrome 在一部分机器上起不来（GPU/沙箱），失败一次就别再浪费时间等它超时，
+    # 后面全部改走 agent-browser
+    if not _CHROME_BROKEN:
+        try:
+            result = subprocess.run(
+                [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+                 "--force-device-scale-factor=2", "--window-size=1360,860",
+                 "--virtual-time-budget=4000",
+                 "--screenshot=%s" % staging, url],
+                capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _CHROME_BROKEN = True
+            sys.stderr.write("Chrome 超时（%ds），改用 agent-browser。\n" % timeout)
+        else:
+            if staging.exists():
+                os.replace(staging, target)
+                return True
+            _CHROME_BROKEN = True
+            sys.stderr.write("Chrome 截图失败 (%s)：%s\n" % (
+                url, (result.stderr or b"").decode("utf-8", "replace")[-300:].strip()))
+    fallback = find_agent_browser()
+    if fallback and shoot_agent_browser(fallback, url, staging):
+        os.replace(staging, target)
+        return True
+    return False
 
 
 def build_gif(frames: list, target: Path) -> bool:
@@ -107,6 +147,35 @@ def find_chrome() -> str:
             return candidate
     return ""
 
+
+def find_agent_browser() -> str:
+    for candidate in AGENT_BROWSER_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return shutil.which("agent-browser") or ""
+
+
+def shoot_agent_browser(browser: str, url: str, target: Path) -> bool:
+    """用 agent-browser 截一张 1360x860@2x 的图。"""
+    commands = [
+        [browser, "open", url],
+        [browser, "set", "viewport", "1360", "860", "2"],
+        [browser, "screenshot", str(target)],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            return False
+        if result.returncode != 0:
+            sys.stderr.write("agent-browser %s 失败：%s\n" % (
+                command[1], (result.stderr or b"").decode("utf-8", "replace")[-300:].strip()))
+            return False
+    # 页面要拉取状态接口，等它把数据填进来再截
+    time.sleep(2.0)
+    subprocess.run([browser, "screenshot", str(target)],
+                   capture_output=True, timeout=90)
+    return target.exists()
 
 def main() -> int:
     chrome = find_chrome()
@@ -201,16 +270,18 @@ def main() -> int:
     if "--gif" in sys.argv:
         frames_dir = Path(tempfile.mkdtemp(prefix="codex-switcher-gif-"))
         frames = []
-        for index, (provider_id, model_id) in enumerate(GIF_STATES, 1):
+        for index, (provider_id, model_id, view) in enumerate(GIF_STATES, 1):
             try:
                 engine.switch_to(provider_id, model_id)
             except Exception as exc:                      # noqa: BLE001
                 print("  跳过 %s：%s" % (provider_id, exc))
                 continue
             frame = frames_dir / ("frame-%02d.png" % index)
-            if shoot(chrome, url, frame):
+            frame_url = url + ("&view=caps" if view == "caps" else "")
+            if shoot(chrome, frame_url, frame):
                 frames.append(frame)
-                print("  拍到 %s · %s" % (provider_id, model_id))
+                print("  拍到 %s · %s%s" % (provider_id, model_id,
+                                            "（能力查看）" if view == "caps" else ""))
         gif = ROOT / "docs" / "demo.gif"
         if build_gif(frames, gif):
             print("已生成：%s（%.1f MB）" % (gif, gif.stat().st_size / 1048576))

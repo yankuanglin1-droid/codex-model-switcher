@@ -99,24 +99,97 @@ def thinking_payload(provider_id: str, effort: Optional[str]) -> Dict:
 # 这一层存在的意义：实测探针会受接口写法、图片大小、平台临时故障影响，
 # 实测说「不支持」而官方说「支持」时，多半是我们没测对 —— 两个都显示出来，
 # 而不是拿一次失败的探测去否定官方文档。
+#
+# 值一律抄自各平台官方文档（2026-09-17 核对），不写没出处的东西。
 DOCUMENTED_FACTS: Dict[str, Dict] = {
     "minimax/MiniMax-M3": {
-        "vision": "yes", "reasoning": "yes",
-        "source": "MiniMax 官方文档：M3 原生支持 text / image / video 输入，"
-                  "thinking 可用 adaptive 或 disabled 控制",
+        "vision": "yes", "reasoning": "yes", "tools": "yes",
+        "context": 1048576,
+        "source": "MiniMax 官方文档：M3 原生支持文本 / 图片 / 视频输入，1M 长上下文，"
+                  "thinking 可用 adaptive 或 disabled 控制；messages 支持 tool call 内容，"
+                  "tools 支持 function tools。",
         "url": "https://platform.minimax.io/docs/api-reference/text-chat-openai",
+    },
+    "deepseek/deepseek-flash": {
+        "vision": "yes", "reasoning": "yes", "tools": "yes",
+        "context": 1048576,
+        "source": "DeepSeek 官方文档（模型 & 价格）：deepseek-flash（V4.1-Flash）"
+                  "支持思考/非思考模式、1M 上下文、Tool Calls、Responses API、图像理解。",
+        "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    },
+    "deepseek/deepseek-v4-pro": {
+        "vision": "no", "reasoning": "yes", "tools": "yes",
+        "context": 1048576,
+        "source": "DeepSeek 官方文档（模型 & 价格）：deepseek-v4-pro 支持思考模式、"
+                  "1M 上下文、Tool Calls、Responses API；图像理解一栏为「不支持」。",
+        "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    },
+    "glm/glm-5.3": {
+        "vision": "no", "reasoning": "yes", "tools": "yes",
+        "context": 1048576,
+        "source": "智谱官方文档（GLM-5.3）：仅支持处理文本模态，1M 上下文，最大输出 128K；"
+                  "始终启用思考（low / high / max，不支持禁用）；支持 Function Calling；"
+                  "提供 OpenAI Response 协议端点 https://open.bigmodel.cn/api/v1，"
+                  "可直接接进 Codex。",
+        "url": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
     },
 }
 
 # 按名字匹配的官方说明。一整条产品线共用同一句说明时用这个，免得重复写八遍。
+# 顺序有意义：先匹配具体的，再匹配整条产品线。
 DOCUMENTED_RULES: List[Tuple[str, Dict]] = [
     (r"^minimax-m2", {
-        "vision": "no",
-        "source": "MiniMax 官方文档：M2.7 / M2.5 / M2.1 / M2 系列只支持文本与工具调用，"
-                  "不接受图片或视频输入",
+        "vision": "no", "reasoning": "yes", "tools": "yes",
+        "source": "MiniMax 官方文档：M2.x 系列（M2.7 / M2.5 / M2.1 / M2）"
+                  "只支持文本与 function tools，不接受图片或视频输入；"
+                  "thinking 只能开启、不能禁用。",
         "url": "https://platform.minimax.io/docs/api-reference/text-chat-openai",
     }),
+    (r"^minimax", {
+        "reasoning": "yes", "tools": "yes",
+        "source": "MiniMax 官方文档：这批对话模型都支持 thinking 与 function tools。",
+        "url": "https://platform.minimax.io/docs/api-reference/text-chat-openai",
+    }),
+    (r"^deepseek-(flash|v4-flash)", {
+        "vision": "yes", "reasoning": "yes", "tools": "yes",
+        "source": "DeepSeek 官方文档：Flash 线支持图像理解、思考模式、Tool Calls 与 Responses API。",
+        "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    }),
+    (r"^deepseek", {
+        "reasoning": "yes", "tools": "yes",
+        "source": "DeepSeek 官方文档：对话模型均支持思考模式、Tool Calls 与 Responses API。",
+        "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    }),
+    # 只匹配 glm-5.3 本体：Flash 是另一条产品线（原生多模态），
+    # 官方文档没写它的输入模态，不能拿 5.3 的结论套上去。
+    (r"^glm-5\.3$", {
+        "vision": "no", "reasoning": "yes", "tools": "yes",
+        "source": "智谱官方文档：GLM-5.3 仅支持文本模态，始终启用思考，支持 Function Calling。",
+        "url": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+    }),
 ]
+
+# 各平台的接入方式与官方文档入口：界面上直接告诉用户「怎么配进 Codex」。
+PLATFORM_DOCS: Dict[str, Dict] = {
+    "minimax": {
+        "docs": "https://platform.minimax.io/docs/api-reference/text-chat-openai",
+        "hint": "Base URL 填 https://api.minimax.cn/v1（OpenAI 兼容），本工具按原生直连接入。",
+    },
+    "deepseek": {
+        "docs": "https://api-docs.deepseek.com/zh-cn/guides/responses_api",
+        "hint": "换新用法支持 Responses API：Base URL 填 https://api.deepseek.com，"
+                "Codex 直接说 Responses 协议，不用本地桥。",
+    },
+    "glm": {
+        "docs": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+        "hint": "官方提供 OpenAI Response 协议端点 https://open.bigmodel.cn/api/v1，"
+                "填这个即可原生接入。",
+    },
+    "moonshot": {
+        "docs": "https://platform.moonshot.cn/docs/api/chat",
+        "hint": "Kimi 只有 OpenAI 兼容的 /chat/completions，需要走本工具的本地协议桥翻译。",
+    },
+}
 
 # 这些是拿真实请求测出来的（日期见 verified_at），不是按名字猜的。
 # 没测过的模型不会出现在这里，fallback 到官方文档或按名字推断。
@@ -188,6 +261,11 @@ def documented_fact(provider_id: str, model_id: str) -> Optional[Dict]:
     return None
 
 
+def platform_docs(provider_id: str) -> Optional[Dict]:
+    """这个平台的官方文档在哪、怎么接进 Codex。认不出来就返回 None。"""
+    return PLATFORM_DOCS.get((provider_id or "").strip().lower())
+
+
 def capability_row(provider_id: str, model_id: str, override: Optional[Dict] = None) -> Dict:
     """单个模型的能力行：实测优先，其次官方文档，最后才按名字推断。
 
@@ -198,7 +276,7 @@ def capability_row(provider_id: str, model_id: str, override: Optional[Dict] = N
     row = infer(model_id)
     documented = documented_fact(provider_id, model_id)
     if documented:
-        row.update({key: documented[key] for key in ("vision", "reasoning", "tools")
+        row.update({key: documented[key] for key in ("vision", "reasoning", "tools", "context")
                     if key in documented})
         row["source"] = "documented"
         row["documented"] = {key: documented[key] for key in
@@ -209,10 +287,16 @@ def capability_row(provider_id: str, model_id: str, override: Optional[Dict] = N
     if fact:
         measured = {key: fact[key] for key in ("vision", "reasoning", "tools") if key in fact}
         if documented:
+            # 只有「测出了明确结论」才算和官方打架；unknown 是没测出来，不算冲突。
             row["conflict"] = [key for key, value in measured.items()
-                               if documented.get(key) and documented[key] != value]
-        row.update(measured)
-        row["source"] = "verified"
+                               if value != "unknown" and documented.get(key)
+                               and documented[key] != value]
+        # 实测的 unknown 只说明「我们没测出来」，不能拿它去否定官方写明的结论
+        # （deepseek-v4-pro 就踩过这个坑：官方说图像理解不支持，却被一次
+        #   400 的探测结果盖成了「未测出」，界面上看着像没人知道）。
+        usable = {key: value for key, value in measured.items() if value != "unknown"}
+        row.update(usable)
+        row["source"] = "verified" if usable else (row.get("source") or "inferred")
         row["verified_at"] = fact.get("verified_at")
         row["note"] = fact.get("note") or row.get("note") or ""
     # 用户手动改过 / 探测后写回的，以本地记录为准（人亲眼看到的更可信）
@@ -221,7 +305,10 @@ def capability_row(provider_id: str, model_id: str, override: Optional[Dict] = N
         for key in ("vision", "reasoning", "tools"):
             if saved.get(key):
                 row[key] = saved[key]
-        row["source"] = "measured"
+        manual = saved.get("manual") if isinstance(saved.get("manual"), dict) else {}
+        # 手动标注的和自动实测的必须分得清：一个是「我亲眼见过」，
+        # 一个是「机器跑出来的」，界面上标不同来源，人才能判断可信度。
+        row["source"] = "manual" if any(manual.get(key) for key in CAPABILITY_KEYS) else "measured"
         row["verified_at"] = saved.get("verified_at")
         if saved.get("note"):
             row["note"] = saved["note"]
@@ -241,6 +328,81 @@ def matrix(provider_id: str, record: Optional[Dict] = None) -> List[Dict]:
     models = list((record or {}).get("models") or {})
     overrides = (record or {}).get("model_overrides") or {}
     return [capability_row(provider_id, model, overrides.get(model)) for model in models]
+
+
+# ------------------------------------------------------------- 人工标注
+
+# 三项能力，三态：yes / no / unknown（未测出）。
+# 用户点标签循环切换，结论写进 model_overrides[model].capabilities，
+# 和实测写回同一个存储位，但带 manual 标记以便区分来源。
+CAPABILITY_KEYS = ("vision", "reasoning", "tools")
+CAPABILITY_VALUES = ("yes", "no", "unknown")
+
+# 手动标注 → 目录里对应的开关。标成「不支持」必须真的把开关关掉，
+# 否则 Codex 还会照样把图发过去（这就是「阉割/误报」的另一面）。
+def _apply_manual_side_effects(entry: Dict, key: str, value: str) -> None:
+    if key == "vision":
+        if value == "yes":
+            entry["input_modalities"] = ["text", "image"]
+        elif value == "no":
+            entry["input_modalities"] = ["text"]
+        else:
+            entry.pop("input_modalities", None)
+    elif key == "reasoning":
+        if value == "yes":
+            entry.setdefault("default_reasoning_level", "high")
+        elif value == "no":
+            entry["default_reasoning_level"] = "none"
+        else:
+            entry.pop("default_reasoning_level", None)
+    elif key == "tools":
+        if value in ("yes", "no"):
+            entry["supports_parallel_tool_calls"] = (value == "yes")
+        else:
+            entry.pop("supports_parallel_tool_calls", None)
+
+
+def set_manual_capability(provider_id: str, record: Dict, model_id: str,
+                          key: str, value: str) -> Dict:
+    """人工标注某一项能力。value 为 'yes'/'no'/'unknown'。
+
+    'unknown' 表示清掉这条标注、回到「未测出」（推断值重新生效）。
+    """
+    if key not in CAPABILITY_KEYS:
+        raise ValueError("未知的能力项：%s" % key)
+    if value not in CAPABILITY_VALUES:
+        raise ValueError("未知的取值：%s" % value)
+
+    overrides = record.setdefault("model_overrides", {})
+    entry = dict(overrides.get(model_id) or {})
+    saved = dict(entry.get("capabilities") or {})
+    manual = dict(saved.get("manual") or {})
+
+    if value == "unknown":
+        saved.pop(key, None)
+        manual.pop(key, None)
+    else:
+        saved[key] = value
+        manual[key] = True
+    saved["verified_at"] = _today()
+    saved["note"] = "手动指定"
+    if manual:
+        saved["manual"] = manual
+    else:
+        saved.pop("manual", None)
+    _apply_manual_side_effects(entry, key, value)
+
+    if saved.get("manual") or any(saved.get(k) for k in CAPABILITY_KEYS):
+        entry["capabilities"] = saved
+    else:
+        entry.pop("capabilities", None)
+    # 清空到没有任何覆盖项，就把整个条目删掉，别在状态里留空壳
+    if not entry:
+        overrides.pop(model_id, None)
+    else:
+        overrides[model_id] = entry
+    return {"provider": provider_id, "model": model_id, "key": key, "value": value,
+            "capabilities": saved}
 
 
 # ------------------------------------------------------------------ 实测探针

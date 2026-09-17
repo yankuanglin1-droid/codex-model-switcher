@@ -23,6 +23,7 @@
     </label>
     <span class="badge" id="secret-backend">密钥存储：—</span>
     <button class="btn ghost" id="btn-lang" data-i18n-title="lang.title">English</button>
+    <button class="btn ghost" id="btn-caps-page" data-i18n="topbar.caps_page">能力查看</button>
     <button class="btn ghost" id="btn-refresh-all" data-i18n="topbar.refresh_all">全部刷新模型</button>
     <button class="btn ghost" id="btn-restore" data-i18n="topbar.restore">恢复官方 OpenAI</button>
     <button class="btn primary" id="btn-manual" data-i18n="topbar.add_manual">手动添加平台</button>
@@ -45,20 +46,43 @@
     <strong id="guard-banner-title" data-i18n="guard.title">当前对话装不下目标模型的上下文窗口</strong>
     <span class="hint" id="guard-banner-detail"></span>
   </div>
+  <div class="banner-actions" id="guard-banner-actions"></div>
 </div>
 
-<main class="layout">
+<main class="layout" id="providers-main">
   <aside class="sidebar">
-    <h2 class="panel-title" data-i18n="sidebar.title">已接入平台</h2>
-    <div id="provider-list" class="provider-list"></div>
-    <p class="hint" id="empty-hint" data-i18n="sidebar.empty" hidden>
-      还没有接入任何平台。点右上角「手动添加平台」，或从预设里选一个开始。
-    </p>
+    <section class="side-panel provider-panel">
+      <h2 class="panel-title" data-i18n="sidebar.title">已接入平台</h2>
+      <div id="provider-list" class="provider-list"></div>
+      <p class="hint" id="empty-hint" data-i18n="sidebar.empty" hidden>
+        还没有接入任何平台。点右上角「手动添加平台」，或从预设里选一个开始。
+      </p>
+    </section>
+    <!-- 下半块：当前平台官方的接入说明。单独一块黑白渐变磨砂玻璃，
+         跟上面的平台列表分开，不混成一整片。 -->
+    <section class="side-panel docs-panel" id="provider-docs" hidden></section>
   </aside>
 
   <section class="detail" id="detail">
     <div class="placeholder" data-i18n="detail.placeholder">从左边选一个平台，查看它的模型与额度。</div>
   </section>
+</main>
+
+<main class="caps-page" id="caps-main" hidden>
+  <div class="caps-head">
+    <div>
+      <h2 data-i18n="caps.page_title">能力查看</h2>
+      <p class="hint" data-i18n="caps.page_hint">
+        这里汇总每个平台、每个模型到底能做什么：读图、思考、工具调用、上下文窗口。
+        「官方」来自平台官方文档，「本机实测」是我们发真实请求测出来的，「推断」只按模型名猜的。
+        点标签可以直接标注（未测出 → 支持 → 不支持 → 未测出），标注会立刻写回目录生效。
+      </p>
+    </div>
+    <div class="caps-head-actions">
+      <button class="btn ghost" id="btn-caps-back" data-i18n="caps.back">返回平台列表</button>
+    </div>
+  </div>
+  <div id="caps-page-body"></div>
 </main>
 
 <footer class="footer">

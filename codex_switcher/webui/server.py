@@ -13,6 +13,7 @@ import mimetypes
 import re
 import secrets as py_secrets
 import threading
+import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,7 @@ from .. import (PROJECT_URL, __version__, balance as balance_module, engine, pat
                 secrets, state as state_module, threads as threads_module, update as update_module,
                 usage)
 from .. import catalog as catalog_module
+from .. import capabilities as capabilities_module
 from .. import contextguard as contextguard_module
 from ..discovery import DiscoveryError
 
@@ -57,7 +59,53 @@ def _guard_payload(current: Dict) -> Optional[Dict]:
     # 会话路径是隐私，只留最后一段
     report["thread"] = Path(report["path"]).name
     report.pop("path", None)
+    # 光说「装不下 / 要压缩」等于把问题丢回给用户。把「这个会话还装得下谁」
+    # 一并算好递过去，界面才能给出一条一键就能走完的出路。
+    if report.get("action") in ("compact-first", "fork"):
+        try:
+            report["alternatives"] = contextguard_module.fitting_models(
+                tokens=report.get("tokens") or 0)
+        except Exception:  # noqa: BLE001 - 算不出备选不能拖垮界面
+            report["alternatives"] = []
     return report
+
+
+def _model_context(provider_id: str) -> Dict:
+    """每个模型的三层上下文数字，供「选择使用模型」的地方直接看：
+
+      · 官方窗口：模型自己支持多大（catalog 的 context_window）
+      · Codex 可用：Codex 按 effective_context_window_percent（默认 95%）实际会用到的
+      · 建议压缩线：Codex 自动压缩触发点（可用窗口的 60%，v1.5.5 起写进配置）
+
+    三层都写出来，是为了让用户明白「为什么 1M 的模型在 Codex 里只有 996K 可用」。
+    """
+    try:
+        document = json.loads(Path(catalog_module.catalog_path(provider_id)).read_text())
+    except (OSError, ValueError):
+        return {}
+    result: Dict = {}
+    for entry in document.get("models", []):
+        slug = entry.get("slug")
+        if not slug:
+            continue
+        window = 0
+        try:
+            window = int(entry.get("context_window") or 0)
+        except (TypeError, ValueError):
+            window = 0
+        effective = contextguard_module.effective_window(entry) if window else 0
+        compact = contextguard_module.auto_compact_limit(effective) if effective else 0
+        result[slug] = {
+            "window": window,
+            "window_human": usage.human_tokens(window) if window else "—",
+            "effective": effective,
+            "effective_human": usage.human_tokens(effective) if effective else "—",
+            "effective_percent": int(entry.get("effective_context_window_percent") or 95),
+            "compact": compact,
+            "compact_human": usage.human_tokens(compact) if compact else "—",
+            "compact_ratio": int(contextguard_module.AUTO_COMPACT_RATIO * 100),
+        }
+    return result
 
 
 def _model_windows(provider_id: str) -> Dict:
@@ -104,7 +152,9 @@ def _model_capabilities(provider_id: str, record=None) -> Dict:
     except Exception:  # noqa: BLE001 - 能力矩阵算不出来不能拖垮界面
         return {}
     return {row["model"]: {key: row[key] for key in
-                           ("vision", "reasoning", "tools", "source", "effort", "note")
+                           ("vision", "reasoning", "tools", "source", "effort", "note",
+                            "context", "documented", "documented_url", "verified_at",
+                            "conflict")
                            if key in row} for row in rows}
 
 
@@ -122,8 +172,11 @@ def _state_payload(include_balance: bool = False) -> Dict:
                 "total_tokens_human": usage.human_tokens(stat["total_tokens"]),
             }
         item["model_windows"] = _model_windows(item["id"])
+        item["model_context"] = _model_context(item["id"])
         item["model_efforts"] = _model_efforts(item["id"])
         item["model_capabilities"] = _model_capabilities(item["id"])
+        # 「能力查看」页要顺带告诉用户这个平台官方文档在哪、怎么接进 Codex
+        item["platform_docs"] = capabilities_module.platform_docs(item["id"])
         item["usage"] = engine.usage_with_quota(item["id"], item.get("quota_tokens"), used_tokens)
         item["usage"]["used_tokens_human"] = usage.human_tokens(used_tokens)
         if item["usage"].get("quota_tokens"):
@@ -262,6 +315,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(result)
 
     def _dispatch(self, action: str, payload: Dict) -> Dict:
+        if action == "fit_switch":
+            # 上下文守卫的自动化出口：换到一个装得下当前会话的模型。
+            # switch_to 会顺带把最近在用的任务搬过去并重写压缩触发点。
+            provider = (payload.get("provider") or "").strip()
+            model = (payload.get("model") or "").strip()
+            if not provider or not model:
+                return {"error": "缺少平台或模型"}
+            try:
+                result = engine.switch_to(provider, model)
+            except engine.SwitchError as exc:
+                return {"error": str(exc)}
+            result["state"] = _state_payload()
+            return result
+
         if action == "switch":
             provider = (payload.get("provider") or "").strip()
             model = (payload.get("model") or "").strip() or None
@@ -302,13 +369,17 @@ class Handler(BaseHTTPRequestHandler):
         if action == "set_capability":
             provider_id = (payload.get("provider") or "").strip()
             model_id = (payload.get("model") or "").strip()
+            key = (payload.get("key") or "vision").strip()
             if not provider_id or not model_id:
                 return {"error": "缺少平台或模型"}
-            vision = payload.get("vision")
+            value = payload.get("value")
+            if value is None and "vision" in payload:
+                value = "yes" if payload.get("vision") else "no"
             try:
                 result = engine.set_model_capability(
-                    provider_id, model_id, None if vision is None else bool(vision))
-            except engine.SwitchError as exc:
+                    provider_id, model_id, key=key,
+                    value=None if value is None else str(value))
+            except (engine.SwitchError, ValueError) as exc:
                 return {"error": str(exc)}
             result["state"] = _state_payload()
             return result
@@ -467,12 +538,47 @@ class Handler(BaseHTTPRequestHandler):
         return payload_out
 
 
+WATCHDOG_INTERVAL_SECONDS = 12.0
+
+
+def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
+    """后台盯着任务绑定，坏了就修。
+
+    为什么需要它：minimax / deepseek / glm 都是 transport=native，直连平台
+    API，根本不过本地协议桥，所以桥上那个巡检线程管不到它们。而「切换后
+    继续任务」产生的错位，往往是在 Codex 把新模型写回数据库**之后**才出现
+    的 —— 只在切换那一刻修一次根本来不及。这里定期复查，几秒内自动纠偏。
+    """
+    while True:
+        try:
+            time.sleep(interval)
+        except Exception:  # noqa: BLE001 - 退出路径，不必细分
+            return
+        try:
+            report = threads_module.repair()
+            if report.get("fixed"):
+                threads_module.log_watch(report)
+        except Exception:  # noqa: BLE001 - 巡检绝不能把界面拖垮
+            continue
+
+
+def _start_watchdog(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
+    worker = threading.Thread(target=_watchdog_loop, args=(interval,), daemon=True)
+    worker.start()
+
+
 def run(port: int = 0, open_browser: bool = True, token: Optional[str] = None) -> int:
     Handler.token = token or py_secrets.token_urlsafe(18)
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     actual_port = server.server_address[1]
     url = "http://127.0.0.1:%d/?t=%s" % (actual_port, Handler.token)
     _write_runtime_state(actual_port)
+    # 开界面先自查一遍，再交给后台巡检兜着
+    try:
+        threads_module.repair()
+    except Exception:  # noqa: BLE001
+        pass
+    _start_watchdog()
     print("图形界面已启动：%s" % url)
     print("（只监听本机，关闭此终端窗口即停止）")
     if open_browser:

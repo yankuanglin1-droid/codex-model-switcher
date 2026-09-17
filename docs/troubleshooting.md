@@ -137,6 +137,46 @@ codex-switcher list        # 至少能确认当前默认是哪个平台
 
 ---
 
+## 继续旧任务报 `unknown model 'xxx'` / `invalid params, code: 2013`
+
+```text
+invalid params, code: 2013, msg: invalid params, unknown model 'deepseek-flash' (2013)
+```
+
+### 这是切换平台后最常见的事故，原因一句话就能说清
+
+Codex 恢复一个旧任务时，**服务商取任务自己记的那个**（写在会话文件的
+`session_meta.model_provider` 和每轮的 `thread_settings.model_provider_id` 里），
+**模型名却取当前配置里的**。两者一分家，请求就带着新平台的模型名敲进旧平台的
+接口 —— 上面那条 2013 就是把 deepseek 的模型名发给 MiniMax 时，MiniMax 的原话。
+
+绑定时写在**三处**：`state_5.sqlite`、`sqlite/codex-dev.db`、会话文件本身。
+Codex 自己会把数据库纠正过来，但**会话文件不会**，所以只看数据库「一切正常」、
+一继续任务照样报错。
+
+### 自动化处理（v1.6.0 起，通常你什么都不用做）
+
+1. **切换时就搬**：`use` 切换平台时，最近 36 小时还在用的任务会整体搬到新平台
+   （会话文件 + 两个数据库 + 模型名一起改，先备份到
+   `~/.codex/model-switcher/thread-backups/`）。
+2. **后台巡检**：图形界面服务每 12 秒复查一次，发现错位直接修好。切完继续任务
+   万一还报错，**等几秒重试一次**即可。
+3. OpenAI 的任务刻意不搬（那是「老家」，且一动就是上千条）。
+
+### 手动处理
+
+```bash
+codex-switcher tasks           # 看哪些任务的服务商和模型对不上
+codex-switcher repair          # 修复（默认含最近任务的会话文件扫描）
+codex-switcher repair --follow # 把最近在用的任务整体搬到当前平台
+codex-switcher repair --deep   # 全量扫描会话文件（慢，会话文件可能几百 MB）
+```
+
+修完**完全退出（⌘Q）并重开 Codex**。正在被 Codex 写入的会话文件会跳过
+（避免把正在进行的对话写坏），退出后再跑一次即可。
+
+---
+
 ## 请求报连接失败 / 502 / 连接被拒绝
 
 分两种情况。

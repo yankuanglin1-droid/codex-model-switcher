@@ -18,7 +18,10 @@ Codex 会把整段会话历史原样回放到下一次请求里。历史里有�
    复用推理"。换到第三方平台之后它没有任何意义，而且会被当成未知字段。
 
 3. 其它 OpenAI 专有条目类型（``custom_tool_call`` / ``web_search_call`` 等）
-   这里只报告，不擅自删改 —— 它们承载真实工具调用，删了会丢上下文。
+   各家第三方平台对这些条目都有自己的严格 schema（实测 deepseek 的
+   web_search_call 要 ``queries`` 字段，MiniMax 产出的只有 ``action``），
+   跨平台回放必然 400。补字段救不了，只能成对剥离：
+   手动走 ``--cross-provider``，切换平台时由 :func:`auto_clean` 自动做。
 
 清洗原则：只删"确定是坏的"和"确定对方用不上"的，其余一律只报告。
 改之前先备份，改完逐行校验仍是合法 JSON。
@@ -250,4 +253,97 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
                 "orphan_outputs": stats["removed_orphan_outputs"],
                 "openai_only": stats["removed_openai_only"],
                 "cross_provider": stats["removed_cross_provider"]}})
+    return report
+
+
+# --------------------------------------------------------------- 切换时自动清洗
+
+# 为什么需要它：
+#   实测（2026-09-17）：MiniMax 的 Responses API 能真的执行 web_search，
+#   产出的 web_search_call 条目只有 id 没有 call_id；deepseek 对同一类型
+#   有自己的严格 schema（要 queries 字段）。跨平台回放历史时谁也不认谁，
+#   全部 400（missing field call_id / queries …）。
+#   补字段救不了（各家 schema 不一样），唯一可靠的办法是切换平台时
+#   把别家产生的服务端工具条目剥掉 —— 也就是 cross_provider 清洗。
+#   但这件事以前要手动跑 `history --clean --cross-provider`，用户不会记得。
+#   所以 switch_to 切换成功后自动跑一遍最近的会话。
+
+LEDGER_NAME = "history-autoclean.json"
+AUTO_CLEAN_LIMIT = 12          # 每次最多处理最近多少份会话
+AUTO_CLEAN_BUDGET_SECONDS = 8.0  # 总时间预算：巨文件拖不慢切换，剩下的下次接着清
+
+
+def _ledger_path() -> Path:
+    return paths.state_dir() / LEDGER_NAME
+
+
+def _load_ledger() -> Dict:
+    try:
+        data = json.loads(_ledger_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _save_ledger(ledger: Dict) -> None:
+    try:
+        paths.ensure_dir(paths.state_dir())
+        _ledger_path().write_text(
+            json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # 账本写不进去只是下次多扫一遍，不影响功能
+
+
+def auto_clean(moving_off_openai: bool, limit: int = AUTO_CLEAN_LIMIT,
+               budget_seconds: float = AUTO_CLEAN_BUDGET_SECONDS) -> Dict:
+    """切换平台后自动清洗最近的会话（cross_provider 模式，先备份）。
+
+    带两层保护：
+      · 账本缓存：已经清过且没再改动的文件直接跳过，切换保持秒回；
+      · 时间预算：从最新的文件开始处理，超时就收工，剩余的下次切换接着清
+        （最新的会话最可能被 resume，所以优先级最高）。
+    任何异常都不能影响切换本身，调用方兜底即可（这里也不再抛）。
+    """
+    started = time.time()
+    report = {"cleaned": 0, "skipped_active": 0, "checked": 0,
+              "budget_exhausted": False,
+              "removed": {"orphan_outputs": 0, "openai_only": 0,
+                          "cross_provider": 0},
+              "backup_dir": None}
+    ledger = _load_ledger()
+    try:
+        rollouts = recent_rollouts(limit)
+    except OSError:
+        return report
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for path in rollouts:
+        if time.time() - started > budget_seconds:
+            report["budget_exhausted"] = True
+            break
+        key = str(path)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        # 清过且没再动过：账本命中，直接跳过
+        if ledger.get(key) == mtime:
+            continue
+        # 正在写的会话不碰（同 sanitize 的保护逻辑）
+        if time.time() - mtime < ACTIVE_GUARD_SECONDS:
+            report["skipped_active"] += 1
+            continue
+        info = inspect(path)
+        report["checked"] += 1
+        if is_dirty(info, cross_provider=True):
+            changed, stats = sanitize(path, moving_off_openai,
+                                      _backup_root() / stamp,
+                                      cross_provider=True)
+            if changed:
+                report["cleaned"] += 1
+                report["backup_dir"] = str(_backup_root() / stamp)
+                for field in report["removed"]:
+                    report["removed"][field] += stats.get("removed_" + field, 0)
+        # 不管改没改，这份文件此刻是干净的，记账本（含只检查没改动的）
+        ledger[key] = mtime
+    _save_ledger(ledger)
     return report

@@ -39,9 +39,18 @@ BACKUP_DIRNAME = "thread-backups"
 # 深度扫描会跳过最近还在写入的会话文件：Codex 可能正拿它追加内容，
 # 这时替换文件会让它后续写入落到已经被替换掉的旧 inode 上。
 ACTIVE_GUARD_SECONDS = 120
+# 「数据库对了、会话文件里还留着旧平台」的扫描范围。会话文件动辄几百 MB，
+# 全量扫一遍要好几分钟，所以默认只扫最近这几个还在动的任务，--deep 才全量。
+FILE_SCAN_RECENT = 10
+FILE_SCAN_BUDGET_SECONDS = 5.0
+# 切换平台时，最近这段时间里还在动的任务跟着一起搬过去。
+FOLLOW_WINDOW_SECONDS = 36 * 3600
 
 # 模型名可能带这些前缀，匹配时先剥掉
 PREFIXES = ("codex-",)
+
+# 官方（ChatGPT 账号）服务商的代号。这里不 import engine，免得循环导入。
+OFFICIAL_PROVIDER_ID = "openai"
 
 
 class ThreadError(RuntimeError):
@@ -261,8 +270,12 @@ def file_has_stale_provider(path: Path, expected: str) -> bool:
 
 
 def _update_databases(thread_id: str, from_provider: str, to_provider: str,
-                      backup_dir: Path) -> List[str]:
-    """同步两个 sqlite。返回被改动的库名。"""
+                      backup_dir: Path, model: Optional[str] = None) -> List[str]:
+    """同步两个 sqlite。返回被改动的库名。
+
+    model 给了就顺手把模型名一起改掉：任务要整个搬到新平台上，
+    只换服务商不换模型，下次请求还是拿着旧模型名去敲新平台的门。
+    """
     touched = []
     for label, relative, table, column in (
         ("state_5", STATE_DB, "threads", "model_provider"),
@@ -284,9 +297,16 @@ def _update_databases(thread_id: str, from_provider: str, to_provider: str,
                 except sqlite3.Error:
                     shutil.copy2(db, snapshot)
             key = "id" if table == "threads" else "thread_id"
-            cursor = connection.execute(
-                "UPDATE %s SET %s = ? WHERE %s = ? AND %s = ?" % (table, column, key, column),
-                (to_provider, thread_id, from_provider))
+            # 目录表（local_thread_catalog）没有 model 列，只有服务商
+            if model and table == "threads":
+                cursor = connection.execute(
+                    "UPDATE %s SET %s = ?, model = ? WHERE %s = ? AND %s = ?"
+                    % (table, column, key, column),
+                    (to_provider, model, thread_id, from_provider))
+            else:
+                cursor = connection.execute(
+                    "UPDATE %s SET %s = ? WHERE %s = ? AND %s = ?" % (table, column, key, column),
+                    (to_provider, thread_id, from_provider))
             connection.commit()
             if cursor.rowcount:
                 touched.append(label)
@@ -307,8 +327,9 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
     from . import state as state_module
     state = state_module.load()
     owners = owner_map(state)
+    all_threads = list_threads(limit=limit)
     candidates = []
-    for item in list_threads(limit=limit):
+    for item in all_threads:
         want = expected_provider(item["model"], owners)
         if not want or want == item["provider"]:
             continue
@@ -318,25 +339,34 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
 
     stale_files: List[Dict] = []
     skipped_active: List[Dict] = []
-    if deep:
-        for item in list_threads(limit=limit):
-            if thread_id and not item["id"].startswith(thread_id):
+    # 会话文件扫描：数据库对得上、文件里却还留着旧服务商的情况，以前只有 --deep
+    # 才管，结果用户切完平台继续任务照样报错。现在默认也扫，但只扫最近几个还在
+    # 动的任务，并且卡时间预算——一个会话文件几百 MB，不能让界面卡在这上面。
+    scan_targets = all_threads if deep else all_threads[:max(0, FILE_SCAN_RECENT)]
+    scan_started = time.time()
+    for item in scan_targets:
+        if time.time() - scan_started > FILE_SCAN_BUDGET_SECONDS:
+            break
+        if thread_id and not item["id"].startswith(thread_id):
+            continue
+        # 数据库里服务商是空的就别猜了：拿空串去对齐会把会话文件里的值抹掉
+        if not item["provider"]:
+            continue
+        path = Path(item["rollout_path"]) if item["rollout_path"] else None
+        if not path or not path.exists():
+            continue
+        if item["id"] in {c["id"] for c in candidates}:
+            continue  # 上面那轮已经会整份重写
+        try:
+            if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
+                skipped_active.append(item)
                 continue
-            path = Path(item["rollout_path"]) if item["rollout_path"] else None
-            if not path or not path.exists():
-                continue
-            if item["id"] in {c["id"] for c in candidates}:
-                continue  # 上面那轮已经会整份重写
-            try:
-                if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
-                    skipped_active.append(item)
-                    continue
-            except OSError:
-                continue
-            if file_has_stale_provider(path, item["provider"]):
-                stale_files.append(item)
+        except OSError:
+            continue
+        if file_has_stale_provider(path, item["provider"]):
+            stale_files.append(item)
 
-    report = {"checked": len(list_threads(limit=limit)), "fixed": 0, "dry_run": dry_run,
+    report = {"checked": len(all_threads), "fixed": 0, "dry_run": dry_run,
               "items": [], "backup_dir": None, "deep": deep,
               "skipped_active": [{"id": item["id"][:8], "title": item["title"][:40]}
                                  for item in skipped_active]}
@@ -380,6 +410,101 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
                 "session": True, "meta": meta, "settings": settings, "db": []})
             report["fixed"] += 1
     return report
+
+
+def follow_switch(from_provider: str, to_provider: str, model: Optional[str] = None,
+                  window_seconds: float = FOLLOW_WINDOW_SECONDS,
+                  include_openai: bool = False, dry_run: bool = False) -> Dict:
+    """切换平台时，把「还在用」的旧任务一起搬过去。
+
+    为什么非搬不可
+    --------------
+    Codex 恢复一个旧任务时，**服务商取任务自己记的那个**（会话文件里的
+    ``session_meta.model_provider`` 和每轮的 ``thread_settings.model_provider_id``），
+    **模型名却取当前配置里的那个**。两者一分家，请求就带着新平台的模型名
+    敲进旧平台的接口，服务端直接回：
+
+        invalid params, code: 2013, msg: invalid params, unknown model 'deepseek-flash'
+        （把 deepseek 的模型名发给 MiniMax 时 MiniMax 的原话）
+
+    也就是说：只改 ``config.toml`` 根本不算切换完，旧任务的绑定也得跟着走，
+    否则用户切完一继续任务就炸。所以这里把最近还在动的任务整条搬过去：
+    会话文件里的服务商 + 两个数据库里的服务商与模型名，改前全部备份。
+    """
+    empty = {"checked": 0, "moved": 0, "items": [], "skipped_active": [],
+             "dry_run": dry_run, "backup_dir": None}
+    if not from_provider or not to_provider or from_provider == to_provider:
+        return empty
+    # OpenAI 的任务不跟着搬：它们是「默认老家」，用户多半还要切回来，
+    # 而且一搬就是成百上千条，动静太大。第三方之间才搬。
+    if from_provider == OFFICIAL_PROVIDER_ID and not include_openai:
+        return empty
+
+    threads = list_threads()
+    cutoff = time.time() - max(0.0, window_seconds)
+    candidates = [item for item in threads
+                  if item["provider"] == from_provider and (item["updated_at"] or 0) >= cutoff]
+    report = {"checked": len(threads), "moved": 0, "items": [], "skipped_active": [],
+              "dry_run": dry_run, "backup_dir": None,
+              "from": from_provider, "to": to_provider, "model": model}
+    if dry_run:
+        report["items"] = [{"id": item["id"][:8], "title": item["title"][:40],
+                            "model": item["model"], "from": from_provider, "to": to_provider}
+                           for item in candidates]
+        return report
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = _backup_root() / stamp
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    report["backup_dir"] = str(backup_dir)
+
+    for item in candidates:
+        entry = {"id": item["id"][:8], "title": item["title"][:40], "model": item["model"],
+                 "from": from_provider, "to": to_provider,
+                 "session": False, "meta": 0, "settings": 0, "db": [], "active": False}
+        path = Path(item["rollout_path"]) if item["rollout_path"] else None
+        if path and path.exists():
+            try:
+                # Codex 正写着的文件不碰：替换 inode 会让它后续写入丢失。
+                # 数据库照样改（没有这个风险），文件留给后台巡检在 Codex
+                # 退出后补上——用户改了配置本来就得重启 Codex。
+                if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
+                    entry["active"] = True
+                    report["skipped_active"].append(entry["id"])
+                else:
+                    changed, meta, settings = _rewrite_session_file(
+                        path, from_provider, to_provider, backup_dir)
+                    entry.update(session=changed, meta=meta, settings=settings)
+            except OSError:
+                pass
+        entry["db"] = _update_databases(
+            item["id"], from_provider, to_provider, backup_dir, model=model)
+        report["items"].append(entry)
+        report["moved"] += 1
+    return report
+
+
+def describe_follow(report: Dict) -> str:
+    """把 follow_switch 的结果说清楚。"""
+    if not report.get("items"):
+        return "没有需要跟着搬的任务。"
+    if report.get("dry_run"):
+        lines = ["预演：将把 %d 个任务从 %s 搬到 %s"
+                 % (len(report["items"]), report["from"], report["to"])]
+    else:
+        lines = ["已把 %d 个任务从 %s 搬到 %s" % (report["moved"], report["from"], report["to"])]
+    for item in report["items"][:12]:
+        extra = []
+        if item.get("session"):
+            extra.append("会话 %d 处头 / %d 处轮次" % (item["meta"], item["settings"]))
+        if item.get("db"):
+            extra.append("数据库 " + "、".join(item["db"]))
+        if item.get("active"):
+            extra.append("Codex 正在写入，退出后自动补修")
+        lines.append("  %s  %s" % (item["id"], "；".join(extra) if extra else "无改动"))
+    if report.get("backup_dir"):
+        lines.append("备份：%s" % report["backup_dir"])
+    return "\n".join(lines)
 
 
 def describe(report: Dict) -> str:

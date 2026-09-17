@@ -17,6 +17,14 @@ const api = (path, body) => {
 let STATE = { providers: [], presets: [], current: {} };
 let SELECTED = null;
 let QUERY = '';
+// 两个视图：平台详情（providers）与能力查看（caps）。
+// 「能力查看」单独一页 —— 能力信息挤在平台卡片里会变成一坨看不清。
+let VIEW = 'providers';
+// 能力查看页只看「选中的这一个模型」：几十行全摊开等于没有信息，
+// 用户要的是「我用的这个模型到底能干啥」，不是一张全量对照表。
+// CAPS_FOCUS = { provider, model }；CAPS_ALL 是用户主动要展开全部时才打开。
+let CAPS_FOCUS = null;
+let CAPS_ALL = false;
 const BALANCE_TRIED = new Set();
 
 const $ = (id) => document.getElementById(id);
@@ -49,12 +57,81 @@ function el(tag, className, text) {
   return node;
 }
 
+function setView(view, focus) {
+  VIEW = view === 'caps' ? 'caps' : 'providers';
+  if (focus) {
+    CAPS_FOCUS = focus;
+    // 指定了具体模型就回到「只看一个」的模式，别自作主张摊开全部
+    CAPS_ALL = false;
+  }
+  $('providers-main').hidden = VIEW !== 'providers';
+  $('caps-main').hidden = VIEW !== 'caps';
+  const button = $('btn-caps-page');
+  if (button) {
+    button.classList.toggle('primary', VIEW === 'caps');
+    button.classList.toggle('ghost', VIEW !== 'caps');
+  }
+  if (VIEW === 'caps') { syncCapsFocus(); renderCapsPage(); }
+}
+
+// 保证 CAPS_FOCUS 指向一个真实存在的模型：模型被删了/换平台了就自动兜底，
+// 否则用户会看到一张空表，还以为这个模型什么能力都没有。
+function syncCapsFocus() {
+  const providers = STATE.providers || [];
+  if (!providers.length) { CAPS_FOCUS = null; return; }
+  const held = CAPS_FOCUS && providers.find((p) => p.id === CAPS_FOCUS.provider);
+  if (held && (held.models || []).indexOf(CAPS_FOCUS.model) >= 0) return;
+  const current = providers.find((p) => p.is_current) || providers[0];
+  const model = (current.is_current ? (STATE.current || {}).model : null)
+    || current.default_model || (current.models || [])[0] || null;
+  CAPS_FOCUS = model ? { provider: current.id, model: model } : null;
+}
+
+// 能力查看页顶部那一行：切模型 + 要不要展开全部
+function capsFocusBar(providers) {
+  const bar = el('div', 'caps-focus');
+  bar.appendChild(el('span', 'caps-focus-label', t('caps.focus_label')));
+  const select = el('select', 'caps-focus-select');
+  for (const provider of providers) {
+    const models = provider.models || [];
+    if (!models.length) continue;
+    const group = el('optgroup');
+    group.label = provider.label || provider.id;
+    for (const model of models) {
+      const option = el('option', null, model);
+      option.value = provider.id + '\u0001' + model;
+      if (CAPS_FOCUS && CAPS_FOCUS.provider === provider.id && CAPS_FOCUS.model === model) {
+        option.selected = true;
+      }
+      group.appendChild(option);
+    }
+    select.appendChild(group);
+  }
+  select.onchange = () => {
+    const parts = select.value.split('\u0001');
+    CAPS_FOCUS = { provider: parts[0], model: parts[1] };
+    CAPS_ALL = false;
+    renderCapsPage();
+  };
+  bar.appendChild(select);
+  const toggle = el('button', 'btn ghost small',
+    CAPS_ALL ? t('caps.only_one') : t('caps.show_all'));
+  toggle.onclick = () => { CAPS_ALL = !CAPS_ALL; renderCapsPage(); };
+  bar.appendChild(toggle);
+  if (CAPS_ALL) bar.appendChild(el('span', 'caps-focus-note', t('caps.show_all_note')));
+  else bar.appendChild(el('span', 'caps-focus-note', t('caps.only_one_note')));
+  return bar;
+}
+
 async function loadState(withBalance = false) {
   STATE = await api('state' + (withBalance ? '?balance=1' : ''));
   renderHeader();
   renderThreadBanner();
   renderGuardBanner();
   renderProviders();
+  // 状态回来得比用户点「能力查看」慢时，那一页会渲染成「还没有接入平台」。
+  // 这里补一次，保证数据到了页面就跟着刷新。
+  if (VIEW === 'caps') renderCapsPage();
   if (SELECTED) {
     const still = STATE.providers.find((p) => p.id === SELECTED);
     if (still) renderDetail(still);
@@ -102,6 +179,35 @@ function renderGuardBanner() {
     tokens: num(g.tokens), window: num(g.window),
     percent: Math.round(g.ratio * 100), advice: advice,
   }) + ' ' + note;
+  // 别只把问题丢回给用户：后端已经算好「这个会话还装得下谁」，
+  // 这里给一个一键切换的出口，点了之后 switch_to 会连任务一起搬。
+  const actions = $('guard-banner-actions');
+  if (!actions) return;
+  actions.innerHTML = '';
+  const current = STATE.current || {};
+  const best = (g.alternatives || []).find((item) =>
+    !(item.provider === current.model_provider && item.model === g.model));
+  if (best) {
+    const button = el('button', 'btn primary small', t('guard.fit_button', {
+      label: best.label, model: best.model, percent: Math.round(best.ratio * 100) }));
+    button.onclick = () => fitSwitch(best);
+    actions.appendChild(button);
+  }
+}
+
+async function fitSwitch(pick) {
+  try {
+    const result = await api('fit_switch', { provider: pick.provider, model: pick.model });
+    if (result.error) { toast(result.error, true); return; }
+    if (result.state) STATE = result.state;
+    SELECTED = pick.provider;
+    renderHeader(); renderProviders(); renderGuardBanner();
+    const item = STATE.providers.find((p) => p.id === pick.provider);
+    if (item) renderDetail(item);
+    toast(t('guard.fit_done', { label: pick.label, model: pick.model }));
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function repairThreads(dryRun) {
@@ -176,6 +282,39 @@ function renderProviders() {
     card.onclick = () => { SELECTED = provider.id; renderProviders(); renderDetail(provider); };
     list.appendChild(card);
   }
+  renderProviderDocs();
+}
+
+// 左栏下半块：当前平台的接入说明。文案刻意写成「任何能提供 API 的平台都能接」，
+// 不点名具体平台 —— 这个工具的定位是通用的，别让人以为只支持列表里这几家。
+function renderProviderDocs() {
+  const node = $('provider-docs');
+  if (!node) return;
+  const provider = (STATE.providers || []).find((p) => p.id === SELECTED);
+  if (!provider) { node.hidden = true; node.innerHTML = ''; return; }
+  const docs = provider.platform_docs || {};
+  node.hidden = false;
+  node.innerHTML = '';
+  node.appendChild(el('h2', 'panel-title docs-title', t('docs.title')));
+  // 三步接入：这些步骤对任何平台都一样，不挑厂商
+  const steps = el('ol', 'docs-steps');
+  for (const key of ['docs.step_add', 'docs.step_url', 'docs.step_key']) {
+    steps.appendChild(el('li', null, t(key)));
+  }
+  node.appendChild(steps);
+  const line = el('p', 'docs-hint', t('docs.generic', {
+    url: provider.upstream_base_url || provider.base_url || '—',
+    transport: transportLabel(provider.transport),
+  }));
+  node.appendChild(line);
+  // 官方文档链接：有就给，没有也不影响接入
+  if (docs.docs) {
+    const link = el('a', 'docs-link', t('docs.open'));
+    link.href = docs.docs;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    node.appendChild(link);
+  }
 }
 
 function renderDetail(provider) {
@@ -204,37 +343,10 @@ function renderDetail(provider) {
   detail.appendChild(head);
 
   const cards = el('div', 'cards');
-  const keyCard = el('div', 'card');
-  keyCard.appendChild(el('div', 'label', 'API Key'));
-  keyCard.appendChild(el('div', 'value small',
-    provider.has_key ? provider.key_hint : t('provider.unconfigured')));
-  keyCard.appendChild(el('div', 'note', t('provider.key_note')));
-  cards.appendChild(keyCard);
-
-  const modelCard = el('div', 'card');
-  modelCard.appendChild(el('div', 'label', t('card.models')));
-  modelCard.appendChild(el('div', 'value', String(provider.models.length)));
-  // 老记录没有同步时间，但模型是实打实在的，不要显示成“尚未同步”那样的异常状态
-  modelCard.appendChild(el('div', 'note', provider.models_synced_at
-    ? t('card.synced_at', { time: provider.models_synced_at.replace('T', ' ') })
-    : t('card.imported')));
-  cards.appendChild(modelCard);
-
-  if (provider.transport === 'native') {
-    const nativeCard = el('div', 'card ok');
-    nativeCard.appendChild(el('div', 'label', t('card.transport')));
-    nativeCard.appendChild(el('div', 'value small', t('card.native')));
-    nativeCard.appendChild(el('div', 'note', t('card.native_note')));
-    cards.appendChild(nativeCard);
-  } else {
-    const bridgeCard = el('div', 'card' + (provider.bridge_running ? ' ok' : ' warn'));
-    bridgeCard.appendChild(el('div', 'label', t('card.bridge')));
-    bridgeCard.appendChild(el('div', 'value small',
-      provider.bridge_running ? t('card.running') : t('card.not_running')));
-    bridgeCard.appendChild(el('div', 'note',
-      provider.bridge_running ? t('card.bridge_note_on') : t('card.bridge_note_off')));
-    cards.appendChild(bridgeCard);
-  }
+  // 密钥、模型数、连接方式原来各占一张卡，三张卡在讲同一件小事，
+  // 把有用的信息（额度 / 余额 / 上下文 / 思考强度）挤到下面去了。
+  // 现在合成一张「概览」，一行读完。
+  cards.appendChild(overviewCard(provider));
 
   if (provider.usage) {
     const usageCard = el('div', 'card');
@@ -292,7 +404,8 @@ function renderDetail(provider) {
   }
   cards.appendChild(contextCard(provider));
   cards.appendChild(effortCard(provider));
-  cards.appendChild(capabilityCard(provider));
+  // 「能力查看」不再单占一张卡：顶部栏有按钮，下面每个模型也都有「能力」入口，
+  // 这里再放一张卡只是重复一遍。
   detail.appendChild(cards);
 
   if (provider.notes) {
@@ -316,15 +429,77 @@ function renderDetail(provider) {
     const item = el('div', 'model' + (provider.is_current && provider.default_model === model ? ' current' : ''));
     const left = el('div');
     left.appendChild(el('span', 'id', model));
+    // 选模型时最该看到的就是「这个模型能装多少」：官方窗口 / Codex 实际可用 /
+    // 建议的自动压缩线。三层都摊开，别让人猜为什么 1M 的模型只用得上 996K。
+    const info = (provider.model_context || {})[model];
+    if (info && info.window) {
+      const line = el('span', 'tag ctx-tag', t('models.ctx_line', {
+        window: info.window_human,
+        effective: info.effective_human,
+        percent: info.effective_percent,
+        compact: info.compact_human,
+      }));
+      line.title = t('models.ctx_title', {
+        window: info.window, effective: info.effective,
+        percent: info.effective_percent, compact: info.compact,
+        ratio: info.compact_ratio,
+      });
+      left.appendChild(line);
+    }
     item.appendChild(left);
+    const actions = el('div', 'model-actions');
+    // 每个模型都能单独看能力：点进来就只看这一个，不会丢一堆别的模型进来
+    const capsButton = el('button', 'btn ghost small', t('caps.view_model'));
+    capsButton.onclick = () => setView('caps', { provider: provider.id, model: model });
     const button = el('button', 'btn ghost', t('models.switch'));
     button.onclick = () => switchTo(provider.id, model);
-    item.appendChild(button);
+    actions.append(capsButton, button);
+    item.appendChild(actions);
     grid.appendChild(item);
   }
   detail.appendChild(grid);
 
   detail.appendChild(el('div', 'notice', t('switch.notice')));
+}
+
+// 概览：密钥 / 模型数 / 连接方式，三项挤在一张卡里，一行读完
+function overviewItem(label, value, note) {
+  const item = el('div', 'overview-item');
+  item.appendChild(el('div', 'overview-label', label));
+  const main = el('div', 'overview-value', value);
+  if (note) main.title = note;
+  item.appendChild(main);
+  return item;
+}
+
+function overviewCard(provider) {
+  const card = el('div', 'card');
+  card.appendChild(el('div', 'label', t('card.overview')));
+  const row = el('div', 'overview-row');
+  row.appendChild(overviewItem(
+    'API Key',
+    provider.has_key ? provider.key_hint : t('provider.unconfigured'),
+    t('provider.key_note')));
+  // 老记录没有同步时间，但模型是实打实在的，不要显示成「尚未同步」那种异常状态
+  row.appendChild(overviewItem(
+    t('card.models'),
+    String(provider.models.length),
+    provider.models_synced_at
+      ? t('card.synced_at', { time: provider.models_synced_at.replace('T', ' ') })
+      : t('card.imported')));
+  if (provider.transport === 'native') {
+    row.appendChild(overviewItem(t('card.transport'), t('card.native'), t('card.native_note')));
+  } else {
+    const running = provider.bridge_running;
+    const item = overviewItem(
+      t('card.bridge'),
+      running ? t('card.running') : t('card.not_running'),
+      running ? t('card.bridge_note_on') : t('card.bridge_note_off'));
+    if (!running) item.classList.add('warn');
+    row.appendChild(item);
+  }
+  card.appendChild(row);
+  return card;
 }
 
 function contextCard(provider) {
@@ -449,55 +624,178 @@ function effortCard(provider) {
   return card;
 }
 
-function capChip(value) {
+function capChip(value, onClick) {
   const key = (value === 'yes' || value === 'no' || value === 'unknown') ? value : 'unknown';
-  return el('span', 'chip ' + key, t('caps.' + key));
-}
-
-function capabilityCard(provider) {
-  const card = el('div', 'card');
-  card.appendChild(el('div', 'label', t('card.caps')));
-  card.appendChild(el('div', 'note', t('caps.hint')));
-
-  const caps = provider.model_capabilities || {};
-  const table = el('div', 'caps-table');
-  const names = provider.models && provider.models.length ? provider.models : Object.keys(caps);
-  for (const name of names) {
-    const info = caps[name] || { vision: 'unknown', reasoning: 'unknown', tools: 'unknown' };
-    const row = el('div', 'caps-row');
-    row.appendChild(el('span', 'name', name));
-    row.appendChild(el('span', 'chip', t('caps.vision')));
-    row.appendChild(capChip(info.vision));
-    row.appendChild(el('span', 'chip', t('caps.reasoning')));
-    row.appendChild(capChip(info.reasoning));
-    row.appendChild(el('span', 'chip', t('caps.tools')));
-    row.appendChild(capChip(info.tools));
-    const source = info.source ? t('caps.source_' + info.source) : '';
-    if (source) row.appendChild(el('span', 'chip', source));
-    table.appendChild(row);
+  const node = el(onClick ? 'button' : 'span', 'chip ' + key + (onClick ? ' chip-btn' : ''), t('caps.' + key));
+  if (onClick) {
+    node.type = 'button';
+    node.title = t('caps.annotate_hint');
+    node.onclick = onClick;
   }
-  if (!names.length) table.appendChild(el('div', 'hint', t('models.empty')));
-  card.appendChild(table);
-
-  const row = el('div', 'context-row');
-  const probe = el('button', 'btn ghost small', t('caps.probe'));
-  probe.onclick = () => runProbe(provider, false);
-  const probeApply = el('button', 'btn ghost small', t('caps.probe_apply'));
-  probeApply.onclick = () => runProbe(provider, true);
-  row.append(probe, probeApply);
-  card.appendChild(row);
-  card.appendChild(el('div', 'note', t('caps.note_openai_only')));
-  card.appendChild(el('div', 'note', t('caps.note_generation')));
-  return card;
+  return node;
 }
 
-async function runProbe(provider, doApply) {
-  toast(t('caps.probing'));
+// 点一下换一个值：未测出 → 支持 → 不支持 → 未测出
+const CAP_CYCLE = { unknown: 'yes', yes: 'no', no: 'unknown' };
+
+async function annotateCapability(provider, model, key, current) {
+  const next = CAP_CYCLE[current] || 'yes';
   try {
-    const result = await api('probe_capabilities', { provider: provider.id, apply: doApply });
+    const result = await api('set_capability', {
+      provider: provider.id, model: model, key: key, value: next });
+    if (result.error) { toast(result.error, true); return; }
+    if (result.state) STATE = result.state;
+    renderCapsPage();
+    const fresh = STATE.providers.find((p) => p.id === provider.id) || provider;
+    if (SELECTED === provider.id) renderDetail(fresh);
+    toast(t('caps.annotated', {
+      model: model, cap: t('caps.' + key), value: t('caps.' + next) }));
+  } catch (error) { toast(error.message, true); }
+}
+
+const CAP_COLUMNS = ['vision', 'reasoning', 'tools'];
+
+function capsRow(provider, model, info) {
+  const row = el('div', 'caps-table-row');
+  row.appendChild(el('span', 'caps-model', model));
+  for (const key of CAP_COLUMNS) {
+    const cell = el('span', 'caps-cell');
+    cell.appendChild(capChip(info[key], () => annotateCapability(provider, model, key, info[key])));
+    row.appendChild(cell);
+  }
+  const ctx = (provider.model_context || {})[model] || {};
+  const windowCell = el('span', 'caps-cell caps-num',
+    ctx.window ? ctx.window_human : '—');
+  if (ctx.window) windowCell.title = t('caps.window_title', { window: ctx.window });
+  row.appendChild(windowCell);
+  const effectiveCell = el('span', 'caps-cell caps-num',
+    ctx.effective ? ctx.effective_human : '—');
+  if (ctx.effective) {
+    effectiveCell.title = t('caps.effective_title', {
+      window: ctx.window, percent: ctx.effective_percent, effective: ctx.effective });
+  }
+  row.appendChild(effectiveCell);
+  const compactCell = el('span', 'caps-cell caps-num',
+    ctx.compact ? ctx.compact_human : '—');
+  if (ctx.compact) {
+    compactCell.title = t('caps.compact_title', {
+      effective: ctx.effective, ratio: ctx.compact_ratio, compact: ctx.compact });
+  }
+  row.appendChild(compactCell);
+  const source = info.source ? t('caps.source_' + info.source) : '';
+  const sourceCell = el('span', 'caps-cell');
+  if (source) sourceCell.appendChild(el('span', 'chip', source));
+  // 官方文档怎么说，鼠标悬停就能看到原文，不用去翻文档
+  if (info.documented) {
+    const docChip = el('span', 'chip', t('caps.source_documented'));
+    const parts = Object.keys(info.documented).map((key) => {
+      const value = info.documented[key];
+      if (key === 'context') return t('caps.col_window') + ' ' + shortTokens(value);
+      return t('caps.' + key) + '：' + t('caps.' + (value === 'yes' ? 'yes' : 'no'));
+    });
+    docChip.title = parts.join(' · ') + (info.note ? ' — ' + info.note : '');
+    sourceCell.appendChild(docChip);
+  }
+  if (info.conflict && info.conflict.length) {
+    const clash = el('span', 'chip unknown', t('caps.conflict'));
+    clash.title = t('caps.conflict_title', { keys: info.conflict.map((k) => t('caps.' + k)).join('、') });
+    sourceCell.appendChild(clash);
+  }
+  row.appendChild(sourceCell);
+  const action = el('span', 'caps-cell');
+  const one = el('button', 'btn ghost small', t('caps.probe_this'));
+  one.onclick = () => runProbe(provider, true, model);
+  action.appendChild(one);
+  row.appendChild(action);
+  return row;
+}
+
+function renderCapsPage() {
+  const body = $('caps-page-body');
+  if (!body) return;
+  // 这里兜底一次，保证任何刷新路径下焦点都落在一个真实存在的模型上
+  syncCapsFocus();
+  body.innerHTML = '';
+  const providers = STATE.providers || [];
+  if (!providers.length) {
+    body.appendChild(el('div', 'hint', t('caps.empty')));
+    return;
+  }
+  body.appendChild(capsFocusBar(providers));
+  // 默认只渲染选中的那一个平台，展开全部时才是全量对照表
+  const shown = CAPS_ALL || !CAPS_FOCUS
+    ? providers
+    : providers.filter((p) => p.id === CAPS_FOCUS.provider);
+  if (!shown.length) {
+    body.appendChild(el('div', 'hint', t('caps.focus_gone')));
+    return;
+  }
+  for (const provider of shown) {
+    const section = el('section', 'caps-section' + (provider.is_current ? ' current' : ''));
+    const head = el('div', 'caps-section-head');
+    const title = el('div', 'caps-section-title');
+    title.appendChild(el('h3', null, provider.label || provider.id));
+    if (provider.is_current) title.appendChild(el('span', 'chip yes', t('caps.current')));
+    head.appendChild(title);
+    const meta = el('div', 'caps-section-meta');
+    const docs = provider.platform_docs || {};
+    if (docs.hint) meta.appendChild(el('span', 'note', docs.hint));
+    if (docs.docs) {
+      const link = el('a', 'note', t('caps.docs_link'));
+      link.href = docs.docs;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      meta.appendChild(link);
+    }
+    head.appendChild(meta);
+    section.appendChild(head);
+
+    const table = el('div', 'caps-table caps-table-full');
+    const header = el('div', 'caps-table-row caps-table-head');
+    header.appendChild(el('span', 'caps-model', t('caps.col_model')));
+    for (const key of CAP_COLUMNS) header.appendChild(el('span', 'caps-cell', t('caps.' + key)));
+    header.appendChild(el('span', 'caps-cell caps-num', t('caps.col_window')));
+    header.appendChild(el('span', 'caps-cell caps-num', t('caps.col_effective')));
+    header.appendChild(el('span', 'caps-cell caps-num', t('caps.col_compact')));
+    header.appendChild(el('span', 'caps-cell', t('caps.col_source')));
+    header.appendChild(el('span', 'caps-cell', ''));
+    table.appendChild(header);
+
+    const caps = provider.model_capabilities || {};
+    const all = provider.models || [];
+    // 只看一个模型时，表格里就只有那一行 —— 这才是用户要看的东西
+    const models = (CAPS_ALL || !CAPS_FOCUS)
+      ? all
+      : all.filter((m) => m === CAPS_FOCUS.model);
+    for (const model of models) {
+      const info = caps[model] || { vision: 'unknown', reasoning: 'unknown', tools: 'unknown' };
+      table.appendChild(capsRow(provider, model, info));
+    }
+    if (!all.length) table.appendChild(el('div', 'hint', t('models.empty')));
+    else if (!models.length) table.appendChild(el('div', 'hint', t('caps.focus_gone')));
+    section.appendChild(table);
+
+    const hint = el('div', 'caps-section-note');
+    if (provider.notes) hint.appendChild(el('div', 'note', provider.notes));
+    hint.appendChild(el('div', 'note', t('caps.probe_cost')));
+    hint.appendChild(el('div', 'note', t('caps.note_openai_only')));
+    hint.appendChild(el('div', 'note', t('caps.note_generation')));
+    section.appendChild(hint);
+    body.appendChild(section);
+  }
+}
+
+async function runProbe(provider, doApply, model) {
+  toast(model ? t('caps.probing_one', { model: model }) : t('caps.probing'));
+  try {
+    const payload = { provider: provider.id, apply: doApply };
+    if (model) payload.model = model;
+    const result = await api('probe_capabilities', payload);
     if (result.error) { toast(t('caps.probe_failed', { error: result.error }), true); return; }
     if (result.state) STATE = result.state;
-    renderDetail(STATE.providers.find((p) => p.id === provider.id) || provider);
+    if (VIEW === 'caps') renderCapsPage();
+    const fresh = STATE.providers.find((p) => p.id === provider.id) || provider;
+    if (SELECTED === provider.id) renderDetail(fresh);
     toast(t('caps.probe_done'));
   } catch (error) { toast(t('caps.probe_failed', { error: error.message }), true); }
 }
@@ -600,11 +898,23 @@ async function switchTo(provider, model) {
     const result = await api('switch', { provider, model });
     toast(t('toast.switched', {
       label: result.label || result.provider, model: result.model }));
+    // 旧任务跟着搬了没有，得让用户看见：不然切完继续任务还是报 unknown model
+    const followed = result.threads_followed;
+    if (followed && followed.moved) {
+      const pending = (followed.skipped_active || []).length;
+      setTimeout(() => toast(pending
+        ? t('toast.follow_pending', { n: pending })
+        : t('toast.followed', { n: followed.moved, label: result.label || result.provider }),
+      ), 900);
+    }
     STATE = result.state;
     SELECTED = provider;
+    // 刚切过去的模型就是用户关心的那个，能力查看跟着切过去
+    if (model) { CAPS_FOCUS = { provider: provider, model: model }; CAPS_ALL = false; }
     renderHeader(); renderProviders();
     const item = STATE.providers.find((p) => p.id === provider);
     if (item) renderDetail(item);
+    if (VIEW === 'caps') renderCapsPage();
   } catch (error) {
     toast(error.message, true);
   }
@@ -782,6 +1092,8 @@ function renderFooterHelp() {
 }
 
 $('btn-lang').onclick = toggleLang;
+$('btn-caps-page').onclick = () => setView(VIEW === 'caps' ? 'providers' : 'caps');
+$('btn-caps-back').onclick = () => setView('providers');
 
 window.addEventListener('langchange', () => {
   renderFooterHelp();
@@ -789,6 +1101,8 @@ window.addEventListener('langchange', () => {
   renderThreadBanner();
   renderGuardBanner();
   renderProviders();
+  $('btn-caps-page').textContent = t('topbar.caps_page');
+  if (VIEW === 'caps') renderCapsPage();
   if (SELECTED) {
     const item = STATE.providers.find((p) => p.id === SELECTED);
     if (item) renderDetail(item);
@@ -802,5 +1116,9 @@ window.addEventListener('langchange', () => {
 
 applyI18n();
 renderFooterHelp();
+
+// 支持 ?view=caps 直接打开能力查看页（演示 GIF 和书签都用得上）
+const initialView = new URLSearchParams(location.search).get('view');
+if (initialView === 'caps') setView('caps');
 
 loadState().catch((error) => toast(error.message, true));

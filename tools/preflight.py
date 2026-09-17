@@ -104,7 +104,7 @@ def check_stale_names() -> None:
 def check_doc_links() -> None:
     print("\n[4] 文档链接")
     missing = []
-    for doc in ["README.md", "README.en.md", "INSTALL-WITH-AI.md", "docs/ai-setup.md"]:
+    for doc in ["README.md", "README.zh-CN.md", "INSTALL-WITH-AI.md", "docs/ai-setup.md"]:
         path = ROOT / doc
         if not path.exists():
             missing.append("%s 不存在" % doc)
@@ -128,7 +128,7 @@ def check_app_name() -> None:
 
     # README 里出现的 .app 路径必须就是这个名字，否则用户按文档找不到文件
     wrong = []
-    for doc in ["README.md", "README.en.md", "docs/troubleshooting.md", "docs/app.md"]:
+    for doc in ["README.md", "README.zh-CN.md", "docs/troubleshooting.md", "docs/app.md"]:
         path = ROOT / doc
         if not path.exists():
             continue
@@ -247,7 +247,7 @@ def check_download_links() -> None:
     report("打包脚本会生成固定名副本", "-latest$SUFFIX" in text or "-latest" in text)
 
     missing = []
-    for doc in ["README.md", "README.en.md"]:
+    for doc in ["README.md", "README.zh-CN.md"]:
         content = (ROOT / doc).read_text(encoding="utf-8")
         for name in ["Codex-Model-Switcher-macOS-latest-full.zip",
                      "Codex-Model-Switcher-macOS-latest.zip"]:

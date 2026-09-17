@@ -22,6 +22,7 @@ from . import (PROJECT_URL, __version__, balance as balance_module, engine, path
                secrets, state as state_module, threads as threads_module, usage)
 from . import capabilities as capabilities_module
 from . import catalog as catalog_module
+from . import configfile as configfile_module
 from . import contextguard as contextguard_module
 from .capabilities import EFFORT_TEXT
 from .discovery import DiscoveryError
@@ -406,6 +407,33 @@ def cmd_tasks(args) -> int:
 
 
 def cmd_repair(args) -> int:
+    # --follow：把最近在用的任务搬到当前平台上。用于「直接在 config.toml 里
+    # 改了服务商」或者切换时 Codex 正在写文件、搬家被跳过的场合。
+    if getattr(args, "follow", False):
+        try:
+            current = configfile_module.read_top_level(
+                paths.config_path().read_text(), ["model_provider", "model"])
+        except OSError as exc:
+            fail("读不到 Codex 配置：%s" % exc)
+        target = current.get("model_provider")
+        model = current.get("model")
+        if not target:
+            fail("配置里没有 model_provider，先用 codex-switcher use 切一次。")
+        moved_total = 0
+        for provider_id in (state_module.load().get("providers") or {}):
+            if provider_id == target or provider_id == "openai":
+                continue
+            report = threads_module.follow_switch(
+                provider_id, target, model, dry_run=args.dry_run)
+            if report.get("items"):
+                out(threads_module.describe_follow(report))
+                moved_total += report.get("moved", 0)
+        if not moved_total and not args.dry_run:
+            out("没有需要搬的任务。")
+        elif not args.dry_run:
+            out("")
+            out("请完全退出并重新打开 Codex，让改动生效。")
+        return 0
     try:
         report = threads_module.repair(thread_id=args.thread, dry_run=args.dry_run,
                                        deep=getattr(args, "deep", False))
@@ -594,10 +622,20 @@ def cmd_use(args) -> int:
     out("")
     out("接下来：完全退出（⌘Q）并重新打开 Codex，然后新建任务。")
     if result["provider"] != engine.OFFICIAL_PROVIDER:
-        # 旧对话的历史里可能带着只有官方 OpenAI 认识的条目，回放到第三方平台会 400。
-        # 这里不主动扫（扫盘要十几秒），只把出路写清楚。
-        out("提示：旧对话如果报 “missing field `call_id`”，说明它的历史里有平台不认的条目，"
-            "跑 codex-switcher history --clean 就地修好。")
+        # 跨平台自动清洗：别家产生的服务端工具条目（web_search_call 等）
+        # 回放到新平台必然 400，切换时已经自动剥掉（先备份）。这里报告结果。
+        cleaned = result.get("history_clean") or {}
+        removed = (cleaned.get("removed") or {}).get("cross_provider", 0) \
+            + (cleaned.get("removed") or {}).get("orphan_outputs", 0)
+        if cleaned.get("cleaned"):
+            out("旧会话体检：已自动清洗 %d 份会话，剥掉 %d 条跨平台不认的条目（有备份）。"
+                % (cleaned["cleaned"], removed))
+            if cleaned.get("budget_exhausted"):
+                out("           会话太多，这次只清了最近的一部分，下次切换会接着清。")
+        elif cleaned.get("skipped_active"):
+            out("旧会话体检：有 %d 份会话正在使用中，这次没动；"
+                "下次切换（或 codex-switcher history --clean）会再处理。"
+                % cleaned["skipped_active"])
     state = state_module.load()
     record = state_module.get_provider(state, args.provider)
     if record and engine.resolve_transport(record) == "bridge":
@@ -1158,6 +1196,8 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--dry-run", action="store_true", help="只预演，不写入")
     repair.add_argument("--deep", action="store_true",
                         help="顺带清理会话文件里残留的旧服务商（较慢，约 30 秒）")
+    repair.add_argument("--follow", action="store_true",
+                        help="把最近在用的任务搬到当前平台上（换平台后继续任务报 unknown model 时用）")
 
     history = sub.add_parser(
         "history", help="检查/清理会话历史里会让第三方平台拒绝请求的条目")
