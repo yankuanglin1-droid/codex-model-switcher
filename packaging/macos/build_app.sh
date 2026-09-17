@@ -172,6 +172,12 @@ if [ "$BUNDLE_PYTHON" = "1" ]; then
     fi
   done
   if [ -n "$BUNDLED_ARCHS" ]; then
+    # 先把字节码缓存清干净，再签名 —— 顺序不能反。
+    # 内置 Python 的标准库里带 __pycache__；如果在签完名之后才删，包体内容变了，
+    # 外层签名立刻失效（下载回来会被 macOS 判成「已损坏」）。
+    # package_release.sh 也会清一次缓存，这里清掉之后它就没东西可删，签名保持有效。
+    find "$RUNTIME_DIR" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$RUNTIME_DIR" -name "*.pyc" -delete 2>/dev/null || true
     # 内嵌的可执行文件必须是合法签名才能在 Apple 芯片上运行；
     # 随包复制后签名会失效，所以要重新签一遍。
     while IFS= read -r bin; do
