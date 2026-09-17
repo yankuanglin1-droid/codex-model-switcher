@@ -150,14 +150,20 @@ def load(provider_id: str) -> Optional[str]:
 
 def _load_uncached(provider_id: str) -> Optional[str]:
     if _macos_available():
+        service = SERVICE_PREFIX + provider_id
         result = _run([
             "/usr/bin/security", "find-generic-password",
             "-a", _account(),
-            "-s", SERVICE_PREFIX + provider_id,
+            "-s", service,
             "-w",
         ])
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
+        # 用户名对不上就找不到了：改过账户名、或用 sudo 跑过一次，
+        # 条目还在但 acct 不是当前用户。按服务名再找一次，别直接判失败。
+        fallback = _run(["/usr/bin/security", "find-generic-password", "-s", service, "-w"])
+        if fallback.returncode == 0 and fallback.stdout.strip():
+            return fallback.stdout.strip()
     if _linux_available():
         result = _run([
             "secret-tool", "lookup",

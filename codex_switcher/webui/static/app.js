@@ -290,6 +290,9 @@ function renderDetail(provider) {
     BALANCE_TRIED.add(provider.id);
     setTimeout(() => queryBalance(provider, null), 80);
   }
+  cards.appendChild(contextCard(provider));
+  cards.appendChild(effortCard(provider));
+  cards.appendChild(capabilityCard(provider));
   detail.appendChild(cards);
 
   if (provider.notes) {
@@ -322,6 +325,181 @@ function renderDetail(provider) {
   detail.appendChild(grid);
 
   detail.appendChild(el('div', 'notice', t('switch.notice')));
+}
+
+function contextCard(provider) {
+  const card = el('div', 'card');
+  card.appendChild(el('div', 'label', t('card.context')));
+  card.appendChild(el('div', 'note', t('context.hint')));
+
+  const row = el('div', 'context-row');
+  const select = el('select');
+  const windows = provider.model_windows || {};
+  const names = provider.models && provider.models.length ? provider.models : Object.keys(windows);
+  for (const name of names) {
+    const option = el('option', null, name);
+    option.value = name;
+    if (name === provider.default_model) option.selected = true;
+    select.appendChild(option);
+  }
+  const input = el('input');
+  input.type = 'number';
+  input.min = '4096';
+  input.max = '10000000';
+  input.step = '1024';
+  const sync = () => { input.value = windows[select.value] || ''; };
+  select.onchange = sync;
+  sync();
+
+  const save = el('button', 'btn ghost small', t('context.set'));
+  save.onclick = async () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 4096 || value > 10000000) {
+      toast(t('context.invalid'), true);
+      return;
+    }
+    try {
+      const result = await api('set_context', {
+        provider: provider.id, model: select.value, window: value });
+      if (result.error) { toast(result.error, true); return; }
+      if (result.state) STATE = result.state;
+      renderDetail(STATE.providers.find((p) => p.id === provider.id) || provider);
+      toast(t('context.saved', { model: select.value, tokens: String(value) }));
+    } catch (error) { toast(error.message, true); }
+  };
+
+  const reset = el('button', 'btn ghost small', t('context.reset'));
+  reset.onclick = async () => {
+    try {
+      const result = await api('set_context', {
+        provider: provider.id, model: select.value, window: 0 });
+      if (result.error) { toast(result.error, true); return; }
+      if (result.state) STATE = result.state;
+      renderDetail(STATE.providers.find((p) => p.id === provider.id) || provider);
+      toast(t('context.reset_done'));
+    } catch (error) { toast(error.message, true); }
+  };
+
+  row.append(select, input, save, reset);
+  card.appendChild(row);
+  return card;
+}
+
+const EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh'];
+
+function effortCard(provider) {
+  const card = el('div', 'card');
+  card.appendChild(el('div', 'label', t('card.effort')));
+  card.appendChild(el('div', 'note', t('effort.hint')));
+
+  const row = el('div', 'context-row');
+  const select = el('select');
+  const efforts = provider.model_efforts || {};
+  const names = provider.models && provider.models.length ? provider.models : Object.keys(efforts);
+  for (const name of names) {
+    const option = el('option', null, name);
+    option.value = name;
+    if (name === provider.default_model) option.selected = true;
+    select.appendChild(option);
+  }
+
+  const levelSelect = el('select');
+  const sync = () => {
+    const info = efforts[select.value] || {};
+    const allowed = (info.levels && info.levels.length) ? info.levels : EFFORT_LEVELS;
+    levelSelect.innerHTML = '';
+    for (const level of allowed) {
+      const option = el('option', null, t('effort.' + level));
+      option.value = level;
+      levelSelect.appendChild(option);
+    }
+    const current = info.current && allowed.includes(info.current)
+      ? info.current : (allowed.includes('high') ? 'high' : allowed[0]);
+    levelSelect.value = current;
+  };
+  select.onchange = sync;
+  sync();
+
+  const apply = el('button', 'btn ghost small', t('effort.set'));
+  apply.onclick = async () => {
+    try {
+      const result = await api('set_effort', {
+        provider: provider.id, model: select.value, effort: levelSelect.value });
+      if (result.error) { toast(result.error, true); return; }
+      if (result.state) STATE = result.state;
+      renderDetail(STATE.providers.find((p) => p.id === provider.id) || provider);
+      toast(t('effort.saved', { model: select.value, level: t('effort.' + levelSelect.value) }));
+    } catch (error) { toast(error.message, true); }
+  };
+
+  const reset = el('button', 'btn ghost small', t('effort.reset'));
+  reset.onclick = async () => {
+    try {
+      const result = await api('set_effort', {
+        provider: provider.id, model: select.value, effort: '' });
+      if (result.error) { toast(result.error, true); return; }
+      if (result.state) STATE = result.state;
+      renderDetail(STATE.providers.find((p) => p.id === provider.id) || provider);
+      toast(t('effort.reset_done'));
+    } catch (error) { toast(error.message, true); }
+  };
+
+  row.append(select, levelSelect, apply, reset);
+  card.appendChild(row);
+  return card;
+}
+
+function capChip(value) {
+  const key = (value === 'yes' || value === 'no' || value === 'unknown') ? value : 'unknown';
+  return el('span', 'chip ' + key, t('caps.' + key));
+}
+
+function capabilityCard(provider) {
+  const card = el('div', 'card');
+  card.appendChild(el('div', 'label', t('card.caps')));
+  card.appendChild(el('div', 'note', t('caps.hint')));
+
+  const caps = provider.model_capabilities || {};
+  const table = el('div', 'caps-table');
+  const names = provider.models && provider.models.length ? provider.models : Object.keys(caps);
+  for (const name of names) {
+    const info = caps[name] || { vision: 'unknown', reasoning: 'unknown', tools: 'unknown' };
+    const row = el('div', 'caps-row');
+    row.appendChild(el('span', 'name', name));
+    row.appendChild(el('span', 'chip', t('caps.vision')));
+    row.appendChild(capChip(info.vision));
+    row.appendChild(el('span', 'chip', t('caps.reasoning')));
+    row.appendChild(capChip(info.reasoning));
+    row.appendChild(el('span', 'chip', t('caps.tools')));
+    row.appendChild(capChip(info.tools));
+    const source = info.source ? t('caps.source_' + info.source) : '';
+    if (source) row.appendChild(el('span', 'chip', source));
+    table.appendChild(row);
+  }
+  if (!names.length) table.appendChild(el('div', 'hint', t('models.empty')));
+  card.appendChild(table);
+
+  const row = el('div', 'context-row');
+  const probe = el('button', 'btn ghost small', t('caps.probe'));
+  probe.onclick = () => runProbe(provider, false);
+  const probeApply = el('button', 'btn ghost small', t('caps.probe_apply'));
+  probeApply.onclick = () => runProbe(provider, true);
+  row.append(probe, probeApply);
+  card.appendChild(row);
+  card.appendChild(el('div', 'note', t('caps.note_openai_only')));
+  card.appendChild(el('div', 'note', t('caps.note_generation')));
+  return card;
+}
+
+async function runProbe(provider, doApply) {
+  toast(t('caps.probing'));
+  try {
+    const result = await api('probe_capabilities', { provider: provider.id, apply: doApply });
+    if (result.error) { toast(t('caps.probe_failed', { error: result.error }), true); return; }
+    if (result.state) STATE = result.state;
+    renderDetail(STATE.providers.find((p) => p.id === provider.id) || provider);
+    toast(t('caps.probe_done'));
+  } catch (error) { toast(t('caps.probe_failed', { error: error.message }), true); }
 }
 
 function balanceCard(balance) {

@@ -42,10 +42,18 @@ ACTIVE_GUARD_SECONDS = 120
 
 # 第三方平台不认识、且删掉不影响语义的条目
 OPENAI_ONLY_IF_MOVING = {"reasoning"}
-# 只报告、不自动处理的 OpenAI 专有类型
-REPORT_ONLY_TYPES = {"custom_tool_call", "custom_tool_call_output", "web_search_call",
-                     "computer_call", "computer_call_output", "file_search_call",
-                     "code_interpreter_call", "image_generation_call"}
+# OpenAI 服务端工具留下的条目。它们由 OpenAI 那边执行（网页搜索、看图生图、
+# 用电脑、代码解释器……），第三方平台既没有这些工具，也不认识这些条目类型，
+# 整个请求会被直接拒掉。
+#
+# 迁移到别的平台时**必须成对剥离**：call 和 output 一起删。
+# 只删一半会在历史里留下悬空引用，比留着还糟（实测过）。
+#
+# 默认情况下我们只报告不删 —— 它们承载真实工具调用，留在官方平台上是有意义的。
+# 只有明确「要搬到别的平台」时才删（--cross-provider）。
+CROSS_PROVIDER_TYPES = {"custom_tool_call", "custom_tool_call_output", "web_search_call",
+                        "computer_call", "computer_call_output", "file_search_call",
+                        "code_interpreter_call", "image_generation_call"}
 
 
 def _payload_of(line: str) -> Optional[Dict]:
@@ -65,7 +73,7 @@ def _payload_of(line: str) -> Optional[Dict]:
 def inspect(path: Path) -> Dict:
     """看一个 rollout 文件里有没有问题条目。只读，不改。"""
     result = {"path": str(path), "orphan_outputs": 0, "openai_only": 0,
-              "report_only": {}, "lines": 0, "error": None}
+              "cross_provider": 0, "report_only": {}, "lines": 0, "error": None}
     if not path.exists():
         result["error"] = "文件不存在"
         return result
@@ -87,23 +95,37 @@ def inspect(path: Path) -> Dict:
             result["orphan_outputs"] += 1
         elif kind in OPENAI_ONLY_IF_MOVING and payload.get("encrypted_content"):
             result["openai_only"] += 1
-        elif kind in REPORT_ONLY_TYPES:
+        elif kind in CROSS_PROVIDER_TYPES:
+            result["cross_provider"] += 1
             result["report_only"][kind] = result["report_only"].get(kind, 0) + 1
     return result
 
 
-def is_dirty(info: Dict) -> bool:
-    return bool(info.get("orphan_outputs") or info.get("openai_only"))
+def is_dirty(info: Dict, cross_provider: bool = False) -> bool:
+    """有没有需要清理的东西。
+
+    cross_provider=False 时只看「确定是坏的」两类；
+    要搬去别的平台时，OpenAI 专有条目也得算进去。
+    """
+    dirty = bool(info.get("orphan_outputs") or info.get("openai_only"))
+    if cross_provider:
+        dirty = dirty or bool(info.get("cross_provider"))
+    return dirty
 
 
 def _backup_root() -> Path:
     return paths.state_dir() / BACKUP_DIRNAME
 
 
-def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path) -> Tuple[bool, Dict]:
-    """删掉指定文件里的问题条目。返回 (是否改动, 统计)。"""
-    stats = {"removed_orphan_outputs": 0, "removed_openai_only": 0, "kept": 0,
-             "backup": None}
+def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
+             cross_provider: bool = False) -> Tuple[bool, Dict]:
+    """删掉指定文件里的问题条目。返回 (是否改动, 统计)。
+
+    cross_provider=True 时额外剥离 OpenAI 服务端工具的成对条目，
+    这样这个会话才能搬到第三方平台上继续。
+    """
+    stats = {"removed_orphan_outputs": 0, "removed_openai_only": 0,
+             "removed_cross_provider": 0, "kept": 0, "backup": None}
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -112,8 +134,9 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path) -> Tuple[boo
     lines = text.split("\n")
     kept: List[str] = []
     for line in lines:
-        payload = _payload_of(line) if ('function_call_output' in line
-                                        or 'encrypted_content' in line) else None
+        payload = _payload_of(line) if cross_provider else (
+            _payload_of(line) if ('function_call_output' in line
+                                  or 'encrypted_content' in line) else None)
         if payload is not None:
             kind = payload.get("type")
             if kind == "function_call_output" and not payload.get("call_id"):
@@ -123,11 +146,16 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path) -> Tuple[boo
                     and payload.get("encrypted_content")):
                 stats["removed_openai_only"] += 1
                 continue
+            if cross_provider and kind in CROSS_PROVIDER_TYPES:
+                # call 与 output 都走这一支，所以是成对删，不会留悬空引用
+                stats["removed_cross_provider"] += 1
+                continue
         if line:
             kept.append(line)
     stats["kept"] = len(kept)
 
-    if not stats["removed_orphan_outputs"] and not stats["removed_openai_only"]:
+    if not (stats["removed_orphan_outputs"] or stats["removed_openai_only"]
+            or stats["removed_cross_provider"]):
         return False, stats
 
     # 备份：保留原文件，文件名带时间戳，放工具自己的状态目录里
@@ -165,30 +193,37 @@ def recent_rollouts(limit: int = 30) -> List[Path]:
     return files[:limit] if limit > 0 else files
 
 
-def scan(limit: int = 30) -> Dict:
+def scan(limit: int = 30, cross_provider: bool = False) -> Dict:
     """扫最近的会话，汇总问题条目。"""
-    report = {"scanned": 0, "dirty": [], "totals": {"orphan_outputs": 0, "openai_only": 0}}
+    report = {"scanned": 0, "dirty": [],
+              "totals": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0}}
     for path in recent_rollouts(limit):
         report["scanned"] += 1
         info = inspect(path)
-        if is_dirty(info):
+        if is_dirty(info, cross_provider=cross_provider):
             report["dirty"].append(info)
             report["totals"]["orphan_outputs"] += info["orphan_outputs"]
             report["totals"]["openai_only"] += info["openai_only"]
+            report["totals"]["cross_provider"] += info["cross_provider"]
     return report
 
 
 def clean(paths_to_clean: List[Path], moving_off_openai: bool,
-          dry_run: bool = False) -> Dict:
-    """清洗给定的会话文件。dry_run 只报告不改。"""
+          dry_run: bool = False, cross_provider: bool = False) -> Dict:
+    """清洗给定的会话文件。dry_run 只报告不改。
+
+    cross_provider=True 用于「要搬到第三方平台继续」：额外剥离 OpenAI
+    服务端工具的成对条目。默认不开，因为那些条目在官方平台上是有效的。
+    """
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = _backup_root() / stamp
     report = {"changed": 0, "dry_run": dry_run, "moved_off_openai": moving_off_openai,
+              "cross_provider": cross_provider,
               "items": [], "backup_dir": None, "skipped_active": [],
-              "removed": {"orphan_outputs": 0, "openai_only": 0}}
+              "removed": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0}}
     for path in paths_to_clean:
         info = inspect(path)
-        if not is_dirty(info):
+        if not is_dirty(info, cross_provider=cross_provider):
             continue
         try:
             if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
@@ -199,16 +234,20 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
         if dry_run:
             report["items"].append({"path": str(path), "would_remove": {
                 "orphan_outputs": info["orphan_outputs"],
-                "openai_only": info["openai_only"] if moving_off_openai else 0}})
+                "openai_only": info["openai_only"] if moving_off_openai else 0,
+                "cross_provider": info["cross_provider"] if cross_provider else 0}})
             report["changed"] += 1
             continue
-        changed, stats = sanitize(path, moving_off_openai, backup_dir)
+        changed, stats = sanitize(path, moving_off_openai, backup_dir,
+                                  cross_provider=cross_provider)
         if changed:
             report["changed"] += 1
             report["backup_dir"] = str(backup_dir)
             report["removed"]["orphan_outputs"] += stats["removed_orphan_outputs"]
             report["removed"]["openai_only"] += stats["removed_openai_only"]
+            report["removed"]["cross_provider"] += stats["removed_cross_provider"]
             report["items"].append({"path": str(path), "removed": {
                 "orphan_outputs": stats["removed_orphan_outputs"],
-                "openai_only": stats["removed_openai_only"]}})
+                "openai_only": stats["removed_openai_only"],
+                "cross_provider": stats["removed_cross_provider"]}})
     return report

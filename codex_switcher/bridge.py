@@ -27,6 +27,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import state as state_module
 from . import threads as threads_module
+from . import capabilities as capabilities_module
 
 DEFAULT_PORT = 8787
 
@@ -54,7 +55,7 @@ def _content_to_chat(content) -> object:
     return parts
 
 
-def responses_to_chat(body: Dict) -> Dict:
+def responses_to_chat(body: Dict, provider_id: str = "") -> Dict:
     """把 Responses 请求体翻译成 Chat Completions 请求体。"""
     messages: List[Dict] = []
     instructions = body.get("instructions")
@@ -135,6 +136,20 @@ def responses_to_chat(body: Dict) -> Dict:
                 payload["tool_choice"] = body["tool_choice"]
     if body.get("parallel_tool_calls") is not None:
         payload["parallel_tool_calls"] = body["parallel_tool_calls"]
+
+    # 思考强度必须翻译，否则用户在界面上选了「深度思考」，
+    # 请求到平台那边一个字都没带 —— 等于选了没用。
+    # 各家字段名不同（OpenAI 系叫 reasoning_effort，智谱要 thinking），
+    # 由 capabilities.thinking_payload 按平台挑写法。
+    effort = None
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort") or reasoning.get("reasoning_effort")
+    if not effort:
+        effort = body.get("reasoning_effort")
+    if effort:
+        payload.update(capabilities_module.thinking_payload(provider_id, str(effort).lower()))
+
     if payload["stream"]:
         payload["stream_options"] = {"include_usage": True}
     return payload
@@ -447,7 +462,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         authorization = self.headers.get("Authorization") or ""
         target = _target_url(record, (record.get("upstream_base_url") or record.get("base_url")).rstrip("/"))
         native = record.get("transport", "bridge") == "native"
-        payload = body if native else responses_to_chat(body)
+        payload = body if native else responses_to_chat(body, provider_id)
         streaming = bool(payload.get("stream"))
         if not native:
             payload["stream"] = streaming

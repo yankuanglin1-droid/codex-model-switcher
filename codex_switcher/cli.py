@@ -20,8 +20,10 @@ from typing import Dict, List, Optional
 
 from . import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
                secrets, state as state_module, threads as threads_module, usage)
+from . import capabilities as capabilities_module
 from . import catalog as catalog_module
 from . import contextguard as contextguard_module
+from .capabilities import EFFORT_TEXT
 from .discovery import DiscoveryError
 
 
@@ -146,6 +148,151 @@ def cmd_add_model(args) -> int:
     state_module.save(state)
     catalog_module.write_catalog(record["id"], record, list(models.keys()))
     out("已为 %s 添加 %d 个模型，共 %d 个。" % (record["label"], len(args.models), len(models)))
+    return 0
+
+
+def cmd_context(args) -> int:
+    """查看或手改某个模型的上下文窗口。"""
+    state = state_module.load()
+    record = state_module.get_provider(state, args.provider)
+    if not record:
+        fail("没有找到平台：%s" % args.provider)
+    models = record.get("models") or {}
+    if args.model not in models:
+        fail("该平台没有名为 %s 的模型。可用：%s" % (args.model, "、".join(list(models)[:8]) or "（无）"))
+
+    if args.window is None and not args.clear:
+        info = contextguard_module.model_window(
+            catalog_module.catalog_path(record["id"]), args.model)
+        if not info:
+            out("%s · %s：窗口未知（目录里没有这个模型的条目）" % (record["label"], args.model))
+            return 0
+        out("%s · %s" % (record["label"], args.model))
+        out("  声明窗口：%s tokens" % format(int(info["context_window"]), ","))
+        out("  有效窗口：%s tokens（Codex 实际按 %d%% 算）"
+            % (format(int(info["effective"]), ","), int(info["percent"])))
+        out("  压缩触发点：%s tokens"
+            % format(contextguard_module.auto_compact_limit(info["effective"]), ","))
+        return 0
+
+    try:
+        result = engine.set_context_window(args.provider, args.model,
+                                           None if args.clear else args.window)
+    except engine.SwitchError as exc:
+        fail(str(exc))
+    if args.clear:
+        out("已清除 %s · %s 的手工窗口设置，恢复按模型名推断。"
+            % (record["label"], args.model))
+        return 0
+    out("已设置 %s · %s 的上下文窗口：%s tokens"
+        % (record["label"], args.model, format(result["context_window"], ",")))
+    out("  有效窗口：%s tokens" % format(int(result["effective"]), ","))
+    out("  压缩触发点：%s tokens" % format(int(result["auto_compact_limit"]), ","))
+    out("")
+    out("目录已重新生成。切到这个模型时，压缩触发点会一起写进配置。")
+    return 0
+
+
+def cmd_effort(args) -> int:
+    """查看或设置思考强度。"""
+    state = state_module.load()
+    record = state_module.get_provider(state, args.provider)
+    if not record:
+        fail("没有找到平台：%s" % args.provider)
+    models = record.get("models") or {}
+    if args.model not in models:
+        fail("该平台没有名为 %s 的模型。可用：%s" % (args.model, "、".join(list(models)[:8]) or "（无）"))
+
+    if not args.level and not args.clear:
+        info = catalog_module.model_entry(catalog_module.catalog_path(record["id"]), args.model)
+        if not info:
+            out("%s · %s：目录里没有这个模型的条目" % (record["label"], args.model))
+            return 0
+        current = (record.get("model_overrides") or {}).get(args.model, {}).get(
+            "default_reasoning_level") or record.get("default_reasoning_effort") or "high"
+        levels = [item.get("effort") for item in info.get("supported_reasoning_levels") or []]
+        out("%s · %s" % (record["label"], args.model))
+        out("  当前档位：%s（%s）" % (current, EFFORT_TEXT.get(current, current)))
+        out("  可选档位：%s" % "、".join("%s(%s)" % (item, EFFORT_TEXT.get(item, item))
+                                   for item in levels))
+        return 0
+
+    try:
+        result = engine.set_reasoning_effort(args.provider, args.model,
+                                             None if args.clear else args.level)
+    except engine.SwitchError as exc:
+        fail(str(exc))
+    if args.clear:
+        out("已清除 %s · %s 的手工档位，恢复平台默认。"
+            % (record["label"], args.model))
+        return 0
+    out("已设置 %s · %s 的思考强度：%s"
+        % (record["label"], args.model, result["label"]))
+    if result.get("config_updated"):
+        out("配置已同步 —— 现在正在用这个模型，改完立刻生效。")
+    else:
+        out("下次切到这个模型时生效。")
+    return 0
+
+
+def _capability_line(row: Dict) -> str:
+    mark = {"yes": "支持", "no": "不支持", "unknown": "未知"}.get(row["vision"], "未知")
+    reasoning = {"yes": "支持", "no": "不支持", "unknown": "未测出"}.get(row["reasoning"], "未知")
+    tools = {"yes": "支持", "no": "不支持", "unknown": "未测出"}.get(row["tools"], "未知")
+    source = {"verified": "实测", "measured": "本机实测", "inferred": "推断",
+              "documented": "官方", "manual": "手动指定"}.get(
+                  row.get("source"), row.get("source") or "")
+    effort = row.get("effort") or "-"
+    return "  %-28s 读图%-4s 思考%-4s 工具%-4s 档位%-8s %s" % (
+        row["model"], mark, reasoning, tools, effort, source)
+
+
+def cmd_capabilities(args) -> int:
+    """能力矩阵：这个平台的模型到底支持什么。"""
+    if args.probe and not args.provider:
+        fail("实测需要指定平台，例如：codex-switcher capabilities deepseek --probe --apply")
+    if args.probe:
+        try:
+            result = engine.probe_capabilities(args.provider, args.model,
+                                               apply_result=args.apply)
+        except engine.SwitchError as exc:
+            fail(str(exc))
+        out("实测 %s（%s）" % (result["provider"],
+                            "直连 Responses" if result.get("transport") == "native" else "经协议桥"))
+        for item in result["results"]:
+            if item.get("error"):
+                out("  %-28s 探测失败：%s" % (item["model"], item["error"]))
+                continue
+            out("  %-28s 读图%-4s 思考%-4s 工具%-4s" % (
+                item["model"],
+                {"yes": "支持", "no": "不支持", "unknown": "未测出"}[item["vision"]],
+                {"yes": "支持", "no": "不支持", "unknown": "未测出"}[item["reasoning"]],
+                {"yes": "支持", "no": "不支持", "unknown": "未测出"}[item["tools"]]))
+            for key, value in (item.get("evidence") or {}).items():
+                out("      · %s：%s" % (key, value))
+            if args.apply and (item.get("applied") or {}).get("changed"):
+                out("      已写回目录：%s" % "、".join(item["applied"]["changed"]))
+        if not args.apply:
+            out("")
+            out("加 --apply 可以把这些结论写进目录，Codex 之后就按真实能力发请求。")
+        return 0
+
+    rows = engine.capability_matrix(args.provider)
+    if not rows:
+        out("还没有可分析的模型。先运行 `codex-switcher refresh <平台>` 拉一次模型列表。")
+        return 0
+    provider = None
+    for row in rows:
+        if row["provider"] != provider:
+            provider = row["provider"]
+            out("%s" % row["provider_label"])
+        out(_capability_line(row))
+    out("")
+    out("读图 / 思考 / 工具三列：实测 = 拿真实请求测过，推断 = 只按模型名猜的。")
+    out("想拿准数：`codex-switcher capabilities <平台> --probe --apply`（会消耗少量 token）。")
+    out("注意：%s 只有 OpenAI 自己提供，第三方平台一律没有。"
+        % "、".join(capabilities_module.OPENAI_ONLY_TOOLS.values()))
+    out("另外：%s" % capabilities_module.GENERATION_NOTE)
     return 0
 
 
@@ -290,15 +437,18 @@ def cmd_history(args) -> int:
     else:
         targets = history_module.recent_rollouts(0 if args.all else args.scan)
 
+    cross = getattr(args, "cross_provider", False)
     if not args.clean:
-        report = {"scanned": 0, "dirty": [], "totals": {"orphan_outputs": 0, "openai_only": 0}}
+        report = {"scanned": 0, "dirty": [],
+                  "totals": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0}}
         for path in targets:
             report["scanned"] += 1
             info = history_module.inspect(path)
-            if history_module.is_dirty(info):
+            if history_module.is_dirty(info, cross_provider=cross):
                 report["dirty"].append(info)
                 report["totals"]["orphan_outputs"] += info["orphan_outputs"]
                 report["totals"]["openai_only"] += info["openai_only"]
+                report["totals"]["cross_provider"] += info["cross_provider"]
         out("检查了最近 %d 个会话文件" % report["scanned"])
         if not report["dirty"]:
             out("没有发现问题条目 ✅")
@@ -309,6 +459,10 @@ def cmd_history(args) -> int:
             % report["totals"]["orphan_outputs"])
         out("  · OpenAI 专有推理条目：%d 条（换平台后无意义，第三方不认）"
             % report["totals"]["openai_only"])
+        if report["totals"]["cross_provider"]:
+            out("  · OpenAI 服务端工具条目：%d 条（web_search / computer / 图像等，"
+                "第三方不认，会导致整个请求被拒）" % report["totals"]["cross_provider"])
+            out("    要把会话搬到第三方继续，加 --cross-provider 清理")
         for info in report["dirty"][:5]:
             out("    %s" % Path(info["path"]).name)
         if len(report["dirty"]) > 5:
@@ -320,7 +474,7 @@ def cmd_history(args) -> int:
 
     official = engine.current_status().get("model_provider") == engine.OFFICIAL_PROVIDER
     report = history_module.clean(targets, moving_off_openai=not official,
-                                  dry_run=args.dry_run)
+                                  dry_run=args.dry_run, cross_provider=cross)
     if args.dry_run:
         out("预演：会清理 %d 个会话文件" % report["changed"])
     else:
@@ -328,6 +482,9 @@ def cmd_history(args) -> int:
         if report["removed"]["orphan_outputs"] or report["removed"]["openai_only"]:
             out("  删掉缺 call_id 的工具结果：%d 条" % report["removed"]["orphan_outputs"])
             out("  删掉 OpenAI 专有推理条目：%d 条" % report["removed"]["openai_only"])
+        if report["removed"]["cross_provider"]:
+            out("  成对剥离 OpenAI 服务端工具条目：%d 条（现在这个会话可以搬到第三方继续了）"
+                % report["removed"]["cross_provider"])
         if report.get("backup_dir"):
             out("  备份：%s" % report["backup_dir"])
     if not report["changed"]:
@@ -944,6 +1101,12 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--use", action="store_true", help="添加后立即切换")
 
     add_model = sub.add_parser("add-model", help="给某个平台手动补模型")
+    context = sub.add_parser("context", help="查看 / 手改某个模型的上下文窗口")
+    context.add_argument("provider")
+    context.add_argument("model")
+    context.add_argument("--window", type=int,
+                         help="窗口 token 数，例如 131072；不填就是查看当前值")
+    context.add_argument("--clear", action="store_true", help="清除手工设置，恢复按模型名推断")
     add_model.add_argument("provider")
     add_model.add_argument("models", nargs="+")
 
@@ -951,6 +1114,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     models = sub.add_parser("models", help="列出某个平台的模型")
     models.add_argument("provider")
+
+    effort = sub.add_parser("effort", help="查看 / 设置某个模型的思考强度（思考程度）")
+    effort.add_argument("provider")
+    effort.add_argument("--model", required=True)
+    effort.add_argument("level", nargs="?", metavar="LEVEL",
+                        help="none / low / medium / high / xhigh")
+    effort.add_argument("--clear", action="store_true", help="清除手工档位，恢复平台默认")
+
+    caps = sub.add_parser("capabilities", help="查看 / 实测模型能力（读图、思考、工具调用）")
+    caps.add_argument("provider", nargs="?")
+    caps.add_argument("--model", help="只探测一个模型")
+    caps.add_argument("--probe", action="store_true", help="发真实请求实测（消耗少量 token）")
+    caps.add_argument("--apply", action="store_true",
+                      help="把实测结论写回目录，让 Codex 按真实能力发请求")
 
     use = sub.add_parser("use", help="切换默认平台与模型")
     use.add_argument("provider")
@@ -991,6 +1168,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="检查最近多少个会话文件（默认 30）")
     history.add_argument("--all", action="store_true",
                          help="检查全部会话（很大很慢，通常不需要）")
+    history.add_argument("--cross-provider", dest="cross_provider", action="store_true",
+                         help="要搬到第三方平台继续：成对剥离 OpenAI 服务端工具条目")
 
     guard = sub.add_parser(
         "guard", help="会话体量体检：这个对话搬到目标模型上会不会陷入反复压缩")
@@ -1039,6 +1218,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "presets": cmd_presets,
         "add": cmd_add,
         "add-model": cmd_add_model,
+        "context": cmd_context,
+        "effort": cmd_effort,
+        "capabilities": cmd_capabilities,
         "list": cmd_list,
         "models": cmd_models,
         "use": cmd_use,

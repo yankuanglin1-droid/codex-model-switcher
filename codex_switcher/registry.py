@@ -22,27 +22,60 @@ from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------- 模型能力推断
 
+# 能力表是 Codex 的「能力开关」：目录里写什么，Codex 就给这个模型开什么。
+# 写小了就是阉割 —— 上下文写小会让它提前压缩，模态写少会让它发不了图。
+#
+# 所以这里的数必须来自官方文档或实测，不能拍脑袋保守估计。
+# 曾经把 deepseek 全家写成 131072、把 GLM 全家写成纯文本 204800，
+# 结果：1M 上下文的模型被当成 128K 用（反复压缩），
+# GLM-5.3-Flash 这个原生多模态模型连图片都发不出去。
+# 每条都标注了依据，改之前请先核对出处。
 MODEL_HINTS = [
-    (r"minimax-m3", {"context": 1000000, "modalities": ["text", "image"], "efforts": ["none", "high"]}),
-    (r"minimax-m2", {"context": 204800, "modalities": ["text"], "efforts": ["none", "high"]}),
-    (r"deepseek-v4-pro|deepseek-reasoner", {"context": 262144, "modalities": ["text"], "efforts": ["high"]}),
-    (r"deepseek", {"context": 131072, "modalities": ["text"], "efforts": ["high"]}),
-    (r"glm-5|glm-4\.7|glm-4\.6", {"context": 204800, "modalities": ["text"], "efforts": ["high"]}),
-    (r"glm", {"context": 204800, "modalities": ["text"], "efforts": ["high"]}),
+    # MiniMax M3：官方「原生支持 text / image / video 输入」，1M 上下文，
+    # thinking 可用 adaptive / disabled 控制
+    (r"minimax-m3", {"context": 1000000, "modalities": ["text", "image"],
+                     "efforts": ["none", "low", "medium", "high"]}),
+    # MiniMax M2.x：官方明确「只支持文本与工具调用，不接受图片或视频」
+    (r"minimax-m2", {"context": 204800, "modalities": ["text"],
+                     "efforts": ["none", "low", "medium", "high"]}),
+
+    # DeepSeek V4.1-Flash（API ID: deepseek-flash）：文本 + 图片，1M 上下文。
+    # 官方「Only deepseek-flash accepts image input」；本机实测数方块题 2/3 全对。
+    (r"deepseek-flash|deepseek-v4\.1", {"context": 1000000, "modalities": ["text", "image"],
+                                        "efforts": ["none", "low", "medium", "high"]}),
+    # DeepSeek V4 Pro：官方明确「text only」，但上下文是 1M（不是 131072）
+    (r"deepseek-v4-pro|deepseek-reasoner", {"context": 1000000, "modalities": ["text"],
+                                            "efforts": ["none", "low", "medium", "high"]}),
+    (r"deepseek", {"context": 1000000, "modalities": ["text"],
+                   "efforts": ["none", "low", "medium", "high"]}),
+
+    # 智谱 GLM-5.3-Flash：官方「GLM-5 系列首个原生多模态模型，
+    # 原生支持图像、视频与文件输入」，1M 上下文，支持 Function Calling
+    (r"glm-5\.3-flash|glm-.*-flash", {"context": 1048576, "modalities": ["text", "image"],
+                                      "efforts": ["low", "medium", "high"]}),
+    # 智谱 GLM-5.3：官方定价页「输入模态 文本」，纯文本，1M 上下文，强制思考
+    (r"glm-5|glm-4\.7|glm-4\.6", {"context": 1048576, "modalities": ["text"],
+                                  "efforts": ["low", "medium", "high"]}),
+    (r"glm-4v|glm-.*vision", {"context": 1048576, "modalities": ["text", "image"],
+                              "efforts": ["low", "medium", "high"]}),
+    (r"glm", {"context": 1048576, "modalities": ["text"], "efforts": ["low", "medium", "high"]}),
+
     (r"kimi-k2|moonshot-v1-128k", {"context": 262144, "modalities": ["text"], "efforts": ["none"]}),
     (r"moonshot", {"context": 131072, "modalities": ["text"], "efforts": ["none"]}),
     (r"qwen.*(vl|omni)", {"context": 131072, "modalities": ["text", "image"], "efforts": ["none"]}),
     (r"qwen", {"context": 131072, "modalities": ["text"], "efforts": ["none"]}),
-    (r"claude", {"context": 200000, "modalities": ["text", "image"], "efforts": ["high"]}),
+    (r"claude", {"context": 200000, "modalities": ["text", "image"], "efforts": ["low", "medium", "high"]}),
     (r"gemini", {"context": 1000000, "modalities": ["text", "image"], "efforts": ["none"]}),
     (r"gpt-5|gpt-6|o[34]", {"context": 400000, "modalities": ["text", "image"], "efforts": ["low", "medium", "high"]}),
     (r"gpt-4o|gpt-4\.1", {"context": 128000, "modalities": ["text", "image"], "efforts": ["none"]}),
     (r"grok", {"context": 256000, "modalities": ["text"], "efforts": ["none"]}),
     (r"llama|mixtral|mistral", {"context": 131072, "modalities": ["text"], "efforts": ["none"]}),
-    (r"glm-4v|vision|vl", {"context": 131072, "modalities": ["text", "image"], "efforts": ["none"]}),
+    (r"vision|vl", {"context": 131072, "modalities": ["text", "image"], "efforts": ["none"]}),
 ]
 
-DEFAULT_HINT = {"context": 131072, "modalities": ["text"], "efforts": ["none"]}
+# 未知模型：给足通用档位，别默认成「不支持」——
+# 保守默认值本身就是一种阉割，宁可让人实测后关掉。
+DEFAULT_HINT = {"context": 131072, "modalities": ["text", "image"], "efforts": ["none", "low", "medium", "high"]}
 
 
 def hint_for(model_id: str) -> Dict:

@@ -17,6 +17,11 @@ from .registry import hint_for
 # 实测与它上报的 model_context_window 完全一致：131072 × 0.95 = 124518。
 DEFAULT_EFFECTIVE_PERCENT = 95
 
+# 工具输出截断上限（字节）。Codex 自己的兜底预设也是这个值
+# （见 openai_models.rs: TruncationPolicyConfig::bytes(10_000)），
+# 所以这不是我们设的限制；但它是可覆盖的 —— 工具输出被截得太狠时调大即可。
+TRUNCATION_LIMIT_BYTES = 10000
+
 EFFORT_LABELS = {
     "none": "Think-Off",
     "low": "Fast reasoning",
@@ -48,6 +53,9 @@ def build_model_entry(
     description = overrides.get("description") or (
         ("%s · 支持图片" % model_id) if "image" in modalities else ("%s · 纯文本" % model_id)
     )
+    # 是否给这个模型开「看原图」和「搜索工具」。默认给足，
+    # 只有用户明确关掉才收窄 —— 默认关掉就是一种阉割。
+    supports_image = "image" in modalities
 
     entry = {
         "slug": model_id,
@@ -69,13 +77,40 @@ def build_model_entry(
         "support_verbosity": False,
         "apply_patch_tool_type": "freeform",
         "prefer_websockets": False,
-        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "truncation_policy": {"mode": "bytes", "limit": TRUNCATION_LIMIT_BYTES},
         "supports_parallel_tool_calls": bool(overrides.get("supports_parallel_tool_calls", True)),
         "experimental_supported_tools": [],
         "input_modalities": modalities,
         "context_window": context,
         "max_context_window": context,
         "effective_context_window_percent": DEFAULT_EFFECTIVE_PERCENT,
+
+        # ---- 下面这几个是 Codex 的「能力总开关」。
+        #
+        # 它们在 Codex 里的定义都带 #[serde(default)]，也就是：字段不写 = false。
+        # 以前我们根本没生成这几个字段，Codex 于是把第三方模型当成
+        # 「不支持 MCP / 不支持插件 / 不支持搜索 / 看不了原图」来处理 ——
+        # 这就是用户说的「能力被严重阉割」的真正来源，跟平台无关，是我们写的。
+        #
+        # 参照 codex-rs/protocol/src/openai_models.rs 的 ModelInfo：
+        #   include_skills_usage_instructions  —— 是否把 skills/MCP 用法写进提示词
+        #   include_plugin_usage_instructions  —— 是否把插件用法写进提示词
+        #   include_apps_usage_instructions    —— 是否把 apps 用法写进提示词
+        #   supports_search_tool               —— 是否提供搜索工具
+        #   supports_image_detail_original     —— 图片能否用 detail=original
+        #   web_search_tool_type               —— 搜索工具形态：text / text_and_image
+        #   supports_reasoning_summary_parameter —— 是否接受 reasoning.summary
+        "include_skills_usage_instructions": bool(
+            overrides.get("include_skills_usage_instructions", True)),
+        "include_plugin_usage_instructions": bool(
+            overrides.get("include_plugin_usage_instructions", True)),
+        "include_apps_usage_instructions": bool(
+            overrides.get("include_apps_usage_instructions", True)),
+        "supports_search_tool": bool(overrides.get("supports_search_tool", True)),
+        "supports_image_detail_original": bool(
+            overrides.get("supports_image_detail_original", supports_image)),
+        "web_search_tool_type": "text_and_image" if supports_image else "text",
+        "supports_reasoning_summary_parameter": True,
     }
     return entry
 
@@ -106,6 +141,18 @@ def write_catalog(provider_id: str, provider: Dict, model_ids: Iterable[str]) ->
     paths.ensure_dir(target.parent)
     target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
     return target
+
+
+def model_entry(path, model_id: str) -> Optional[Dict]:
+    """从已生成的目录里取回单个模型的条目。"""
+    try:
+        document = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    for entry in document.get("models", []):
+        if entry.get("slug") == model_id:
+            return entry
+    return None
 
 
 def read_catalog_models(path) -> List[str]:

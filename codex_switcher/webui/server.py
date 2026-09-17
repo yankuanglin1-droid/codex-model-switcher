@@ -60,6 +60,54 @@ def _guard_payload(current: Dict) -> Optional[Dict]:
     return report
 
 
+def _model_windows(provider_id: str) -> Dict:
+    """每个模型当前声明的窗口。界面要在卡片里显示并让人改，所以得给出来。"""
+    try:
+        document = json.loads(Path(catalog_module.catalog_path(provider_id)).read_text())
+    except (OSError, ValueError):
+        return {}
+    windows: Dict = {}
+    for entry in document.get("models", []):
+        slug = entry.get("slug")
+        if not slug:
+            continue
+        try:
+            windows[slug] = int(entry.get("context_window") or 0)
+        except (TypeError, ValueError):
+            windows[slug] = 0
+    return windows
+
+
+def _model_efforts(provider_id: str) -> Dict:
+    """每个模型当前声明的思考档位。界面要能选，所以得给出来。"""
+    try:
+        document = json.loads(Path(catalog_module.catalog_path(provider_id)).read_text())
+    except (OSError, ValueError):
+        return {}
+    efforts: Dict = {}
+    for entry in document.get("models", []):
+        slug = entry.get("slug")
+        if not slug:
+            continue
+        levels = [item.get("effort") for item in entry.get("supported_reasoning_levels") or []]
+        efforts[slug] = {
+            "levels": [item for item in levels if item],
+            "current": entry.get("default_reasoning_level") or "",
+        }
+    return efforts
+
+
+def _model_capabilities(provider_id: str, record=None) -> Dict:
+    """每个模型的能力矩阵。实测过的和猜的分开标，界面上要能看出来。"""
+    try:
+        rows = engine.capability_matrix(provider_id)
+    except Exception:  # noqa: BLE001 - 能力矩阵算不出来不能拖垮界面
+        return {}
+    return {row["model"]: {key: row[key] for key in
+                           ("vision", "reasoning", "tools", "source", "effort", "note")
+                           if key in row} for row in rows}
+
+
 def _state_payload(include_balance: bool = False) -> Dict:
     providers = engine.provider_overview(include_balance=include_balance)
     local = usage.local_usage()
@@ -73,6 +121,9 @@ def _state_payload(include_balance: bool = False) -> Dict:
                 "total_tokens": stat["total_tokens"],
                 "total_tokens_human": usage.human_tokens(stat["total_tokens"]),
             }
+        item["model_windows"] = _model_windows(item["id"])
+        item["model_efforts"] = _model_efforts(item["id"])
+        item["model_capabilities"] = _model_capabilities(item["id"])
         item["usage"] = engine.usage_with_quota(item["id"], item.get("quota_tokens"), used_tokens)
         item["usage"]["used_tokens_human"] = usage.human_tokens(used_tokens)
         if item["usage"].get("quota_tokens"):
@@ -218,6 +269,60 @@ class Handler(BaseHTTPRequestHandler):
                 result = engine.switch_to(engine.OFFICIAL_PROVIDER, model)
             else:
                 result = engine.switch_to(provider, model)
+            result["state"] = _state_payload()
+            return result
+
+        if action == "set_context":
+            provider_id = (payload.get("provider") or "").strip()
+            model_id = (payload.get("model") or "").strip()
+            window = payload.get("window")
+            if not provider_id or not model_id:
+                return {"error": "缺少平台或模型"}
+            try:
+                result = engine.set_context_window(
+                    provider_id, model_id, int(window) if window else None)
+            except engine.SwitchError as exc:
+                return {"error": str(exc)}
+            result["state"] = _state_payload()
+            return result
+
+        if action == "set_effort":
+            provider_id = (payload.get("provider") or "").strip()
+            model_id = (payload.get("model") or "").strip()
+            effort = (payload.get("effort") or "").strip()
+            if not provider_id or not model_id:
+                return {"error": "缺少平台或模型"}
+            try:
+                result = engine.set_reasoning_effort(provider_id, model_id, effort or None)
+            except engine.SwitchError as exc:
+                return {"error": str(exc)}
+            result["state"] = _state_payload()
+            return result
+
+        if action == "set_capability":
+            provider_id = (payload.get("provider") or "").strip()
+            model_id = (payload.get("model") or "").strip()
+            if not provider_id or not model_id:
+                return {"error": "缺少平台或模型"}
+            vision = payload.get("vision")
+            try:
+                result = engine.set_model_capability(
+                    provider_id, model_id, None if vision is None else bool(vision))
+            except engine.SwitchError as exc:
+                return {"error": str(exc)}
+            result["state"] = _state_payload()
+            return result
+
+        if action == "probe_capabilities":
+            provider_id = (payload.get("provider") or "").strip()
+            model_id = (payload.get("model") or "").strip() or None
+            if not provider_id:
+                return {"error": "缺少平台"}
+            try:
+                result = engine.probe_capabilities(
+                    provider_id, model_id, apply_result=bool(payload.get("apply")))
+            except engine.SwitchError as exc:
+                return {"error": str(exc)}
             result["state"] = _state_payload()
             return result
 

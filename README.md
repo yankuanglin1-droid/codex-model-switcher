@@ -95,6 +95,15 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
   `codex-switcher guard` 随时复查；装不下就明确要求分叉，并在配置里写入留有余量的
   压缩触发点，从根源上避免「反复压缩」（详见
   [docs/troubleshooting.md](docs/troubleshooting.md)）。
+- **模型能力看得见**：`codex-switcher capabilities` 列出每个模型的读图 / 思考 / 工具调用，
+  并标出「实测 / 官方 / 推断」——推断值只是按模型名猜的，不能当真。
+- **能力可以实测**：`codex-switcher capabilities <平台> --probe --apply` 发真实请求去测，
+  测完把结论写回模型目录，Codex 从此按真实能力发请求（不再把图发给读不了图的模型）。
+- **思考强度可选**：`codex-switcher effort <平台> --model <模型> --level high`，
+  或在界面的「思考强度」卡片里选；同时写进模型目录和 Codex 配置，两处不会打架。
+  协议桥会把它翻译成平台自己的写法（`reasoning_effort` / `thinking` / `reasoning_split`）。
+- **上下文窗口可改**：`codex-switcher context <平台> --model <模型> --window 131072`，
+  或界面里的「上下文窗口」卡片，改完立刻重生成目录。
 - **协议桥**：内置 Responses ⇄ Chat Completions 转换，让只支持 Chat 的平台也能用。
 - **环境自检**：`codex-switcher doctor` 一次检查 Python、钥匙串、配置、模型、协议桥。
 - **零依赖**：纯标准库，不需要 pip 安装任何东西。
@@ -511,6 +520,42 @@ $ codex-switcher guard --model deepseek-flash
 
 处理办法：新开一个任务，或对这个会话「分叉」后再换模型。
 `codex-switcher guard` 会在你切换时自动体检，装不下会当场告诉你。
+
+**Q：第三方模型的"能力"怎么知道哪些是真的？**
+`codex-switcher capabilities` 里每一格都标了来源：
+
+- **实测 / 官方**——拿真实请求测过，或平台官方文档写明，可以信
+- **推断**——只按模型名猜的，可能不准
+
+想拿准数就跑一次实测（会消耗少量 token）：
+
+```bash
+$ codex-switcher capabilities minimax --probe --apply
+实测 minimax（直连 Responses）
+  MiniMax-M3         读图支持   思考支持   工具支持
+      · vision：两张数方块图都答对：2 / 3
+  MiniMax-M2.7       读图不支持  思考未测出  工具支持
+```
+
+`--apply` 会把结论写回模型目录。之后 Codex 不再把图片发给读不了图的模型。
+
+**Q：为什么测「读图」要发两张数方块的图？**
+一次只问一张、只问颜色时，模型有很高的概率蒙对 —— 我们早期就被蒙过一次，
+误以为某个模型支持读图，其实是图片块根本没被平台接受，模型在瞎猜。
+现在改成红底上 2 个 / 3 个蓝方块各问一次，两张都对才算真看得见。
+另外输出预算给足（思考型模型会先把预算花在思考上，给少了答案会被截断成空，
+又会被误判成"看不见"）。
+
+**Q：画图 / 生成视频 / 语音合成能用吗？**
+不能。这些是各家平台上的**独立模型、独立接口**（如 image-01、video-01、speech-02），
+而 Codex 只会跟一个对话模型说话，调用不到它们。同理，联网搜索、画图、操作电脑是
+OpenAI 的服务器侧工具，第三方平台一律没有。工具不会假装这些能力存在。
+
+**Q：切到第三方模型后，原来的对话还能继续吗？**
+能，前提是这个对话在新模型的窗口里装得下。工具在切换时会自动修「对话绑着旧平台」
+的错配；如果体量超了，`guard` 会直接告诉你要分叉 —— 硬续接就会陷入反复压缩。
+旧对话里若残留只有官方 OpenAI 认识的条目（典型报错 `missing field call_id`），
+用 `codex-switcher history --cross-provider --clean` 就地清掉。
 
 **Q：MiniMax / GLM 为什么不显示剩余额度？**
 官方没有开放额度接口。工具不猜数字，只给官网入口。

@@ -196,7 +196,43 @@ class CatalogTests(unittest.TestCase):
                     "input_modalities", "context_window", "effective_context_window_percent"):
             self.assertIn(key, entry)
         self.assertIn("image", document["models"][0]["input_modalities"])
-        self.assertNotIn("image", document["models"][1]["input_modalities"])
+        # deepseek-flash（V4.1-Flash）官方支持图片输入，本机实测数方块题 2/3 全对。
+        # 这条曾经反着写（断言它不含 image），等于把阉割固化成了预期行为。
+        self.assertIn("image", document["models"][1]["input_modalities"])
+
+    def test_capability_switches_are_all_turned_on(self):
+        """这几个字段在 Codex 里都带 #[serde(default)]，不写就是 false。
+
+        少写一个就等于关掉一项能力：MCP / 插件 / 搜索 / 原图。
+        """
+        from codex_switcher import catalog
+        entry = catalog.build_model_entry("MiniMax-M3", "Demo")
+        for key in ("include_skills_usage_instructions",
+                    "include_plugin_usage_instructions",
+                    "include_apps_usage_instructions",
+                    "supports_search_tool",
+                    "supports_image_detail_original",
+                    "supports_reasoning_summary_parameter"):
+            self.assertTrue(entry[key], "%s 必须为 true，否则 Codex 会关掉这项能力" % key)
+        self.assertEqual(entry["web_search_tool_type"], "text_and_image")
+
+    def test_text_only_model_keeps_image_switches_off(self):
+        """纯文本模型才把图片相关的开关关掉，其余能力照给。"""
+        from codex_switcher import catalog
+        entry = catalog.build_model_entry("deepseek-v4-pro", "Demo")
+        self.assertEqual(entry["input_modalities"], ["text"])
+        self.assertFalse(entry["supports_image_detail_original"])
+        self.assertEqual(entry["web_search_tool_type"], "text")
+        # 但 MCP / 插件这些跟图片无关的能力不能跟着一起关掉
+        self.assertTrue(entry["include_skills_usage_instructions"])
+
+    def test_unknown_model_gets_full_capabilities(self):
+        """没见过的模型默认给足能力，别默认成阉割版。"""
+        from codex_switcher import catalog
+        entry = catalog.build_model_entry("some-future-model-v9", "Demo")
+        self.assertIn("image", entry["input_modalities"])
+        self.assertTrue(entry["include_skills_usage_instructions"])
+        self.assertTrue(entry["supports_search_tool"])
 
     def test_priority_follows_order(self):
         from codex_switcher import catalog
@@ -736,6 +772,153 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(names[-1], "response.completed")
         self.assertEqual(names.count("response.output_text.delta"), 2)
 
+    def test_reasoning_effort_is_forwarded_to_upstream(self):
+        """选了思考强度就得真的发出去，否则等于没选。"""
+        from codex_switcher import bridge
+        payload = bridge.responses_to_chat({
+            "model": "m1",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "reasoning": {"effort": "high"},
+        }, "moonshot")
+        self.assertEqual(payload["reasoning_effort"], "high")
+
+    def test_reasoning_effort_uses_the_provider_dialect(self):
+        """智谱要 thinking，MiniMax 要 reasoning_split，不能一律发 reasoning_effort。"""
+        from codex_switcher import bridge
+        glm = bridge.responses_to_chat(
+            {"model": "m1", "input": [], "reasoning": {"effort": "high"}}, "zhipu")
+        self.assertEqual(glm["thinking"], {"type": "enabled"})
+        minimax = bridge.responses_to_chat(
+            {"model": "m1", "input": [], "reasoning": {"effort": "high"}}, "minimax")
+        self.assertTrue(minimax["reasoning_split"])
+
+    def test_no_effort_means_no_thinking_field(self):
+        from codex_switcher import bridge
+        payload = bridge.responses_to_chat({"model": "m1", "input": []}, "moonshot")
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertNotIn("thinking", payload)
+
+    def test_images_survive_the_translation(self):
+        """读图能力靠这一段：图片块必须原样转过去。"""
+        from codex_switcher import bridge
+        payload = bridge.responses_to_chat({
+            "model": "m1",
+            "input": [{"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "什么颜色"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAA"},
+            ]}],
+        }, "moonshot")
+        self.assertEqual(payload["messages"][-1]["content"][1]["image_url"]["url"],
+                         "data:image/png;base64,AAA")
+
+
+class CapabilityTests(TempCodexHome):
+    """模型能力：档位归一化、按平台翻译、实测结论写回目录。"""
+
+    def _provider(self, provider_id="moonshot", models=("kimi-k2",), transport="native"):
+        from codex_switcher import engine, state as state_module
+        record = engine.build_provider_record(
+            provider_id=provider_id, label=provider_id,
+            base_url="https://example.invalid/v1",
+            models_url="https://example.invalid/v1/models",
+            transport=transport, requires_key=False)
+        record["models"] = {name: {} for name in models}
+        state = state_module.load()
+        state.setdefault("providers", {})[provider_id] = record
+        state_module.save(state)
+        return record
+
+    def test_effort_aliases_and_rejects_nonsense(self):
+        from codex_switcher import capabilities
+        self.assertEqual(capabilities.normalize_effort("HIGH"), "high")
+        self.assertEqual(capabilities.normalize_effort("off"), "none")
+        self.assertEqual(capabilities.normalize_effort("deep"), "high")
+        self.assertIsNone(capabilities.normalize_effort("超强"))
+
+    def test_thinking_payload_per_provider(self):
+        from codex_switcher import capabilities
+        self.assertEqual(capabilities.thinking_payload("moonshot", "high"),
+                         {"reasoning_effort": "high"})
+        self.assertEqual(capabilities.thinking_payload("zhipu", "high"),
+                         {"thinking": {"type": "enabled"}})
+        self.assertTrue(capabilities.thinking_payload("minimax", "high")["reasoning_split"])
+        # 关掉思考就什么都不发
+        self.assertEqual(capabilities.thinking_payload("moonshot", "none"), {})
+
+    def test_matrix_marks_inferred_rows_as_inferred(self):
+        from codex_switcher import capabilities
+        rows = capabilities.matrix("moonshot", {"models": {"kimi-k2": {}}, "model_overrides": {}})
+        self.assertEqual(rows[0]["model"], "kimi-k2")
+        self.assertEqual(rows[0]["source"], "inferred")
+
+    def test_verified_facts_outrank_the_guess(self):
+        """实测过的模型必须显示实测结论，不能退回按名字猜。"""
+        from codex_switcher import capabilities
+        rows = capabilities.matrix("minimax", {
+            "models": {"MiniMax-M3": {}}, "model_overrides": {}})
+        self.assertEqual(rows[0]["source"], "verified")
+        self.assertEqual(rows[0]["vision"], "yes")
+
+    def test_apply_only_writes_what_was_measured(self):
+        """没测出来的项（unknown）不能当成「不支持」写进去。"""
+        from codex_switcher import capabilities
+        record = {"models": {"m1": {}}, "model_overrides": {}}
+        outcome = capabilities.apply_result("moonshot", record, "m1", {
+            "vision": "no", "reasoning": "unknown", "tools": "yes"})
+        entry = record["model_overrides"]["m1"]
+        self.assertEqual(entry["input_modalities"], ["text"])
+        self.assertEqual(entry["capabilities"]["vision"], "no")
+        self.assertNotIn("reasoning", entry["capabilities"])
+        self.assertEqual(entry["supports_parallel_tool_calls"], True)
+        self.assertIn("读图", outcome["changed"])
+        self.assertNotIn("思考", outcome["changed"])
+
+    def test_apply_downgrades_a_blind_model(self):
+        from codex_switcher import capabilities
+        record = {"models": {"m1": {}}, "model_overrides": {}}
+        capabilities.apply_result("moonshot", record, "m1", {"vision": "no"})
+        entry = record["model_overrides"]["m1"]
+        self.assertEqual(entry["input_modalities"], ["text"])
+
+    def test_set_effort_updates_catalog_and_config(self):
+        from codex_switcher import catalog, engine, paths, configfile
+        self._provider("moonshot", ("kimi-k2",))
+        paths.config_path().write_text(
+            'model_provider = "moonshot"\nmodel = "kimi-k2"\n')
+        result = engine.set_reasoning_effort("moonshot", "kimi-k2", "low")
+        self.assertEqual(result["effort"], "low")
+        entry = catalog.model_entry(catalog.catalog_path("moonshot"), "kimi-k2")
+        self.assertEqual(entry["default_reasoning_level"], "low")
+        # 正在用这个模型，配置必须跟着改，否则用户以为改了其实没生效
+        parsed = load_document(paths.config_path().read_text())
+        self.assertEqual(parsed["model_reasoning_effort"], "low")
+
+    def test_set_effort_rejects_unknown_level(self):
+        from codex_switcher import engine
+        self._provider("moonshot", ("kimi-k2",))
+        with self.assertRaises(engine.SwitchError):
+            engine.set_reasoning_effort("moonshot", "kimi-k2", "变态强")
+
+    def test_set_capability_rewrites_modalities(self):
+        from codex_switcher import catalog, engine
+        self._provider("minimax", ("MiniMax-M3",))
+        engine.set_model_capability("minimax", "MiniMax-M3", vision=False)
+        entry = catalog.model_entry(catalog.catalog_path("minimax"), "MiniMax-M3")
+        self.assertEqual(entry["input_modalities"], ["text"])
+
+    def test_probe_refuses_without_base_url(self):
+        from codex_switcher import capabilities
+        with self.assertRaises(capabilities.ProbeError):
+            capabilities.probe("x", {"models": {"m": {}}, "transport": "native"},
+                               "m", None)
+
+    def test_capability_matrix_lists_every_provider(self):
+        from codex_switcher import engine
+        self._provider("moonshot", ("kimi-k2",))
+        self._provider("minimax", ("MiniMax-M3",))
+        rows = engine.capability_matrix()
+        self.assertEqual({row["provider"] for row in rows}, {"moonshot", "minimax"})
+
 
 class FallbackTests(TempCodexHome):
     """没有 TOML 库（例如系统自带 Python 3.9）时也必须能安全改写配置。"""
@@ -820,6 +1003,25 @@ class WebUITests(TempCodexHome):
     def test_page_requires_token(self):
         status, _ = self._get("/")
         self.assertEqual(status, 403)
+
+    def test_state_payload_carries_effort_and_capability_data(self):
+        """界面要让人选档位、看能力，数据得先送到前端。"""
+        from codex_switcher import engine, state as state_module
+        from codex_switcher.webui import server
+        record = engine.build_provider_record(
+            provider_id="minimax", label="MiniMax",
+            base_url="https://example.invalid/v1",
+            models_url="https://example.invalid/v1/models",
+            transport="native", requires_key=False)
+        record["models"] = {"MiniMax-M3": {}}
+        state_module.save({"schema_version": 3, "providers": {"minimax": record}})
+        engine.set_reasoning_effort("minimax", "MiniMax-M3", "high")
+
+        payload = server._state_payload()
+        item = next(row for row in payload["providers"] if row["id"] == "minimax")
+        self.assertEqual(item["model_efforts"]["MiniMax-M3"]["current"], "high")
+        self.assertEqual(item["model_capabilities"]["MiniMax-M3"]["vision"], "yes")
+        self.assertEqual(item["model_capabilities"]["MiniMax-M3"]["source"], "verified")
 
     def test_page_references_assets_with_token(self):
         status, body = self._get("/?t=" + self.token)
@@ -1097,6 +1299,63 @@ class HistoryTests(TempCodexHome):
         old = _time.time() - seconds
         _os.utime(path, (old, old))
         return path
+
+    def _cross_provider_sample(self):
+        """一段带着 OpenAI 服务端工具调用的会话。
+
+        这类条目（网页搜索、用电脑、生图、代码解释器）由 OpenAI 那边执行，
+        第三方平台既不认识也不支持，整个请求会被拒。
+        """
+        return [
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                  "content": [{"type": "input_text", "text": "hi"}]}},
+            {"type": "response_item", "payload": {"type": "custom_tool_call",
+                                                  "call_id": "ctc_1", "name": "codex_app.foo"}},
+            {"type": "response_item", "payload": {"type": "custom_tool_call_output",
+                                                  "call_id": "ctc_1", "output": "done"}},
+            {"type": "response_item", "payload": {"type": "web_search_call", "id": "ws_1"}},
+            # 这些是普通工具，不该被动
+            {"type": "response_item", "payload": {"type": "function_call",
+                                                  "call_id": "call_1", "name": "shell"}},
+            {"type": "response_item", "payload": {"type": "function_call_output",
+                                                  "call_id": "call_1", "output": "ok"}},
+        ]
+
+    def test_cross_provider_items_are_reported_by_default(self):
+        from codex_switcher import history
+        info = history.inspect(self._write_rollout(self._cross_provider_sample(),
+                                                   name="rollout-cross.jsonl"))
+        self.assertEqual(info["cross_provider"], 3)
+        # 默认不算「脏」——留在官方平台上是有效的，不该被误删
+        self.assertFalse(history.is_dirty(info))
+        self.assertTrue(history.is_dirty(info, cross_provider=True))
+
+    def test_cross_provider_removes_calls_and_outputs_as_pairs(self):
+        """只删一半会留下悬空引用，比不删更糟。必须成对消失。"""
+        from codex_switcher import history
+        path = self._write_rollout(self._cross_provider_sample(), name="rollout-cross.jsonl")
+        self._backdate(path)
+        backup = history._backup_root() / "test"
+        changed, stats = history.sanitize(path, False, backup, cross_provider=True)
+        self.assertTrue(changed)
+        self.assertEqual(stats["removed_cross_provider"], 3)
+
+        after = history.inspect(path)
+        self.assertEqual(after["cross_provider"], 0)
+        # 普通工具调用必须原样保留
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('"call_1"', text)
+        self.assertNotIn("codex_app.foo", text)
+
+    def test_without_the_flag_they_survive(self):
+        """没说要搬平台，就一个都不许删。"""
+        from codex_switcher import history
+        path = self._write_rollout(self._cross_provider_sample(), name="rollout-keep.jsonl")
+        self._backdate(path)
+        changed, stats = history.sanitize(path, False, history._backup_root() / "test")
+        self.assertFalse(changed)
+        self.assertEqual(stats["removed_cross_provider"], 0)
+        self.assertEqual(history.inspect(path)["cross_provider"], 3)
 
     def test_inspect_finds_only_real_problems(self):
         from codex_switcher import history

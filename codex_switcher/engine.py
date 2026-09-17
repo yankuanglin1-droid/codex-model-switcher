@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 from . import balance as balance_module
 from . import bridge as bridge_module
+from . import capabilities as capabilities_module
 from . import catalog as catalog_module
 from . import contextguard as contextguard_module
 from . import configfile, paths, registry, secrets, state as state_module
@@ -489,6 +490,229 @@ def provider_overview(include_balance: bool = False) -> List[Dict]:
             item["balance"] = balance_module.query(record, secrets.load(provider_id))
         overview.append(item)
     return overview
+
+
+def set_context_window(provider_id: str, model_id: str, window: Optional[int]) -> Dict:
+    """给某个模型手动指定上下文窗口。
+
+    为什么要能手改：目录里的窗口是按模型名猜的（见 registry.MODEL_HINTS），
+    服务商改了规格、或者同一个模型在不同套餐下窗口不同，猜的值就会错。
+    窗口一旦写小了，切换后就会陷入反复压缩；写大了会被服务商拒绝。
+    所以这个值必须让用户能改，并且改完立刻重生成目录。
+    """
+    state = state_module.load()
+    record = state_module.get_provider(state, provider_id)
+    if not record:
+        raise SwitchError("没有找到平台：%s" % provider_id)
+    models = record.get("models") or {}
+    if model_id not in models:
+        raise SwitchError("该平台没有名为 %s 的模型" % model_id)
+
+    overrides = record.setdefault("model_overrides", {})
+    entry = dict(overrides.get(model_id) or {})
+    if window is None:
+        entry.pop("context_window", None)
+    else:
+        window = int(window)
+        # 下限给足一个真实可用的会话，上限别到荒谬的量级
+        if window < 4096:
+            raise SwitchError("上下文窗口太小了：至少 4096 tokens")
+        if window > 10_000_000:
+            raise SwitchError("上下文窗口太大了：上限 10,000,000 tokens")
+        entry["context_window"] = window
+    if entry:
+        overrides[model_id] = entry
+    else:
+        overrides.pop(model_id, None)
+    record["model_overrides"] = overrides
+    state_module.save(state)
+
+    # 目录必须跟着重生成，否则 Codex 读到的还是旧窗口
+    catalog_module.write_catalog(record["id"], record, list(models.keys()))
+    # 正在用这个模型的话，压缩触发点也得跟着改，否则新窗口在会话里不生效
+    applied = _rewrite_if_current(record, model_id)
+    return {
+        "provider": provider_id,
+        "model": model_id,
+        "config_updated": applied,
+        "context_window": window,
+        "effective": contextguard_module.effective_window(
+            {"context_window": window or 0,
+             "effective_context_window_percent": catalog_module.DEFAULT_EFFECTIVE_PERCENT}),
+        "auto_compact_limit": (contextguard_module.auto_compact_limit(
+            contextguard_module.effective_window(
+                {"context_window": window or 0,
+                 "effective_context_window_percent": catalog_module.DEFAULT_EFFECTIVE_PERCENT}))
+            if window else None),
+    }
+
+
+def set_reasoning_effort(provider_id: str, model_id: str, effort: Optional[str]) -> Dict:
+    """设置某个模型的思考强度（none / low / medium / high / xhigh）。
+
+    为什么需要它：思考强度写在目录的 default_reasoning_level 里，也在
+    config.toml 的 model_reasoning_effort 里。两处不一致时，Codex 用 config
+    的值发请求，但下拉框里显示的却是目录里的档位，用户会以为改了没生效。
+    所以这里一次改两处：目录重生成，config 也跟着重写。
+    """
+    level = capabilities_module.normalize_effort(effort)
+    if effort and not level:
+        raise SwitchError("不认识的思考档位：%s（可选 %s）"
+                          % (effort, " / ".join(capabilities_module.EFFORT_ORDER)))
+    state = state_module.load()
+    record = state_module.get_provider(state, provider_id)
+    if not record:
+        raise SwitchError("没有找到平台：%s" % provider_id)
+    models = record.get("models") or {}
+    if model_id not in models:
+        raise SwitchError("该平台没有名为 %s 的模型" % model_id)
+
+    overrides = record.setdefault("model_overrides", {})
+    entry = dict(overrides.get(model_id) or {})
+    if level is None:
+        entry.pop("default_reasoning_level", None)
+    else:
+        entry["default_reasoning_level"] = level
+    if entry:
+        overrides[model_id] = entry
+    else:
+        overrides.pop(model_id, None)
+    record["model_overrides"] = overrides
+    state_module.save(state)
+    catalog_module.write_catalog(record["id"], record, list(models.keys()))
+    applied = _rewrite_if_current(record, model_id)
+    return {"provider": provider_id, "model": model_id, "effort": level,
+            "label": capabilities_module.EFFORT_TEXT.get(level or "", level or "跟随平台默认"),
+            "config_updated": applied}
+
+
+def set_model_capability(provider_id: str, model_id: str, vision: Optional[bool],
+                         tools: Optional[bool] = None) -> Dict:
+    """手动修正一个模型的能力声明。
+
+    典型场景：实测发现这个模型读不了图，但目录里还写着支持图片，
+    Codex 就会一直把图塞给它，然后得到空回答。改完立刻重生成目录。
+    """
+    state = state_module.load()
+    record = state_module.get_provider(state, provider_id)
+    if not record:
+        raise SwitchError("没有找到平台：%s" % provider_id)
+    models = record.get("models") or {}
+    if model_id not in models:
+        raise SwitchError("该平台没有名为 %s 的模型" % model_id)
+
+    overrides = record.setdefault("model_overrides", {})
+    entry = dict(overrides.get(model_id) or {})
+    saved = dict(entry.get("capabilities") or {})
+    if vision is None:
+        entry.pop("input_modalities", None)
+        saved.pop("vision", None)
+    else:
+        entry["input_modalities"] = ["text", "image"] if vision else ["text"]
+        saved["vision"] = "yes" if vision else "no"
+        saved["verified_at"] = capabilities_module._today()
+        saved["note"] = "手动指定"
+    if tools is not None:
+        saved["tools"] = "yes" if tools else "no"
+        entry["supports_parallel_tool_calls"] = bool(tools)
+    if saved:
+        entry["capabilities"] = saved
+    if entry:
+        overrides[model_id] = entry
+    else:
+        overrides.pop(model_id, None)
+    record["model_overrides"] = overrides
+    state_module.save(state)
+    catalog_module.write_catalog(record["id"], record, list(models.keys()))
+    return {"provider": provider_id, "model": model_id,
+            "vision": saved.get("vision"), "tools": saved.get("tools")}
+
+
+def capability_matrix(provider_id: Optional[str] = None) -> List[Dict]:
+    """能力矩阵：哪些能力是实测的、哪些只是按名字猜的，一眼能分清。"""
+    state = state_module.load()
+    targets = ([provider_id] if provider_id
+               else state_module.provider_ids(state))
+    rows: List[Dict] = []
+    for target in targets:
+        record = state_module.get_provider(state, target)
+        if not record:
+            continue
+        for row in capabilities_module.matrix(target, record):
+            row["provider"] = target
+            row["provider_label"] = record.get("label") or target
+            rows.append(row)
+    return rows
+
+
+def probe_capabilities(provider_id: str, model_id: Optional[str] = None,
+                       apply_result: bool = False, timeout: int = 30) -> Dict:
+    """拿真实请求测一个（或所有）模型的能力。
+
+    apply_result=True 时把测出来的结论写回目录，
+    从此 Codex 按真实能力发请求，不再把图发给读不了图的模型。
+    """
+    state = state_module.load()
+    record = state_module.get_provider(state, provider_id)
+    if not record:
+        raise SwitchError("没有找到平台：%s" % provider_id)
+    api_key = secrets.load(provider_id) if record.get("requires_key", True) else None
+    if record.get("requires_key", True) and not api_key:
+        raise SwitchError("该平台的密钥不在系统钥匙串里，无法实测")
+
+    models = list((record.get("models") or {}).keys())
+    if not models:
+        raise SwitchError("该平台还没有模型，请先刷新模型列表")
+    targets = [model_id] if model_id else models
+    unknown = [item for item in targets if item not in models]
+    if unknown:
+        raise SwitchError("该平台没有名为 %s 的模型" % unknown[0])
+
+    results = []
+    for target in targets:
+        try:
+            outcome = capabilities_module.probe(provider_id, record, target, api_key, timeout=timeout)
+        except capabilities_module.ProbeError as exc:
+            results.append({"model": target, "error": str(exc)})
+            continue
+        if apply_result:
+            outcome["applied"] = capabilities_module.apply_result(provider_id, record, target, outcome)
+        results.append(outcome)
+
+    if apply_result:
+        state_module.save(state)
+        catalog_module.write_catalog(record["id"], record, models)
+    return {"provider": provider_id, "transport": record.get("transport"),
+            "results": results, "applied": apply_result}
+
+
+def _rewrite_if_current(record: Dict, model_id: str) -> bool:
+    """如果 Codex 当前正用这个平台+模型，把新设置写进 config.toml。
+
+    改了目录却不动 config，用户看到的就是「界面上说改好了，实际还在用旧值」。
+    """
+    config = paths.config_path()
+    if not config.exists():
+        return False
+    try:
+        current = configfile.read_top_level(
+            config.read_text(), ("model_provider", "model"))
+    except Exception:  # noqa: BLE001 - 读不出来就跳过，不影响记录本身
+        return False
+    if current.get("model_provider") != record.get("id"):
+        return False
+    if current.get("model") not in (None, "", model_id):
+        return False
+    try:
+        text = config.read_text()
+        new_text = configfile.rewrite_model_settings(
+            text, provider_settings(record, model_id, record.get("id")))
+        with platform_compat.file_lock(paths.lock_file()):
+            configfile.backup(config)
+            configfile.atomic_write(config, new_text, text)
+        return True
+    except Exception:  # noqa: BLE001 - 写配置失败不该让设置本身失败
+        return False
 
 
 def set_quota(provider_id: str, tokens: Optional[int]) -> Dict:

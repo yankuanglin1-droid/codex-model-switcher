@@ -383,6 +383,30 @@ h1 {
 .banner-text strong { font-size: 14px; }
 .banner-actions { display: flex; gap: 8px; }
 
+.context-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.context-row select, .context-row input {
+  font: inherit; font-size: 13px; padding: 6px 8px;
+  border: 1px solid var(--border-secondary, rgba(0,0,0,.3));
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1f2328);
+}
+.context-row select { flex: 1 1 180px; min-width: 0; }
+.context-row input { width: 110px; }
+
+/* 能力矩阵：一行一个模型，能力用小标签表示 */
+.caps-table { margin-top: 8px; display: grid; gap: 4px; }
+.caps-row { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.caps-row .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip {
+  font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 999px;
+  border: 1px solid var(--border-secondary, rgba(0,0,0,.3));
+  color: var(--color-text-secondary, #57606a); white-space: nowrap;
+}
+.chip.yes { border-color: #1a7f37; color: #1a7f37; }
+.chip.no { border-color: #b9bec4; color: #6e7781; }
+.chip.unknown { border-color: #d0a215; color: #8a6d0b; }
+
 /* --------------------------------------------------------------- 响应式 */
 
 @media (max-width: 1000px) {
