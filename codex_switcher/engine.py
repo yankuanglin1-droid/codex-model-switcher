@@ -38,6 +38,9 @@ DEFAULT_OFFICIAL_MODEL = "gpt-5-codex"
 _FULL_FOLLOW_BATCH = 25
 _FULL_FOLLOW_MAX_ROUNDS = 400
 _FULL_FOLLOW_RUNNING = threading.Lock()
+# 历史全量清扫（找并清掉 codex_app 工具留下的"缺 call_id"孤儿条目）。
+# 和全量迁移一样是守护线程，测试里一起关掉。
+_HISTORY_SWEEP_RUNNING = threading.Lock()
 # 测试环境把后台迁移关掉：测试要求全同步，后台线程会和临时目录的清理打架
 ALLOW_BACKGROUND_FOLLOW = True
 
@@ -372,9 +375,19 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         # 注意：切回官方**不做** auto_clean —— 官方解析器认自家的条目类型，
         # 保留完整历史（test_switching_to_openai_does_not_touch_history 锁定）。
         # 跨平台清洗只在「任务真的搬家」时发生（_rewrite_session_file 内联）。
+        #
+        # 但**孤儿工具结果**是另一回事：它缺 call_id，官方同样拒收
+        # （call_id 在官方线上格式里也是必填）。所以这里挂一次全量清扫，
+        # 它只清孤儿，不碰合法的历史条目。
+        history_sweep = False
+        try:
+            history_sweep = schedule_history_sweep()
+        except Exception:  # noqa: BLE001 - 清扫排队失败不影响切换本身
+            history_sweep = False
         return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "backup": str(backup),
                 "threads_fixed": repaired, "threads_followed": followed,
-                "full_follow": {"scheduled": full_follow_scheduled}}
+                "full_follow": {"scheduled": full_follow_scheduled},
+                "history_sweep": {"scheduled": history_sweep}}
 
     record = state_module.get_provider(state, provider_id)
     if not record:
@@ -487,11 +500,21 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
             full_follow_scheduled = schedule_full_follow(previous_provider, provider_id, chosen)
         except Exception:  # noqa: BLE001 - 后台迁移排队失败不影响切换本身
             full_follow_scheduled = False
+
+    # 全量扫一遍会话历史，清掉 codex_app 工具留下的"缺 call_id"孤儿条目。
+    # 它们散落在任意老文件里，用户点开哪个就炸哪个 —— 只扫最近的窗口
+    # 兜不住，所以这里挂一次不设窗口的全量清扫（后台，带账本，增量）。
+    history_sweep = False
+    try:
+        history_sweep = schedule_history_sweep()
+    except Exception:  # noqa: BLE001 - 清扫排队失败不影响切换本身
+        history_sweep = False
     return {"provider": provider_id, "label": record["label"], "model": chosen,
             "backup": str(backup), "threads_fixed": threads_fixed,
             "threads_followed": threads_followed, "history_clean": history_clean,
             "integrations": integrations_result,
-            "full_follow": {"scheduled": full_follow_scheduled}}
+            "full_follow": {"scheduled": full_follow_scheduled},
+            "history_sweep": {"scheduled": history_sweep}}
 
 
 def sync_integrations(provider_id: str) -> Dict:
@@ -556,6 +579,48 @@ def schedule_full_follow(from_provider: str, to_provider: str, model: Optional[s
 
     threading.Thread(target=_job, daemon=True,
                      name="switcher-full-follow").start()
+    return True
+
+
+def sweep_history(limit: Optional[int] = None, apply: bool = True,
+                  cross_provider: bool = False,
+                  budget_seconds: Optional[float] = None) -> Dict:
+    """全量清扫会话历史里的"必然被平台拒收"的条目。
+
+    默认只清**孤儿工具结果**（``function_call_output`` 缺 ``call_id``）：
+    那是任何平台都不认的坏数据，官方和第三方都会 400，可以无条件清。
+
+    为什么不做成"只扫最近的"：实测用户机器上 45 个文件里有 72 条这种孤儿，
+    最老的一条躺在 7 月底的小文件里。只扫最近 N 个永远扫不到它，可用户
+    哪天点开那个对话就炸一次。所以这里不设窗口，靠账本做增量。
+    """
+    from . import history as history_module
+    kwargs = {}
+    if budget_seconds is not None:
+        kwargs["budget_seconds"] = budget_seconds
+    return history_module.sweep_all(
+        cross_provider=cross_provider, limit=limit,
+        dry_run=not apply, **kwargs)
+
+
+def schedule_history_sweep(limit: Optional[int] = None,
+                           cross_provider: bool = False) -> bool:
+    """把全量清扫排到后台线程（已有清扫在跑就跳过，幂等）。"""
+    if not ALLOW_BACKGROUND_FOLLOW:
+        return False
+    if not _HISTORY_SWEEP_RUNNING.acquire(blocking=False):
+        return False
+
+    def _job():
+        try:
+            sweep_history(limit=limit, cross_provider=cross_provider)
+        except Exception:  # noqa: BLE001 - 后台清扫失败不能影响任何前台功能
+            pass
+        finally:
+            _HISTORY_SWEEP_RUNNING.release()
+
+    threading.Thread(target=_job, daemon=True,
+                     name="switcher-history-sweep").start()
     return True
 
 

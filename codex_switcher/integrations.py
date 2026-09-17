@@ -208,17 +208,40 @@ def remove(provider_id: str) -> Dict:
     return result
 
 
+def _mcp_block_present(text: str, provider_id: str) -> bool:
+    """没有 TOML 解析库时的兜底：直接扫 [mcp_servers.<id>] 表里有没有 command。
+
+    本工具写出的 MCP 表一定带 command（uvx/npx 那行），所以「表存在且表内
+    出现过 command 键」就是可靠的判据。用 configfile 已有的分块扫描，
+    不需要 tomllib —— Python 3.9 / 3.10 上也能如实报告配置状态。
+    """
+    name = _mcp_table_name(provider_id)
+    lines = text.splitlines(keepends=True)
+    for block_name, start, end in configfile._table_blocks(lines):
+        if block_name != name:
+            continue
+        for line in lines[start + 1:end]:
+            head, sep, _ = line.strip().partition("=")
+            if sep and head.strip() == "command":
+                return True
+        return False
+    return False
+
+
 def status(provider_id: str) -> Dict:
     """这个平台的全量能力环境配好了没。"""
     result = {"mcp": False, "env_file": None, "available": bool(mcp_item(provider_id))}
     config = paths.config_path()
     if config.exists():
+        text = config.read_text()
         try:
-            document = configfile.parse(config.read_text())
+            document = configfile.parse(text)
             block = (document.get("mcp_servers") or {}).get(provider_id)
             result["mcp"] = bool(block and block.get("command"))
-        except Exception:  # noqa: BLE001 - 解析不了就按没配置算
-            result["mcp"] = False
+        except Exception:  # noqa: BLE001
+            # 没有 TOML 库（3.9/3.10 未装 tomli）或文件解析不了：
+            # 退化为逐行扫描，不能因为「读不了」就谎报「没配置」。
+            result["mcp"] = _mcp_block_present(text, provider_id)
     path = env_file(provider_id)
     if path.exists():
         result["env_file"] = str(path)

@@ -450,6 +450,24 @@ def cmd_history(args) -> int:
     """检查/清洗会话历史里会让第三方平台拒绝请求的条目。"""
     from . import history as history_module
 
+    # 全量清扫：不设窗口，把**所有**会话文件过一遍。
+    # 为什么需要它：缺 call_id 的孤儿工具结果不挑新旧，最老的可能躺在几个月
+    # 前的小文件里；只扫"最近 N 个"永远扫不到它，用户哪天点开那个对话就炸。
+    if getattr(args, "sweep", False):
+        official = engine.current_status().get("model_provider") == engine.OFFICIAL_PROVIDER
+        cross = getattr(args, "cross_provider", False)
+        if not args.dry_run:
+            out("正在全量清扫（首次要把所有会话文件读一遍，可能要几十秒）…")
+        report = history_module.sweep_all(moving_off_openai=not official,
+                                          cross_provider=cross,
+                                          dry_run=args.dry_run)
+        out(history_module.describe_sweep(report))
+        for item in (report.get("items") or [])[:5]:
+            out("  %s" % Path(item["path"]).name)
+        if len(report.get("items") or []) > 5:
+            out("  … 还有 %d 个" % (len(report["items"]) - 5))
+        return 0
+
     targets: List[Path] = []
     if args.thread:
         try:
@@ -496,8 +514,9 @@ def cmd_history(args) -> int:
         if len(report["dirty"]) > 5:
             out("    … 还有 %d 个" % (len(report["dirty"]) - 5))
         out("")
-        out("清理：codex-switcher history --clean        （会先备份）")
-        out("预演：codex-switcher history --clean --dry-run")
+        out("全量清理：codex-switcher history --sweep   （所有会话，会先备份，推荐）")
+        out("只清最近：codex-switcher history --clean   （会先备份）")
+        out("预演：    codex-switcher history --sweep --dry-run")
         return 0
 
     official = engine.current_status().get("model_provider") == engine.OFFICIAL_PROVIDER
@@ -1222,6 +1241,8 @@ def build_parser() -> argparse.ArgumentParser:
     history = sub.add_parser(
         "history", help="检查/清理会话历史里会让第三方平台拒绝请求的条目")
     history.add_argument("--clean", action="store_true", help="真的清理（默认只检查）")
+    history.add_argument("--sweep", action="store_true",
+                         help="全量清扫**所有**会话文件（不限最近多少个，推荐）")
     history.add_argument("--dry-run", action="store_true", help="配合 --clean：只预演")
     history.add_argument("--thread", help="只处理一个任务（填任务 ID 前缀）")
     history.add_argument("--scan", type=int, default=30,

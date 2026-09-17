@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1636,6 +1637,187 @@ class HistoryTests(TempCodexHome):
         self.assertEqual(report["cleaned"], 0)
 
 
+class SweepTests(TempCodexHome):
+    """全量清扫（history.sweep_all）。
+
+    这条路径存在的理由必须被钉住：缺 call_id 的孤儿工具结果散落在**任意**
+    老会话文件里，只扫"最近 N 个"永远扫不到它们，而用户点开哪个就炸哪个。
+    真实机器上的数字：1347 个会话文件、33.9GB，其中 45 个文件带 72 条孤儿，
+    最老的一条躺在 7 月底的小文件里。
+    """
+
+    def _rollout(self, name, lines, seconds_ago=3600, day=("2025", "01", "02")):
+        from codex_switcher import paths
+        folder = paths.sessions_dir().joinpath(*day)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_text("\n".join(json.dumps(l) for l in lines) + "\n", encoding="utf-8")
+        old = time.time() - seconds_ago
+        os.utime(path, (old, old))
+        return path
+
+    @staticmethod
+    def _orphan():
+        """真实形态：codex_app 命名空间的工具只写了输出，没有 call_id。
+
+        病根是 Codex 两套类型定义不对称 —— 会话文件里（ResponseItem）
+        ``call_id: Option<String>`` 且 skip_if_none，可以缺省；发给 API 时
+        （ResponseInputItem）``call_id: String``，必填。于是这条记录能存进
+        文件，一旦被回放（继续对话，甚至后台"生成线程描述"的结构化回合）
+        服务端就 400。
+        """
+        return {"type": "response_item", "payload": {
+            "type": "function_call_output", "id": "fco_01a0a804-12fd-7401-9145",
+            "name": "automation_update", "namespace": "codex_app",
+            "output": "Automation: Obsidian + LLM Wiki 每日分层更新"}}
+
+    @staticmethod
+    def _healthy():
+        return [
+            {"type": "response_item", "payload": {"type": "function_call",
+                                                  "call_id": "call_1", "name": "shell"}},
+            {"type": "response_item", "payload": {"type": "function_call_output",
+                                                  "call_id": "call_1", "output": "ok"}},
+        ]
+
+    def test_sweep_reaches_files_the_recent_window_never_sees(self):
+        """孤儿躺在最老的文件里也要清掉 —— 这正是以前反复复发的原因。"""
+        from codex_switcher import history
+        dirty = self._rollout("rollout-old-dirty.jsonl", self._healthy() + [self._orphan()],
+                              seconds_ago=90 * 24 * 3600)
+        # 再堆一批更新的干净文件，把脏文件挤出"最近 N 个"的窗口
+        for index in range(40):
+            self._rollout("rollout-fresh-%02d.jsonl" % index, self._healthy(),
+                          seconds_ago=200 + index)
+        self.assertNotIn(dirty, history.recent_rollouts(30))
+
+        report = history.sweep_all()
+        self.assertEqual(report["removed"]["orphan_outputs"], 1)
+        self.assertEqual(history.inspect(dirty)["orphan_outputs"], 0)
+        text = dirty.read_text(encoding="utf-8")
+        self.assertNotIn("automation_update", text)
+        self.assertIn('"call_1"', text)          # 正常工具调用不许误伤
+        self.assertTrue(report["backup_dir"])
+
+    def test_sweep_skips_a_file_codex_still_holds_open(self):
+        """Codex 攥着句柄的文件不能动，哪怕它已经半天没动静。"""
+        from codex_switcher import history
+        path = self._rollout("rollout-open.jsonl", [self._orphan()], seconds_ago=7200)
+        original = history._codex_open_rollouts
+        history._codex_open_rollouts = lambda: {str(path)}
+        try:
+            report = history.sweep_all()
+        finally:
+            history._codex_open_rollouts = original
+        self.assertEqual(report["cleaned"], 0)
+        self.assertEqual(report["skipped_busy"], 1)
+        self.assertEqual(history.inspect(path)["orphan_outputs"], 1)
+
+    def test_busy_reason_tells_an_open_handle_from_a_stale_mtime(self):
+        from codex_switcher import history
+        path = self._rollout("rollout-busy.jsonl", [self._orphan()], seconds_ago=7200)
+        original = history._codex_open_rollouts
+        try:
+            history._codex_open_rollouts = lambda: {str(path)}
+            self.assertEqual(history.busy_reason(path), "codex-open")
+            history._codex_open_rollouts = lambda: set()
+            self.assertIsNone(history.busy_reason(path))   # 老 mtime + 没人开着 = 可以清
+            history._codex_open_rollouts = lambda: None    # 问不出来 → 退回 mtime 兜底
+            self.assertIsNone(history.busy_reason(path))
+            os.utime(path, None)                          # 刚被写过 → 保守跳过
+            self.assertEqual(history.busy_reason(path), "recent")
+        finally:
+            history._codex_open_rollouts = original
+
+    def test_sweep_ledger_makes_the_next_pass_cheap(self):
+        """账本认过的文件不再重读 —— 否则每轮都要把几十 GB 会话读一遍。"""
+        from codex_switcher import history
+        self._rollout("rollout-a.jsonl", [self._orphan()], seconds_ago=7200)
+        self._rollout("rollout-b.jsonl", self._healthy(), seconds_ago=7200)
+        first = history.sweep_all()
+        self.assertEqual(first["cleaned"], 1)
+        second = history.sweep_all()
+        self.assertEqual(second["cleaned"], 0)
+        self.assertEqual(second["checked"], 0)
+        self.assertGreaterEqual(second["skipped_cached"], 2)
+
+    def test_sweep_leaves_cross_provider_items_alone_by_default(self):
+        """默认只清"任何平台都不认"的孤儿；别家服务端工具条目要显式才剥。"""
+        from codex_switcher import history
+        path = self._rollout("rollout-cross2.jsonl", [
+            {"type": "response_item", "payload": {"type": "web_search_call", "id": "ws_1"}}],
+            seconds_ago=7200)
+        default = history.sweep_all()
+        self.assertEqual(default["cleaned"], 0)
+        self.assertEqual(history.inspect(path)["cross_provider"], 1)
+
+        # 深度模式不能被账本挡住（账本按清洗力度分桶）
+        deep = history.sweep_all(cross_provider=True)
+        self.assertEqual(deep["removed"]["cross_provider"], 1)
+        self.assertEqual(history.inspect(path)["cross_provider"], 0)
+
+    def test_engine_dry_run_writes_nothing(self):
+        from codex_switcher import engine, history
+        path = self._rollout("rollout-dry.jsonl", [self._orphan()], seconds_ago=7200)
+        report = engine.sweep_history(apply=False)
+        self.assertTrue(report["dry_run"])
+        self.assertEqual(history.inspect(path)["orphan_outputs"], 1)
+        self.assertIsNone(report["backup_dir"])
+
+    def test_describe_sweep_says_something_a_human_can_act_on(self):
+        from codex_switcher import history
+        self._rollout("rollout-d.jsonl", [self._orphan()], seconds_ago=7200)
+        text = history.describe_sweep(history.sweep_all())
+        self.assertIn("call_id", text)
+        self.assertIn("1", text)
+
+    def test_sweep_never_touches_encrypted_reasoning_by_default(self):
+        """默认清扫不许碰 ``encrypted_content`` 推理。
+
+        实测本机 1290 / 1347 个文件带这类条目（11.6 万条），而用户正在用的
+        deepseek 会话里就有 633 条，跑得好好的 —— 它被平台容忍，不是坏数据。
+        只有明确"这个会话要搬到第三方"时才剥。
+        """
+        from codex_switcher import history
+        path = self._rollout("rollout-reasoning.jsonl", [
+            {"type": "response_item", "payload": {
+                "type": "reasoning", "encrypted_content": "xxx", "summary": []}}],
+            seconds_ago=7200)
+        report = history.sweep_all()
+        self.assertEqual(report["checked"], 1)     # 看过了
+        self.assertEqual(report["cleaned"], 0)     # 但一条没动
+        self.assertEqual(history.inspect(path)["openai_only"], 1)
+
+        deep = history.sweep_all(moving_off_openai=True)
+        self.assertEqual(deep["removed"]["openai_only"], 1)
+        self.assertEqual(history.inspect(path)["openai_only"], 0)
+
+    def test_dry_run_report_never_overstates(self):
+        """干跑报告必须和"真的会删什么"一致，不能虚高。"""
+        from codex_switcher import history
+        self._rollout("rollout-dry-reasoning.jsonl", [
+            {"type": "response_item", "payload": {
+                "type": "reasoning", "encrypted_content": "xxx", "summary": []}}],
+            seconds_ago=7200)
+        report = history.sweep_all(dry_run=True)
+        self.assertEqual(report["cleaned"], 0)
+        self.assertEqual(report["items"], [])
+
+    def test_switch_reports_the_full_sweep(self):
+        """切换要顺手挂上全量清扫，否则存量孤儿只能等用户自己发现。"""
+        from codex_switcher import engine
+        from codex_switcher import state as state_module
+        record = engine.build_provider_record(
+            provider_id="local-ollama", label="本地模型",
+            base_url="http://127.0.0.1:11434/v1",
+            models_url="http://127.0.0.1:11434/v1/models",
+            transport="native", requires_key=False)
+        record["models"] = {"qwen3:32b": {}}
+        state_module.save({"schema_version": 3, "providers": {"local-ollama": record}})
+        result = engine.switch_to("local-ollama", "qwen3:32b")
+        self.assertIn("history_sweep", result)
+
+
 class ContextGuardTests(TempCodexHome):
     """上下文窗口守卫。
 
@@ -2251,6 +2433,30 @@ class IntegrationsTests(TempCodexHome):
         after = integ.status("minimax")
         self.assertTrue(after["mcp"])
         self.assertIsNotNone(after["env_file"])
+
+    def test_status_still_reports_mcp_without_a_toml_library(self):
+        """3.9 / 3.10 上没装 tomli 时，不能因为「读不了配置文件」就谎报「没配置」。
+
+        直接把 configfile.tomllib 置空来模拟缺失（而不是靠跳过整个用例），
+        这样无论本机解释器有没有 tomllib，这条降级路径都被真实执行到。
+        写入侧本来就带 toml_available() 守卫，读侧必须同样降级。
+        """
+        from codex_switcher import configfile as configfile_module
+        from codex_switcher import integrations as integ
+        integ.sync("minimax", self._record(), api_key="sk-test-123")
+        saved = configfile_module.tomllib
+        configfile_module.tomllib = None
+        try:
+            self.assertFalse(configfile_module.toml_available())
+            configured = integ.status("minimax")
+            # 没有 MCP 预设的平台在降级路径下也不能被误报成已配置
+            absent = integ.status("deepseek")
+        finally:
+            configfile_module.tomllib = saved
+        self.assertIs(configfile_module.tomllib, saved)
+        self.assertTrue(configured["mcp"], configured)
+        self.assertIsNotNone(configured["env_file"])
+        self.assertFalse(absent["mcp"], absent)
 
     def test_provider_without_mcp_only_gets_env_file(self):
         from codex_switcher import integrations as integ

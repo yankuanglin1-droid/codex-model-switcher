@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +43,67 @@ BACKUP_DIRNAME = "history-backups"
 # 最近还在写入的文件不要碰：那多半是你正开着的那个对话。
 # 改写一个正在被追加写的文件，可能把当前对话写坏。等它静下来再清。
 ACTIVE_GUARD_SECONDS = 120
+
+# 只靠 mtime 判断"这个文件还能不能动"是不够准的：实测 Codex 会把一个会话
+# 文件的句柄一直攥在手里（fd 常驻），而那个对话可能几小时没动静 —— mtime
+# 早就不新鲜了，文件却随时会被追加写。这时改写它（os.replace 换掉 inode）
+# 会让 Codex 后续的写入落进已经没人引用的旧 inode，整段对话凭空消失。
+# 所以先拿 lsof 问一句"Codex 现在到底攥着哪些文件"，比猜 mtime 准得多；
+# 探不到 lsof 时再退回 mtime 那道保守护栏。
+LSOF_TIMEOUT_SECONDS = 5.0
+OPEN_FILES_CACHE_SECONDS = 5.0
+_UNPROBED = object()
+_OPEN_FILES_CACHE: Dict[str, object] = {"at": 0.0, "paths": _UNPROBED}
+
+
+def _codex_open_rollouts() -> Optional[set]:
+    """Codex 进程当前打开着的会话文件集合；探不到返回 None。
+
+    结果为 None 只表示"问不出来"（没有 lsof / 不是 unix / 命令失败），
+    不表示"没有文件被打开"——调用方必须据此退回保守判定。
+    """
+    now = time.time()
+    cached = _OPEN_FILES_CACHE.get("paths")
+    if cached is not _UNPROBED and now - float(_OPEN_FILES_CACHE["at"] or 0.0) \
+            < OPEN_FILES_CACHE_SECONDS:
+        return cached  # type: ignore[return-value]
+    found: Optional[set] = None
+    try:
+        completed = subprocess.run(["lsof", "-c", "codex", "-Fn"],
+                                   capture_output=True, timeout=LSOF_TIMEOUT_SECONDS)
+        # lsof 的退出码 0 = 有命中、1 = 没命中，两个都说明它本身跑成功了
+        if completed.returncode in (0, 1):
+            found = set()
+            for raw in completed.stdout.decode("utf-8", "replace").splitlines():
+                if raw.startswith("n") and raw.endswith(".jsonl"):
+                    found.add(raw[1:])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        found = None
+    _OPEN_FILES_CACHE["at"] = now
+    _OPEN_FILES_CACHE["paths"] = found
+    return found
+
+
+def busy_reason(path: Path) -> Optional[str]:
+    """这个会话文件现在能不能安全改写；None 表示可以。
+
+    两个"不能碰"的信号取并集（保守优先）：
+      ``codex-open``  Codex 正持有它的句柄 —— 换了 inode 会吃掉它后续的写入；
+      ``recent``      最近 ``ACTIVE_GUARD_SECONDS`` 内被写过，句柄可能还热着。
+    """
+    opened = _codex_open_rollouts()
+    if opened:
+        try:
+            if str(path) in opened:
+                return "codex-open"
+        except TypeError:  # pragma: no cover - 只在缓存被外部改坏时发生
+            pass
+    try:
+        if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
+            return "recent"
+    except OSError:
+        return None
+    return None
 
 # 第三方平台不认识、且删掉不影响语义的条目
 OPENAI_ONLY_IF_MOVING = {"reasoning"}
@@ -74,33 +136,38 @@ def _payload_of(line: str) -> Optional[Dict]:
 
 
 def inspect(path: Path) -> Dict:
-    """看一个 rollout 文件里有没有问题条目。只读，不改。"""
+    """看一个 rollout 文件里有没有问题条目。只读，不改。
+
+    逐行流式读，不 read_text：全量清扫会遍历用户**所有**会话文件，
+    里面有几份几百 MB 的，一次性读进内存会把峰值顶到 GB 级。
+    """
     result = {"path": str(path), "orphan_outputs": 0, "openai_only": 0,
               "cross_provider": 0, "report_only": {}, "lines": 0, "error": None}
     if not path.exists():
         result["error"] = "文件不存在"
         return result
+    lines = 0
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                lines += 1
+                if "response_item" not in line:
+                    continue
+                payload = _payload_of(line)
+                if payload is None:
+                    continue
+                kind = payload.get("type")
+                if kind == "function_call_output" and not payload.get("call_id"):
+                    result["orphan_outputs"] += 1
+                elif kind in OPENAI_ONLY_IF_MOVING and payload.get("encrypted_content"):
+                    result["openai_only"] += 1
+                elif kind in CROSS_PROVIDER_TYPES:
+                    result["cross_provider"] += 1
+                    result["report_only"][kind] = result["report_only"].get(kind, 0) + 1
     except OSError as exc:
         result["error"] = type(exc).__name__
         return result
-    lines = text.split("\n")
-    result["lines"] = len(lines)
-    for line in lines:
-        if not line or "response_item" not in line:
-            continue
-        payload = _payload_of(line)
-        if payload is None:
-            continue
-        kind = payload.get("type")
-        if kind == "function_call_output" and not payload.get("call_id"):
-            result["orphan_outputs"] += 1
-        elif kind in OPENAI_ONLY_IF_MOVING and payload.get("encrypted_content"):
-            result["openai_only"] += 1
-        elif kind in CROSS_PROVIDER_TYPES:
-            result["cross_provider"] += 1
-            result["report_only"][kind] = result["report_only"].get(kind, 0) + 1
+    result["lines"] = lines
     return result
 
 
@@ -228,12 +295,9 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
         info = inspect(path)
         if not is_dirty(info, cross_provider=cross_provider):
             continue
-        try:
-            if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
-                report["skipped_active"].append(str(path))
-                continue
-        except OSError:
-            pass
+        if busy_reason(path):
+            report["skipped_active"].append(str(path))
+            continue
         if dry_run:
             report["items"].append({"path": str(path), "would_remove": {
                 "orphan_outputs": info["orphan_outputs"],
@@ -336,7 +400,7 @@ def auto_clean(moving_off_openai: bool, limit: int = AUTO_CLEAN_LIMIT,
         if ledger.get(key) == mtime:
             continue
         # 正在写的会话不碰（同 sanitize 的保护逻辑）
-        if time.time() - mtime < ACTIVE_GUARD_SECONDS:
+        if busy_reason(path):
             report["skipped_active"] += 1
             continue
         info = inspect(path)
@@ -354,3 +418,193 @@ def auto_clean(moving_off_openai: bool, limit: int = AUTO_CLEAN_LIMIT,
         ledger[key] = mtime
     _save_ledger(ledger)
     return report
+
+
+# ------------------------------------------------------------ 全量清扫（不走窗口）
+
+# 为什么还要有这一层
+# ------------------
+# 上面 auto_clean 只扫"最近 30 个"，repair 只扫"最近 10 个"——它们回答的是
+# 「刚切换完，用户马上要接着用的那几个对话干不干净」。但坏条目不挑新旧：
+#
+#   实测（2026-09-17）：用户机器上 1347 个会话文件、33.9GB，其中 **45 个文件
+#   里有 72 条** `function_call_output` 缺 `call_id`，**全部**来自 `codex_app`
+#   命名空间的工具（automation_update 等）。最老的一条躺在 7 月底的小文件里。
+#
+# 病根是 Codex 两套类型定义的不对称：
+#   · 会话文件里（ResponseItem）  call_id: Option<String> + skip_if_none —— 可缺省
+#   · 发给 API 时（ResponseInputItem） call_id: String —— 必填
+# 于是 Codex App 自带工具写下的"只有输出、没有调用"的记录能存进文件，
+# 一旦被回放（继续对话，连后台"生成线程描述"的结构化回合也算）就必炸：
+#     Failed to deserialize the JSON body into the target type:
+#     input: missing field `call_id` at line 1 column N
+#
+# 只扫最近的窗口永远扫不到三个月前那个文件，可用户哪天点开它就炸一次。
+# 所以这里**不设窗口**：全部过一遍，坏的就清掉。
+#
+# 增量靠账本：path → [mtime_ms, size]。没变过的文件只做一次 stat；
+# 第一次全量之后每轮几乎零成本。busy 的文件**不记账**，下一轮接着来。
+
+SWEEP_LEDGER_NAME = "history-sweep.json"
+SWEEP_BUDGET_SECONDS = 25.0
+
+
+def _sweep_ledger_path() -> Path:
+    return paths.state_dir() / SWEEP_LEDGER_NAME
+
+
+def _load_sweep_ledger() -> Dict:
+    try:
+        data = json.loads(_sweep_ledger_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _save_sweep_ledger(ledger: Dict) -> None:
+    try:
+        paths.ensure_dir(paths.state_dir())
+        _sweep_ledger_path().write_text(json.dumps(ledger), encoding="utf-8")
+    except OSError:
+        pass  # 写不进去只是下一轮多扫一遍，不影响功能
+
+
+def _fingerprint(path: Path):
+    """文件的"变过没有"指纹；读不到返回 None。"""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return [int(info.st_mtime * 1000), int(info.st_size)]
+
+
+def _sweep_mode(cross_provider: bool, moving_off_openai: bool) -> str:
+    """账本要按"清洗力度"分桶。
+
+    否则先跑一次默认（只清孤儿）把文件记成"干净"，再跑 --cross-provider
+    就会被账本跳过，深度模式等于白跑。
+    """
+    return "%s%s" % ("c" if cross_provider else "-", "o" if moving_off_openai else "-")
+
+
+def _would_change(info: Dict, cross_provider: bool, moving_off_openai: bool) -> bool:
+    """这份文件在这个清洗力度下**真的**会被改动吗。
+
+    必须和 :func:`sanitize` 的删除条件逐条对齐，不能沿用 ``is_dirty``：
+    ``is_dirty`` 只要看到 ``openai_only`` 就算脏，但 ``moving_off_openai=False``
+    时 sanitize 根本不会删它。实测本机 1290 个文件带 ``encrypted_content``
+    推理（11.6 万条），而且用户正在 deepseek 上用得好好的 —— 它是被容忍的，
+    不是坏数据。沿用 is_dirty 会让干跑报告虚高 1290 条，还白白多读几十 GB。
+    """
+    if info.get("orphan_outputs"):
+        return True
+    if moving_off_openai and info.get("openai_only"):
+        return True
+    if cross_provider and info.get("cross_provider"):
+        return True
+    return False
+
+
+def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
+              limit: Optional[int] = None, budget_seconds: float = SWEEP_BUDGET_SECONDS,
+              dry_run: bool = False, force: bool = False) -> Dict:
+    """把**全部**会话文件过一遍，清掉会让平台拒收请求的条目。
+
+    cross_provider=False（默认）只清"任何平台都不认"的孤儿输出——它在官方和
+    第三方都是坏数据，可以无条件清。要顺带剥离别家服务端工具条目（web_search
+    等），传 cross_provider=True，那属于「这个会话要整体搬到第三方」的动作。
+
+    从最新修改的开始处理：最新的最可能被 resume。超预算就收工，
+    剩下的下一轮接着扫（账本保证不会重复读没变过的文件）。
+    """
+    started = time.time()
+    report = {"scanned": 0, "checked": 0, "cleaned": 0, "skipped_busy": 0,
+              "skipped_cached": 0, "budget_exhausted": False, "dry_run": dry_run,
+              "cross_provider": cross_provider, "backup_dir": None, "items": [],
+              "removed": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0}}
+    try:
+        rollouts = recent_rollouts(0 if limit is None else max(0, int(limit)))
+    except OSError:
+        return report
+
+    ledger = {} if force else _load_sweep_ledger()
+    next_ledger = dict(ledger)
+    mode = _sweep_mode(cross_provider, moving_off_openai)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = _backup_root() / stamp
+
+    for path in rollouts:
+        if time.time() - started > budget_seconds:
+            report["budget_exhausted"] = True
+            break
+        report["scanned"] += 1
+        key = mode + "|" + str(path)
+        fingerprint = _fingerprint(path)
+        if fingerprint is None:
+            continue
+        if ledger.get(key) == fingerprint:
+            report["skipped_cached"] += 1
+            continue
+        if busy_reason(path):
+            report["skipped_busy"] += 1
+            continue  # 不记账：等它静下来下一轮再来
+        report["checked"] += 1
+        info = inspect(path)
+        if not _would_change(info, cross_provider, moving_off_openai):
+            next_ledger[key] = fingerprint
+            continue
+        if dry_run:
+            report["cleaned"] += 1
+            report["items"].append({"path": str(path), "would_remove": {
+                "orphan_outputs": info["orphan_outputs"],
+                "openai_only": info["openai_only"] if moving_off_openai else 0,
+                "cross_provider": info["cross_provider"] if cross_provider else 0}})
+            continue
+        changed, stats = sanitize(path, moving_off_openai, backup_dir,
+                                  cross_provider=cross_provider)
+        if changed:
+            report["cleaned"] += 1
+            report["backup_dir"] = str(backup_dir)
+            for field in report["removed"]:
+                report["removed"][field] += stats.get("removed_" + field, 0)
+            report["items"].append({"path": str(path), "removed": {
+                "orphan_outputs": stats["removed_orphan_outputs"],
+                "openai_only": stats["removed_openai_only"],
+                "cross_provider": stats["removed_cross_provider"]}})
+            after = _fingerprint(path)
+            next_ledger[key] = after if after is not None else fingerprint
+        else:
+            next_ledger[key] = fingerprint
+
+    if not dry_run:
+        _save_sweep_ledger(next_ledger)
+    return report
+
+
+def describe_sweep(report: Dict) -> str:
+    """把全量清扫的结果说成一句人话。"""
+    if report.get("dry_run"):
+        head = "预演：扫了 %d 个会话文件，%d 个需要清理" % (
+            report["scanned"], report["cleaned"])
+    else:
+        head = "清扫完毕：扫了 %d 个会话文件，清理了 %d 个" % (
+            report["scanned"], report["cleaned"])
+    lines = [head]
+    removed = report.get("removed") or {}
+    if removed.get("orphan_outputs"):
+        lines.append("  · 删掉缺 call_id 的工具结果 %d 条（就是它导致 missing field `call_id`）"
+                     % removed["orphan_outputs"])
+    if removed.get("openai_only"):
+        lines.append("  · 删掉 OpenAI 专有推理条目 %d 条" % removed["openai_only"])
+    if removed.get("cross_provider"):
+        lines.append("  · 成对剥离别家服务端工具条目 %d 条" % removed["cross_provider"])
+    if report.get("skipped_busy"):
+        lines.append("  · %d 个会话 Codex 正开着，等它静下来会自动补上"
+                     % report["skipped_busy"])
+    if report.get("budget_exhausted"):
+        lines.append("  · 时间预算用完，剩下的下一轮继续")
+    if report.get("backup_dir"):
+        lines.append("  备份：%s" % report["backup_dir"])
+    if not report.get("cleaned") and not report.get("skipped_busy"):
+        lines.append("  没有发现需要清理的内容 ✅")
+    return "\n".join(lines)

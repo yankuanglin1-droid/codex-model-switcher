@@ -8,7 +8,7 @@
 [![macOS 11+](https://img.shields.io/badge/macOS-11%2B-black?style=flat-square&logo=apple)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
 [![Windows / Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-0078D6?style=flat-square&logo=windows)](INSTALL-WITH-AI.md)
 [![Python 3.9+](https://img.shields.io/badge/Python%203.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](README.md)
-[![Tests](https://img.shields.io/badge/tests-150%20passing-2ea44f?style=flat-square)](#development)
+[![Tests](https://img.shields.io/badge/tests-160%20passing-2ea44f?style=flat-square)](#development)
 
 **Codex (ChatGPT App) can officially only talk to OpenAI. This tool opens it up to
 any provider with an OpenAI-compatible API** — DeepSeek, MiniMax, Zhipu GLM, Moonshot
@@ -51,7 +51,7 @@ errors. This tool turns the whole mess into two commands and encodes every lesso
 | Old conversations | break after switching (provider mismatch) | not handled | **auto-rebound** to the new provider on switch + background watchdog |
 | Context window | you guess | not handled | **three-layer guard**: official window → Codex usable (95%) → auto-compact line, with a one-click "switch to a model that fits" |
 | Model capabilities | guesswork | not handled | **probed with real requests** (vision/reasoning/tools) and written back into the catalog |
-| History portability | not handled | not handled | strips OpenAI-only entries (`call_id` errors) with backup |
+| History portability | not handled | not handled | sweeps every session file: strips orphan `call_id` outputs (the 400 cause) and, on a real move, OpenAI-only entries — with backup |
 | Restoring official OpenAI | manual re-edit | often impossible | `codex-switcher restore`, third-party config kept |
 
 ## Features
@@ -63,10 +63,17 @@ errors. This tool turns the whole mess into two commands and encodes every lesso
   on switch (session files + both databases, backed up); the rest, **including daily
   scheduled (`exec`) automations**, migrate in batches on a background thread, so nothing
   is left pointing at the old provider. History that only OpenAI understands
-  (`web_search_call`, encrypted reasoning, orphan `call_id` outputs) is stripped in the
-  same pass — a ChatGPT task continued on MiniMax no longer dies with
-  `missing field call_id`. After switching, a dialog reminds you that Codex reads its
-  config once at launch, with a **one-click restart Codex** button.
+  (`web_search_call` and friends) is stripped in the same pass. After switching, a dialog
+  reminds you that Codex reads its config once at launch, with a **one-click restart
+  Codex** button.
+- **`missing field call_id` is fixed at the root** — Codex App's own tools (the
+  `codex_app` namespace, e.g. `automation_update`) write `function_call_output` records
+  **with no `call_id`**: legal in the rollout file, **required** by the API — so replaying
+  that history 400s. Those orphans hide in *any* old session file, which is why a
+  "recent N" scan never found them. Since v1.6.6 **every** session file is swept
+  (ledger-incremented, so later passes are nearly free): on switch, at GUI startup, and
+  every 60 s while the GUI runs — those tools keep producing new ones. "Is this file in
+  use?" is answered by `lsof` (Codex holds session files open), not by guessing from mtime.
 - **Context guard that acts, not just warns** — session size vs. usable window is checked
   before you switch; past the auto-compact line it tells you Codex will compact
   automatically, and past the window it offers **one-click switch to a model that fits**.
@@ -142,7 +149,7 @@ Everything here is handled automatically or by one command — details in
 | --- | --- | --- |
 | `unknown model 'xxx'` / `invalid params (2013)` | the thread is still bound to the previous provider | self-heals within seconds, or `codex-switcher repair --follow`; restart Codex |
 | `The 'xxx' model is not supported ... ChatGPT account` | continuing an old task that is bound to official OpenAI (those are deliberately never moved) | fork the task, or start a new one |
-| `missing field call_id` on a task that used to run on ChatGPT | OpenAI-only entries in the replayed history | **fixed automatically since v1.6.3** (stripped when the task is re-bound); for pre-existing files: `codex-switcher history --clean --cross-provider` (backed up) |
+| `missing field call_id` (any task, any provider) | `codex_app`-namespace tools write `function_call_output` with no `call_id` — optional in the rollout file, required by the API | **swept automatically since v1.6.6** (every session file: on switch + GUI watchdog); to do it right now: `codex-switcher history --sweep` (backed up) |
 | Endless "compacting" with no progress | session is larger than the target model's window | `codex-switcher guard` — or click **Switch to a model that fits** in the banner |
 | `wire_api = "chat" is no longer supported` | stale hand-written config | `codex-switcher use <provider>` rewrites it |
 | 502 / connection refused | local bridge isn't running | `codex-switcher bridge --install-agent` |

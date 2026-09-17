@@ -40,7 +40,7 @@ MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自
 | 旧对话 | 切换后报错 | 不处理 | 切换时**自动把最近任务搬过去** + 后台巡检自愈 |
 | 上下文 | 靠猜 | 不处理 | **三层守卫**：官方窗口 → Codex 可用 → 自动压缩线，超限一键「换成装得下的模型」 |
 | 模型能力 | 靠猜 | 不处理 | **真实请求实测**（读图 / 思考 / 工具），结论写回目录 |
-| 历史兼容 | 不处理 | 不处理 | 自动剥掉 OpenAI 专有条目（`call_id` 报错），先备份 |
+| 历史兼容 | 不处理 | 不处理 | 全量清扫每个会话文件：剥掉缺 `call_id` 的孤儿输出（400 元凶），真搬家时再剥 OpenAI 专有条目，全程备份 |
 | 切回官方 | 手工改回 | 常常做不到 | `codex-switcher restore`，第三方配置保留 |
 
 ## 功能
@@ -50,10 +50,16 @@ MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自
 - **一键切换 / 还原**：命令行、菜单、图形界面三种方式。
 - **旧任务全跟着走**：切换时把最近在用的任务整体搬到新平台（会话文件 + 两个数据库，
   先备份）；其余任务——**包括每日定时（`exec`）自动化任务**——由后台线程分批搬完，
-  不会留下指向旧平台的死绑定。只有 OpenAI 认识的历史条目（`web_search_call`、加密
-  思考、缺 `call_id` 的孤儿输出）在同一次改写里剥掉：ChatGPT 的任务搬到 MiniMax
-  继续不再报 `missing field call_id`。切换成功后弹窗提醒「Codex 只在启动时读配置」，
+  不会留下指向旧平台的死绑定。只有 OpenAI 认识的历史条目（`web_search_call` 等）
+  在同一次改写里剥掉。切换成功后弹窗提醒「Codex 只在启动时读配置」，
   点确认**自动重启 Codex**。
+- **`missing field call_id` 从根上治了**：Codex App 自带工具（`codex_app` 命名空间，
+  如 `automation_update`）写出的 `function_call_output` **没有 `call_id`** ——
+  在会话文件里合法、在 API 请求里必填，所以这段历史一回放服务端就 400。这种孤儿
+  藏在**任意**老会话文件里，只扫"最近 N 个"永远找不到。v1.6.6 起**全量清扫**每个
+  会话文件（账本增量，之后每轮几乎零成本）：切换时、开界面时、界面常驻时每 60 秒
+  各补一轮——因为那些工具还在持续产生新的。判断「文件是不是正在被用」改用 `lsof`
+  实测句柄，不再靠猜 mtime。
 - **上下文守卫会动手**：切换前体检会话体量；过了建议压缩线会告诉你 Codex 会自动
   压缩、无需操作；真装不下时横幅上直接给「**一键换成装得下的模型**」。
 - **能力看得见、测得准**：读图 / 思考 / 工具标注「实测 / 官方 / 推断」，
@@ -122,7 +128,7 @@ codex-switcher restore               # 一键切回官方 OpenAI
 | --- | --- | --- |
 | `unknown model 'xxx'` / `invalid params (2013)` | 任务还绑着上一个平台 | 几秒内自动修复，或 `codex-switcher repair --follow`；重开 Codex |
 | `model is not supported ... ChatGPT account` | 在绑着官方 OpenAI 的旧任务里选第三方模型（这类任务刻意不搬） | 对它「分叉」，或新建任务 |
-| `missing field call_id`（任务原先在 ChatGPT 上跑） | 历史里有 OpenAI 专有条目 | **v1.6.3 起自动修复**（任务改绑平台时同一次清洗）；存量文件用 `codex-switcher history --clean --cross-provider`（先备份） |
+| `missing field call_id`（任何任务、任何平台） | `codex_app` 命名空间工具写出的 `function_call_output` 没有 `call_id`：会话文件里可选、API 里必填 | **v1.6.6 起自动全量清扫**（所有会话文件：切换时 + 界面巡检）；立刻清一次：`codex-switcher history --sweep`（先备份） |
 | 一直「压缩上下文」毫无进展 | 会话比目标模型的窗口还大 | `codex-switcher guard`，或点横幅上的「**一键换成装得下的模型**」 |
 | `wire_api = "chat" is no longer supported` | 旧的手工配置残留 | `codex-switcher use <平台>` 重写 |
 | 502 / 连接被拒 | 协议桥没在跑 | `codex-switcher bridge --install-agent` |

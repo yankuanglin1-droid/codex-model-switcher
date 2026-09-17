@@ -31,6 +31,11 @@ const I18N = {
     'banner.note': '在这些任务里换模型会报 “model is not supported”。一键修复后即可正常继续，改动前会自动备份。',
     'banner.preview': '查看明细',
     'banner.repair': '一键修复',
+    'history.sweep': '清扫会话历史',
+    'history.sweeping': '正在清扫所有会话文件…',
+    'history.sweep_clean': '扫描完毕，没有需要清理的内容 ✅',
+    'history.sweep_done': '清扫完毕：清理 {cleaned} 个会话，删掉 {orphans} 条缺 call_id 的工具结果',
+    'history.sweep_busy': '；{busy} 个会话 Codex 正开着，退出 Codex 后会自动补上',
 
     'guard.title': '当前对话体量已超过建议压缩线',
     'guard.detail': '{tokens} tokens / 可用 {window} tokens（{percent}%）：{advice}',
@@ -292,6 +297,11 @@ const I18N = {
     'banner.note': 'Switching models inside those tasks fails with “model is not supported”. Repair fixes it in place, and backs up before touching anything.',
     'banner.preview': 'Show details',
     'banner.repair': 'Repair now',
+    'history.sweep': 'Sweep sessions',
+    'history.sweeping': 'Sweeping every session file…',
+    'history.sweep_clean': 'Scan finished — nothing needed cleaning ✅',
+    'history.sweep_done': 'Swept {cleaned} session file(s); removed {orphans} orphan `call_id` output(s)',
+    'history.sweep_busy': '; {busy} session(s) are open in Codex and will be done once it exits',
 
     'guard.title': 'This thread is past the suggested auto-compact line',
     'guard.detail': '{tokens} tokens / {window} usable ({percent}%): {advice}',

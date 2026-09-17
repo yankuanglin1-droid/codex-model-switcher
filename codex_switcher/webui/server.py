@@ -26,6 +26,7 @@ from .. import (PROJECT_URL, __version__, balance as balance_module, engine, pat
 from .. import catalog as catalog_module
 from .. import capabilities as capabilities_module
 from .. import contextguard as contextguard_module
+from .. import history as history_module
 from .. import integrations as integrations_module
 from ..discovery import DiscoveryError
 
@@ -501,6 +502,15 @@ class Handler(BaseHTTPRequestHandler):
             report["state"] = _state_payload()
             return report
 
+        if action == "sweep_history":
+            # 全量清扫会话历史里的孤儿工具结果（缺 call_id 的 function_call_output）。
+            # 有预算上限：几百 MB 的大文件不该把界面卡住，剩下的交给后台巡检。
+            report = history_module.sweep_all(
+                dry_run=bool(payload.get("dry_run")),
+                budget_seconds=SWEEP_ON_DEMAND_BUDGET_SECONDS)
+            report["description"] = history_module.describe_sweep(report)
+            return report
+
         raise engine.SwitchError("未知操作：%s" % action)
 
     def _add(self, payload: Dict) -> Dict:
@@ -561,27 +571,58 @@ class Handler(BaseHTTPRequestHandler):
 
 
 WATCHDOG_INTERVAL_SECONDS = 12.0
+# 全量历史清扫比绑定修复重得多（首次要把所有会话文件读一遍，本机 33GB），
+# 所以隔几拍跑一次，每次只给一小段预算 —— 分多轮收敛，不跟界面抢磁盘。
+SWEEP_EVERY_N_TICKS = 5
+WATCHDOG_SWEEP_BUDGET_SECONDS = 8.0
+SWEEP_ON_DEMAND_BUDGET_SECONDS = 12.0
+
+
+def _log_sweep(report: Dict) -> None:
+    target = paths.state_dir() / "history-sweep.log"
+    try:
+        paths.ensure_dir(target.parent)
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write("[%s] %s\n" % (
+                time.strftime("%Y-%m-%dT%H:%M:%S"),
+                history_module.describe_sweep(report).replace("\n", " ")))
+    except OSError:
+        pass
 
 
 def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
-    """后台盯着任务绑定，坏了就修。
+    """后台巡检：修任务绑定 + 清会话历史里的坏条目。
 
     为什么需要它：minimax / deepseek / glm 都是 transport=native，直连平台
     API，根本不过本地协议桥，所以桥上那个巡检线程管不到它们。而「切换后
     继续任务」产生的错位，往往是在 Codex 把新模型写回数据库**之后**才出现
     的 —— 只在切换那一刻修一次根本来不及。这里定期复查，几秒内自动纠偏。
+
+    历史清扫也放这儿，因为 `codex_app` 命名空间的工具（automation_update
+    等）**会持续**写出缺 call_id 的孤儿工具结果：定时任务每跑一次就可能
+    多一条。一次性清完不够用，得有人一直盯着。账本保证每轮只读变过的文件。
     """
+    tick = 0
     while True:
         try:
             time.sleep(interval)
         except Exception:  # noqa: BLE001 - 退出路径，不必细分
             return
+        tick += 1
         try:
             report = threads_module.repair()
             if report.get("fixed"):
                 threads_module.log_watch(report)
         except Exception:  # noqa: BLE001 - 巡检绝不能把界面拖垮
-            continue
+            pass
+        if tick % SWEEP_EVERY_N_TICKS == 0:
+            try:
+                sweep = history_module.sweep_all(
+                    budget_seconds=WATCHDOG_SWEEP_BUDGET_SECONDS)
+                if sweep.get("cleaned"):
+                    _log_sweep(sweep)
+            except Exception:  # noqa: BLE001 - 同上
+                pass
 
 
 def _start_watchdog(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
@@ -601,6 +642,12 @@ def run(port: int = 0, open_browser: bool = True, token: Optional[str] = None) -
     except Exception:  # noqa: BLE001
         pass
     _start_watchdog()
+    # 开界面顺手把存量坏条目清一遍：孤儿工具结果不挑新旧，散落在任意老会话
+    # 文件里，用户点开哪个就炸哪个。后台跑，不挡界面。
+    try:
+        engine.schedule_history_sweep()
+    except Exception:  # noqa: BLE001
+        pass
     print("图形界面已启动：%s" % url)
     print("（只监听本机，关闭此终端窗口即停止）")
     if open_browser:

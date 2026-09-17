@@ -247,7 +247,7 @@ codex-switcher add --name X --base-url https://api.example.com/v1 \
 
 ```
 Failed to deserialize the JSON body into the target type:
-input: missing field `call_id` at line 1 column 614675
+input: missing field `call_id` at line 1 column 697172
 ```
 
 ### 这不是平台坏了，是会话历史里有一条坏记录
@@ -257,44 +257,77 @@ Codex 会把整段会话历史**原样回放**到下一次请求里。历史里�
 
 | 条目 | 为什么会被拒绝 |
 | --- | --- |
-| `function_call_output` 缺 `call_id` | 官方文档把它列为迁移常见错误：<br>“Sending a function result without the matching `call_id`”。<br>服务端只能 400。实测机器上 1089 条里有 15 条是这种孤儿记录，<br>来源是 Codex App 自带的工具（`codex_app` 命名空间）——只写了输出没写调用。 |
+| `function_call_output` 缺 `call_id` | 见下方「真正的病根」。这是**唯一**能凭空产生的一类。 |
 | `reasoning` 带 `encrypted_content` | OpenAI 专有的加密推理状态，官方说明它的用途是<br>“在无状态调用之间复用推理”。换到第三方平台后它没有任何意义。 |
 | `custom_tool_call` / `web_search_call` 等 | OpenAI 专有类型，第三方实现未必认识（工具只报告，不擅自删）。 |
 
-请求体越大越容易撞上（上面报错里的 `column 614675` 就是长对话）。
+请求体越大越容易撞上（报错里的 `column N` 就是长对话，几十万字符很正常）。
 
-### 官方有没有开关让它容忍？没有
+### 真正的病根：Codex 两套类型定义不对称
 
-- **OpenAI 官方**：把它当**客户端错误**，没有服务端开关。官方给的规避方式是
-  **服务端会话状态**（`previous_response_id` / `conversation` / `store`）——
-  客户端不用重放原始 items，自然也就不会把坏条目送出去。
-- **第三方平台官方**：同样没有“容忍畸形输入”的选项。而它们普遍**不支持**
-  `previous_response_id`，只能靠客户端重放历史，所以这条路走不通。
+Codex 里的会话条目有**两副面孔**，而 `call_id` 在两边的要求不一样：
 
-结论：这个只能在**本地把历史清干净**。
+| 定义 | 位置 | `call_id` |
+| --- | --- | --- |
+| `ResponseItem` | 写进会话文件（rollout）的那个 | `Option<String>` + `skip_serializing_if = "Option::is_none"` → **可以缺省** |
+| `ResponseInputItem` | 发给 API 的请求体里的那个 | `String` → **必填** |
+
+于是：**Codex App 自带的工具**（`codex_app` 命名空间，例如每日自动化用的
+`automation_update`）会写出一条只有 `id` / `name` / `namespace` / `output`、
+**没有 `call_id`** 的 `function_call_output`。这在本地文件里完全合法，能静静躺着；
+一旦这段历史被回放，`call_id` 因为 `skip_serializing_if` 被跳过序列化，服务端
+serde 反序列化时找不到必填字段，直接 400。
+
+```
+{"type":"function_call_output", "id":"fco_01a0a804-...", "name":"automation_update",
+ "namespace":"codex_app", "output":"Automation: ..."}
+```
+
+触发场景**不只是继续对话**：Codex 后台生成线程标题/描述的「结构化回合」也会
+把整段历史发出去，所以哪怕你只是点开那个旧对话，它也可能报一次。
+
+### 为什么以前的自动修复漏掉了它
+
+三道限制叠在一起，导致存量坏条目**从来没被任何一条路径清过**：
+
+1. `auto_clean` 只扫**最近 30 个**会话文件，`repair` 只扫**最近 10 个**；
+2. 所有清理路径都会跳过"最近 120 秒有改动"的文件；
+3. 会话文件的清洗是**搭在改绑上的**——任务没改绑，历史就不会被重写。
+
+实测（2026-09-17，本机）：**1347 个会话文件 / 33.9GB，其中 45 个文件里有
+72 条**这种孤儿记录，**全部**来自 `codex_app` 命名空间；最老的一条躺在 7 月底的
+小文件里 —— 而用户点开哪个就炸哪个。
 
 ### 怎么修
 
-**v1.6.3 起，绝大多数情况已经自动修好**：任务从一个平台改绑到另一个平台时
-（切换跟随 / `repair` / 深度修复），会话历史里的跨平台条目和孤儿输出会在
-**同一次改写里剥掉**——不存在「只改绑、不清洗」的路径。ChatGPT 的老任务
-（含每日定时任务）会在切换后的后台迁移中一并处理。
+**v1.6.6 起，改为"全量清扫 + 持续收敛"**：
 
-存量文件（机制上线前就已经搬过的）用命令手动清：
+- `history.sweep_all()` **不设窗口**，把所有会话文件过一遍；靠账本
+  （path → mtime+size）做增量，第一次全量之后每轮几乎零成本。
+- 切换平台、打开图形界面时各挂一次后台清扫；图形界面常驻后每 60 秒补扫一轮。
+  这样即使 `codex_app` 工具**继续**产生新的孤儿（定时任务每跑一次就可能多一条），
+  也会在下一轮被清掉。
+- "能不能动这个文件"改由 **lsof 实测**判断 Codex 是否真的攥着它的句柄，
+  比猜 mtime 准得多（Codex 会把会话文件句柄常驻，而那个对话可能几小时没动静）。
+
+手动跑一次、随时可查：
 
 ```bash
-codex-switcher history                     # 检查最近 30 个会话（只读）
-codex-switcher history --clean --dry-run   # 预演，看看会删什么
-codex-switcher history --clean --cross-provider  # 真的清（自动备份）
+codex-switcher history --sweep --dry-run   # 预演：看看会删什么
+codex-switcher history --sweep             # 全量清理（自动备份）
+codex-switcher history                     # 只看最近 30 个（只读）
+codex-switcher history --clean --cross-provider  # 顺带剥别家服务端工具条目
 ```
 
-清洗规则刻意保守：**只删“确定是坏的”和“确定对方用不上”的**，
-其余只报告不动。留在官方 OpenAI 时不会删推理条目（官方文档要求保留它们）。
+清洗规则刻意保守：**只删“确定是坏的”和“确定对方用不上”的**，其余只报告不动。
+孤儿输出是"任何平台都不认"的坏数据（官方也必填 `call_id`），所以默认就清；
+别家服务端工具条目只在显式 `--cross-provider` 或"任务真的搬家"时才剥。
+留在官方 OpenAI 时不会删推理条目（官方文档要求保留它们）。
 
 注意事项：
 
-- **正在写入的会话会被跳过**（最近 120 秒有改动）。那多半是你正开着的对话，
-  改写它可能把当前对话写坏。完全退出 Codex 后再跑一次即可。
+- **Codex 正开着的会话会被跳过**（用 lsof 判断句柄）。那多半是你正开着的对话，
+  改写它可能把当前对话写坏。关掉它，或在图形界面开着的时候等一轮自动补扫。
 - 改之前有备份，放在 `~/.codex/model-switcher/history-backups/`。
 - 这个报错只影响**受影响的那个旧对话**；新建任务不会带着这段历史，所以不受影响。
 
