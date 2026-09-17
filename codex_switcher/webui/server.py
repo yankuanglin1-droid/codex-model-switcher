@@ -22,9 +22,42 @@ from typing import Dict, Optional
 from .. import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
                 secrets, state as state_module, threads as threads_module, update as update_module,
                 usage)
+from .. import catalog as catalog_module
+from .. import contextguard as contextguard_module
 from ..discovery import DiscoveryError
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _guard_payload(current: Dict) -> Optional[Dict]:
+    """给界面的上下文体量体检结果。拿不齐信息就返回 None，界面自己会不显示。"""
+    try:
+        model = current.get("model")
+        if not model:
+            return None
+        catalog_path = None
+        provider = current.get("model_provider")
+        if provider:
+            candidate = catalog_module.catalog_path(provider)
+            if Path(candidate).exists():
+                catalog_path = str(candidate)
+        else:
+            root = paths.catalog_dir()
+            if root.exists():
+                for item in sorted(root.glob("*.json")):
+                    if contextguard_module.window_for_model(item, model):
+                        catalog_path = str(item)
+                        break
+        candidates = contextguard_module.latest_rollouts(1)
+        if not candidates:
+            return None
+        report = contextguard_module.assess(candidates[0], model, catalog_path=catalog_path)
+    except Exception:  # noqa: BLE001 - 体检失败不能拖垮界面
+        return None
+    # 会话路径是隐私，只留最后一段
+    report["thread"] = Path(report["path"]).name
+    report.pop("path", None)
+    return report
 
 
 def _state_payload(include_balance: bool = False) -> Dict:
@@ -52,6 +85,9 @@ def _state_payload(include_balance: bool = False) -> Dict:
     except Exception:  # noqa: BLE001 - 任务统计失败不能拖垮主界面
         thread_info = {"total": 0, "mismatch": 0, "items": []}
     return {
+        # 上下文窗口守卫：界面要能一眼看出「这个对话搬到当前模型上装不装得下」。
+        # 装不下又不说，用户看到的就是一直在压缩、什么都不干。
+        "guard": _guard_payload(current),
         "version": __version__,
         "project_url": PROJECT_URL,
         "update": update_module.read_cache(),

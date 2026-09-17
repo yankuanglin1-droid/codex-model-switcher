@@ -13,6 +13,10 @@ from typing import Dict, Iterable, List
 from . import paths
 from .registry import hint_for
 
+# Codex 拿 context_window 乘这个百分比，得到它真正认可的可用窗口。
+# 实测与它上报的 model_context_window 完全一致：131072 × 0.95 = 124518。
+DEFAULT_EFFECTIVE_PERCENT = 95
+
 EFFORT_LABELS = {
     "none": "Think-Off",
     "low": "Fast reasoning",
@@ -71,7 +75,7 @@ def build_model_entry(
         "input_modalities": modalities,
         "context_window": context,
         "max_context_window": context,
-        "effective_context_window_percent": 95,
+        "effective_context_window_percent": DEFAULT_EFFECTIVE_PERCENT,
     }
     return entry
 

@@ -20,6 +20,8 @@ from typing import Dict, List, Optional
 
 from . import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
                secrets, state as state_module, threads as threads_module, usage)
+from . import catalog as catalog_module
+from . import contextguard as contextguard_module
 from .discovery import DiscoveryError
 
 
@@ -338,6 +340,88 @@ def cmd_history(args) -> int:
     return 0
 
 
+def _catalog_for(model: str, provider: Optional[str] = None) -> Optional[str]:
+    """找到声明了某个模型的 catalog 文件。
+
+    第三方模型都挂在各自的平台目录下；一个模型可能只属于其中一个平台，
+    所以按平台找不到时要扫一遍，别轻易判"窗口未知"。
+    """
+    if provider:
+        candidate = catalog_module.catalog_path(provider)
+        if Path(candidate).exists() and contextguard_module.window_for_model(candidate, model):
+            return str(candidate)
+    root = paths.catalog_dir()
+    if not root.exists():
+        return None
+    for item in sorted(root.glob("*.json")):
+        if contextguard_module.window_for_model(item, model):
+            return str(item)
+    return None
+
+
+def _guard_target(model: Optional[str], catalog_path: Optional[str]):
+    """体检谁：目标模型 + 它的 catalog + 最近那个会话。三者缺一就返回 None。"""
+    status = engine.current_status()
+    model = model or status.get("model")
+    if not model:
+        return None
+    if not catalog_path:
+        catalog_path = _catalog_for(model, status.get("model_provider"))
+    candidates = contextguard_module.latest_rollouts(1)
+    if not candidates:
+        return None
+    return model, catalog_path, candidates[0]
+
+
+def guard_report(model: Optional[str] = None, catalog_path: Optional[str] = None,
+                 thread=None) -> Optional[Dict]:
+    """对最近那个会话做一次体量体检。拿不齐信息就返回 None（不猜）。"""
+    if thread is None:
+        resolved = _guard_target(model, catalog_path)
+        if resolved is None:
+            return None
+        model, catalog_path, thread = resolved
+    return contextguard_module.assess(thread, model, catalog_path=catalog_path)
+
+
+def describe_guard(report: Dict) -> List[str]:
+    """把体检结果翻成可以给用户的几行提示。"""
+    lines = [contextguard_module.describe(report)]
+    if report.get("action") == "fork":
+        lines.append("")
+        lines.append("这时候直接续接会触发自动压缩，而压缩产物本身就超过窗口，"
+                     "结果是压完还超、超限又压 —— 除了烧 token 什么也不会发生。")
+        lines.append("请新开一个任务，或先对这个会话用「分叉」再换模型。")
+    elif report.get("action") == "compact-first":
+        lines.append("")
+        lines.append("体量已经贴着窗口上限了。续接前先在对话里手动压缩一次，再继续。")
+    return lines
+
+
+def cmd_guard(args) -> int:
+    """会话体量体检：这个对话搬到目标模型上装得下吗。"""
+    status = engine.current_status()
+    thread = Path(args.thread) if getattr(args, "thread", None) else None
+    if thread is None:
+        resolved = _guard_target(getattr(args, "model", None), None)
+        if resolved is None:
+            fail("拿不到当前默认模型或会话文件。可以显式指定："
+                 "codex-switcher guard --model deepseek-flash --thread <会话文件路径>")
+        model, catalog_path, thread = resolved
+    else:
+        model = getattr(args, "model", None) or status.get("model")
+        if not model:
+            fail("请用 --model 指定目标模型，例如 --model deepseek-flash")
+        # 指定了会话文件也要按目标模型查窗口，否则只能给出"未知"
+        catalog_path = _catalog_for(model, getattr(args, "provider", None))
+
+    report = contextguard_module.assess(thread, model, catalog_path=catalog_path)
+    out("会话：%s" % report["path"])
+    for line in describe_guard(report):
+        out(line)
+    return 0
+
+
 def cmd_use(args) -> int:
     try:
         result = engine.switch_to(args.provider, args.model, dry_run=args.dry_run)
@@ -366,6 +450,22 @@ def cmd_use(args) -> int:
             out("⚠ 这个平台走本地协议桥，但桥还没在运行。先执行：codex-switcher bridge")
     out("注意：已经存在的旧任务仍绑定原来的平台，不会跟着切换；")
     out("     要在旧对话里继续，请对它使用「分叉」，或换个新任务。")
+
+    # 切到窗口更小的第三方模型时，旧会话可能根本装不下。
+    # 装不下又不说，用户就会看到「反复压缩」：压完还超、超限又压。
+    if result.get("provider") != engine.OFFICIAL_PROVIDER:
+        try:
+            report = guard_report(result.get("model"),
+                                  _catalog_for(result.get("model"), result.get("provider")))
+        except Exception:  # noqa: BLE001 - 体检失败不能影响切换本身
+            report = None
+        if report and report.get("action") in ("fork", "compact-first"):
+            out("")
+            out("⚠ 最近的那个对话在 %s 上装不下：" % result.get("model"))
+            for line in describe_guard(report):
+                out("  " + line.replace("\n", "\n  "))
+            out("")
+            out("  想随时复查：codex-switcher guard")
     return 0
 
 
@@ -892,6 +992,12 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--all", action="store_true",
                          help="检查全部会话（很大很慢，通常不需要）")
 
+    guard = sub.add_parser(
+        "guard", help="会话体量体检：这个对话搬到目标模型上会不会陷入反复压缩")
+    guard.add_argument("--model", help="目标模型（默认用当前的默认模型）")
+    guard.add_argument("--provider", help="目标平台（默认自动查找声明了这个模型的平台）")
+    guard.add_argument("--thread", help="指定会话文件路径（默认用最近那个）")
+
     quota = sub.add_parser("quota", help="记录套餐额度，用于显示本机用量百分比")
     quota.add_argument("provider")
     quota.add_argument("--tokens", type=int, help="套餐总量，例如 500000000")
@@ -944,6 +1050,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "tasks": cmd_tasks,
         "repair": cmd_repair,
         "history": cmd_history,
+        "guard": cmd_guard,
         "quota": cmd_quota,
         "update": cmd_update,
         "remove": cmd_remove,

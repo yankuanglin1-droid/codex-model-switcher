@@ -131,6 +131,10 @@ This tool does all of it in two commands. The pitfalls it handles:
 - Update check: `codex-switcher update`
 - Built-in Responses ⇄ Chat Completions bridge
 - `codex-switcher doctor` environment check
+- **Context-window guard** — checks whether your current thread actually fits the target
+  model before you switch, and writes a compaction trigger with headroom into the config,
+  so a smaller-window third-party model cannot fall into a compress-forever loop
+  (`codex-switcher guard`)
 - Standard library only, no pip installs
 
 ## How it works
@@ -146,7 +150,7 @@ Providers that only speak Chat Completions are routed through a local bridge on
 
 ```bash
 python3 tools/preflight.py              # full pre-release self-check (runs everything below)
-python3 -m unittest discover -s tests   # 71 tests, green on Python 3.9 / 3.12 / 3.13 / 3.14
+python3 -m unittest discover -s tests   # 95 tests, green on Python 3.9 / 3.12 / 3.13 / 3.14
 python3 tools/verify_providers.py
 python3 tools/verify_codex_catalog.py
 python3 tools/verify_bridge.py
@@ -154,6 +158,26 @@ python3 tools/verify_bridge.py
 
 The last three drive a real Codex process. The full guide, troubleshooting and the
 Windows notes live in the [Chinese README](README.md).
+
+## Why compaction can loop forever
+
+Third-party models declare far smaller context windows than the official ones.
+`deepseek-flash` declares 131072, and Codex turns that into an effective window of
+`131072 × 0.95 = 124518`. Switch a thread that has already grown to ~360k tokens onto it
+and every request looks over budget, so Codex compacts. But a single compaction record is
+~1MB on its own (its `guardian_history` alone is 900KB), which is larger than the window —
+so the next request is over budget again. Measured on a real thread: **199 compactions in
+17 minutes**, roughly one every 15–20 seconds, with no progress at all.
+
+The guard measures your thread against the target model's effective window and tells you
+what to do; it also sets `model_auto_compact_token_limit` to 60% of the window so that
+compaction has somewhere to land.
+
+```bash
+codex-switcher guard --model deepseek-flash
+```
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for the full write-up.
 
 ## More
 

@@ -53,6 +53,7 @@ async function loadState(withBalance = false) {
   STATE = await api('state' + (withBalance ? '?balance=1' : ''));
   renderHeader();
   renderThreadBanner();
+  renderGuardBanner();
   renderProviders();
   if (SELECTED) {
     const still = STATE.providers.find((p) => p.id === SELECTED);
@@ -81,6 +82,26 @@ function renderThreadBanner() {
   banner.hidden = false;
   $('thread-banner-title').textContent = t('banner.detail', { n: info.mismatch });
   $('thread-banner-detail').textContent = t('banner.note');
+}
+
+function renderGuardBanner() {
+  const banner = $('guard-banner');
+  if (!banner) return;
+  const g = STATE.guard;
+  // 只在真有风险时出现：装得下就别打扰用户
+  if (!g || !g.ratio || (g.action !== 'fork' && g.action !== 'compact-first')) {
+    banner.hidden = true;
+    return;
+  }
+  banner.hidden = false;
+  const num = (n) => (n || 0).toLocaleString('en-US');
+  const advice = g.action === 'fork' ? t('guard.action_fork') : t('guard.action_compact');
+  const note = g.action === 'fork' ? t('guard.note_fork') : t('guard.note_compact');
+  $('guard-banner-title').textContent = t('guard.title');
+  $('guard-banner-detail').textContent = t('guard.detail', {
+    tokens: num(g.tokens), window: num(g.window),
+    percent: Math.round(g.ratio * 100), advice: advice,
+  }) + ' ' + note;
 }
 
 async function repairThreads(dryRun) {
@@ -588,6 +609,7 @@ window.addEventListener('langchange', () => {
   renderFooterHelp();
   renderHeader();
   renderThreadBanner();
+  renderGuardBanner();
   renderProviders();
   if (SELECTED) {
     const item = STATE.providers.find((p) => p.id === SELECTED);

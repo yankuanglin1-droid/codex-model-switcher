@@ -91,6 +91,10 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 - **历史兼容性清洗**：旧对话里带有只有官方 OpenAI 认识的条目时（典型报错
   `missing field call_id`），`codex-switcher history --clean` 就地清掉并先备份（详见
   [docs/troubleshooting.md](docs/troubleshooting.md)）。
+- **上下文窗口守卫**：切到窗口更小的第三方模型前先做体量体检，
+  `codex-switcher guard` 随时复查；装不下就明确要求分叉，并在配置里写入留有余量的
+  压缩触发点，从根源上避免「反复压缩」（详见
+  [docs/troubleshooting.md](docs/troubleshooting.md)）。
 - **协议桥**：内置 Responses ⇄ Chat Completions 转换，让只支持 Chat 的平台也能用。
 - **环境自检**：`codex-switcher doctor` 一次检查 Python、钥匙串、配置、模型、协议桥。
 - **零依赖**：纯标准库，不需要 pip 安装任何东西。
@@ -487,6 +491,26 @@ Codex 通过桥成功拿到了回答。
 
 **Q：报 `model is not supported when using Codex with a ChatGPT account`？**
 你在一个绑定 OpenAI 的旧任务里选了第三方模型。分叉该任务或新建任务。
+
+**Q：切过去之后一直在「压缩上下文」，什么都不干？**
+这是**会话体量超过目标模型可用窗口**导致的死循环，不是模型坏了。
+
+第三方模型声明的窗口往往比官方小得多。比如 `deepseek-flash` 声明 131072，
+Codex 按 95% 算出可用窗口 **124518**。一个在官方模型上已经跑到 36 万 token 的会话
+切过去之后，每一轮都判定「超出预算」→ 压缩 → 但压缩产物本身就超过窗口
+（`guardian_history` 单独就有 900KB）→ 下一轮又超限 → 再压缩。
+实测一个会话在 17 分钟内被压了 **199 次**，平均每 15~20 秒一次。
+
+```
+$ codex-switcher guard --model deepseek-flash
+会话体量：364,713 tokens
+目标模型可用窗口：124,518 tokens
+占用：293%
+建议：装不下，必须分叉或新开任务，不要原地续接
+```
+
+处理办法：新开一个任务，或对这个会话「分叉」后再换模型。
+`codex-switcher guard` 会在你切换时自动体检，装不下会当场告诉你。
 
 **Q：MiniMax / GLM 为什么不显示剩余额度？**
 官方没有开放额度接口。工具不猜数字，只给官网入口。

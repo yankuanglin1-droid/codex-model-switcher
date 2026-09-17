@@ -31,6 +31,13 @@ const I18N = {
     'banner.preview': '查看明细',
     'banner.repair': '一键修复',
 
+    'guard.title': '当前对话装不下目标模型的上下文窗口',
+    'guard.detail': '{tokens} tokens / 可用 {window} tokens（{percent}%）：{advice}',
+    'guard.note_fork': '直接续接会陷入反复压缩 —— 压完还超、超限又压。请新开任务，或先分叉再换模型。',
+    'guard.note_compact': '体量已经贴着窗口上限，续接前先手动压缩一次。',
+    'guard.action_fork': '必须分叉或新开任务',
+    'guard.action_compact': '续接前先压缩一次',
+
     'sidebar.title': '已接入平台',
     'sidebar.empty': '还没有接入任何平台。点右上角「手动添加平台」，或从预设里选一个开始。',
     'detail.placeholder': '从左边选一个平台，查看它的模型与额度。',
@@ -164,6 +171,13 @@ const I18N = {
     'banner.note': 'Switching models inside those tasks fails with “model is not supported”. Repair fixes it in place, and backs up before touching anything.',
     'banner.preview': 'Show details',
     'banner.repair': 'Repair now',
+
+    'guard.title': 'This thread does not fit the target model context window',
+    'guard.detail': '{tokens} tokens / {window} usable ({percent}%): {advice}',
+    'guard.note_fork': 'Continuing it will loop on compaction forever. Start a new task, or fork this one before switching.',
+    'guard.note_compact': 'Close to the limit — compact once before you continue.',
+    'guard.action_fork': 'fork or start a new task',
+    'guard.action_compact': 'compact first',
 
     'sidebar.title': 'Connected providers',
     'sidebar.empty': 'No providers yet. Use “Add a provider” in the top right, or start from a preset.',

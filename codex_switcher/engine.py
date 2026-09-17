@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 from . import balance as balance_module
 from . import bridge as bridge_module
 from . import catalog as catalog_module
+from . import contextguard as contextguard_module
 from . import configfile, paths, registry, secrets, state as state_module
 from . import platform_compat
 from . import threads as threads_module
@@ -118,6 +119,24 @@ def provider_settings(record: Dict, model_id: str, provider_id: Optional[str] = 
     context = override.get("context_window")
     if context:
         settings["model_context_window"] = int(context)
+
+    # 反复压缩的根治：给 Codex 一个明确的、留有余量的压缩触发点。
+    #
+    # 不写这个键的时候，Codex 按「可用窗口的接近 100%」来判断要不要压。
+    # 而压缩本身会往 rollout 里写一条约 1MB 的记录（其中 guardian_history
+    # 单独 900KB），压缩产物本身就超过小窗口模型的可用窗口，
+    # 于是「压完还是超、超限又压」。实测一个会话 17 分钟连压 199 次。
+    #
+    # 在窗口的 60% 处触发，压完的历史有地方落脚，压缩才是收敛的。
+    # 详见 codex_switcher/contextguard.py 的模块说明。
+    info = contextguard_module.model_window(catalog_module.catalog_path(identifier), model_id)
+    effective = info["effective"] if info else None
+    if not effective and context:
+        effective = contextguard_module.effective_window(
+            {"context_window": context,
+             "effective_context_window_percent": catalog.DEFAULT_EFFECTIVE_PERCENT})
+    if effective:
+        settings["model_auto_compact_token_limit"] = contextguard_module.auto_compact_limit(effective)
     return settings
 
 

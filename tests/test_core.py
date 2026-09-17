@@ -1159,6 +1159,175 @@ class HistoryTests(TempCodexHome):
                 json.loads(line)      # 解不动就抛
 
 
+class ContextGuardTests(TempCodexHome):
+    """上下文窗口守卫。
+
+    这是「切到第三方模型后反复压缩」的根治措施，所以每条阈值都拿
+    真实事故里的数字钉住：会话 01a0a8cd 在 17 分钟内被压了 199 次，
+    当时是 364,713 tokens 硬塞进 124,518 的可用窗口。
+    """
+
+    # 真实事故数字
+    REAL_TOKENS = 364713
+    REAL_WINDOW = 124518          # 131072 × 0.95，与 Codex 上报的一致
+    REAL_LIMIT = 74710            # 124518 × 0.6
+
+    def _write_catalog(self, slug="deepseek-flash", context=131072, percent=95,
+                       name="deepseek.json"):
+        from codex_switcher import paths
+        target = paths.catalog_dir() / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"models": [
+            {"slug": slug, "context_window": context,
+             "effective_context_window_percent": percent}]}), encoding="utf-8")
+        return target
+
+    def _write_rollout(self, total_tokens, name="rollout-guard.jsonl"):
+        from codex_switcher import paths
+        day = paths.sessions_dir() / "2026" / "09" / "17"
+        day.mkdir(parents=True, exist_ok=True)
+        path = day / name
+        line = {"timestamp": "2026-09-17T02:55:18.161Z", "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "model_context_window": self.REAL_WINDOW,
+                    "last_token_usage": {"input_tokens": total_tokens - 200,
+                                         "output_tokens": 200,
+                                         "total_tokens": total_tokens}}}}
+        path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+        return path
+
+    def test_effective_window_matches_what_codex_reports(self):
+        """131072 × 0.95 必须等于 Codex 上报的 124518，差一个数就说明算法错了。"""
+        from codex_switcher import contextguard
+        self.assertEqual(
+            contextguard.effective_window(
+                {"context_window": 131072, "effective_context_window_percent": 95}),
+            self.REAL_WINDOW)
+
+    def test_effective_window_falls_back_to_95_percent(self):
+        from codex_switcher import contextguard
+        self.assertEqual(
+            contextguard.effective_window({"context_window": 100000}),
+            95000)
+
+    def test_zero_or_garbage_window_is_not_a_window(self):
+        from codex_switcher import contextguard
+        for bad in ({"context_window": 0}, {"context_window": "abc"}, {}):
+            self.assertEqual(contextguard.effective_window(bad), 0)
+
+    def test_real_incident_is_judged_fork(self):
+        """出事的那个会话必须被判成「装不下」，这是整个模块存在的理由。"""
+        from codex_switcher import contextguard
+        catalog = self._write_catalog()
+        path = self._write_rollout(self.REAL_TOKENS)
+        report = contextguard.assess(path, "deepseek-flash", catalog_path=catalog)
+        self.assertEqual(report["tokens"], self.REAL_TOKENS)
+        self.assertEqual(report["window"], self.REAL_WINDOW)
+        self.assertEqual(report["action"], "fork")
+        self.assertFalse(report["fits"])
+        self.assertAlmostEqual(report["ratio"], 2.93, places=2)
+
+    def test_small_thread_is_left_alone(self):
+        from codex_switcher import contextguard
+        catalog = self._write_catalog()
+        path = self._write_rollout(30000)
+        report = contextguard.assess(path, "deepseek-flash", catalog_path=catalog)
+        self.assertEqual(report["action"], "continue")
+        self.assertTrue(report["fits"])
+
+    def test_tight_thread_asks_for_a_compact_first(self):
+        from codex_switcher import contextguard
+        catalog = self._write_catalog()
+        path = self._write_rollout(100000)          # 124518 的 80%
+        report = contextguard.assess(path, "deepseek-flash", catalog_path=catalog)
+        self.assertEqual(report["action"], "compact-first")
+
+    def test_auto_compact_limit_leaves_room_for_the_result(self):
+        """压缩触发点必须明显小于窗口，否则压完还是超，又得再压一次。"""
+        from codex_switcher import contextguard
+        self.assertEqual(contextguard.auto_compact_limit(self.REAL_WINDOW), self.REAL_LIMIT)
+        self.assertLess(self.REAL_LIMIT, self.REAL_WINDOW)
+
+    def test_auto_compact_limit_never_goes_below_the_floor(self):
+        from codex_switcher import contextguard
+        self.assertGreaterEqual(contextguard.auto_compact_limit(100),
+                                contextguard.MIN_AUTO_COMPACT_LIMIT)
+
+    def test_unknown_window_never_claims_everything_is_fine(self):
+        """拿不到窗口就老实说不知道，不许猜「没问题」。"""
+        from codex_switcher import contextguard
+        path = self._write_rollout(self.REAL_TOKENS)
+        report = contextguard.assess(path, "some-unknown-model", catalog_path=None)
+        self.assertEqual(report["action"], "unknown")
+        self.assertIsNone(report["fits"])
+        self.assertIsNone(report["auto_compact_limit"])
+
+    def test_estimate_prefers_codex_own_token_count(self):
+        from codex_switcher import contextguard
+        path = self._write_rollout(123456)
+        tokens, source = contextguard.estimate_thread_tokens(path)
+        self.assertEqual(tokens, 123456)
+        self.assertEqual(source, "token_count")
+
+    def test_missing_file_reports_zero_not_a_crash(self):
+        from codex_switcher import contextguard
+        tokens, source = contextguard.estimate_thread_tokens(Path("/nope/nope.jsonl"))
+        self.assertEqual(tokens, 0)
+        self.assertEqual(source, "missing")
+
+    def test_describe_says_something_a_human_can_act_on(self):
+        from codex_switcher import contextguard
+        catalog = self._write_catalog()
+        path = self._write_rollout(self.REAL_TOKENS)
+        text = contextguard.describe(
+            contextguard.assess(path, "deepseek-flash", catalog_path=catalog))
+        self.assertIn("124,518", text)
+        self.assertIn("分叉", text)
+
+    def test_provider_settings_writes_the_compact_limit(self):
+        """切到第三方模型时，压缩触发点必须一起写进 config.toml。"""
+        from codex_switcher import engine, paths
+        self._write_catalog(name="deepseek.json")
+        settings = engine.provider_settings(
+            {"id": "deepseek", "label": "DeepSeek"}, "deepseek-flash", "deepseek")
+        self.assertEqual(settings["model_auto_compact_token_limit"], self.REAL_LIMIT)
+        # 官方模型不该被塞第三方那套东西
+        official = engine.official_settings("gpt-5-codex")
+        self.assertNotIn("model_auto_compact_token_limit", official)
+
+    def test_compact_limit_is_a_key_codex_actually_accepts(self):
+        """写进 config.toml 的键必须被认，否则 rewrite 会直接拒绝。"""
+        from codex_switcher import configfile
+        self.assertIn("model_auto_compact_token_limit", configfile.MANAGED_SET)
+
+    def test_ui_payload_never_leaks_the_full_session_path(self):
+        """界面要显示体检结果，但不能把完整会话路径送进浏览器。"""
+        from codex_switcher.webui import server
+        self._write_catalog()
+        self._write_rollout(self.REAL_TOKENS)
+        payload = server._guard_payload({"model": "deepseek-flash",
+                                         "model_provider": "deepseek"})
+        self.assertIsNotNone(payload)
+        self.assertNotIn("path", payload)
+        self.assertTrue(payload["thread"].startswith("rollout-"))
+        self.assertEqual(payload["action"], "fork")
+
+    def test_ui_payload_stays_quiet_when_it_knows_nothing(self):
+        from codex_switcher.webui import server
+        self.assertIsNone(server._guard_payload({}))
+
+    def test_banner_strings_exist_in_both_languages(self):
+        """中英文各一份，少一份英文界面就会显示原始 key。
+
+        这类漂移已经出过一次（i18n.js 漏加 key 导致整页 JS 报错），钉住它。
+        """
+        source = Path(__file__).resolve().parents[1] / "codex_switcher" / "webui" / "static" / "i18n.js"
+        text = source.read_text(encoding="utf-8")
+        for key in ("guard.title", "guard.detail", "guard.note_fork",
+                    "guard.note_compact", "guard.action_fork", "guard.action_compact"):
+            self.assertEqual(text.count("'%s'" % key), 2, "key 数量不对：%s" % key)
+
+
 class I18nTests(unittest.TestCase):
     """界面双语文案必须完整。
 
