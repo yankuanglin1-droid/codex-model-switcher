@@ -1055,6 +1055,110 @@ class AppEnsureBridgeTests(unittest.TestCase):
             engine.provider_overview = original
 
 
+class HistoryTests(TempCodexHome):
+    """会话历史清洗：只删确定坏的，改前备份，正在写的文件不碰。
+
+    这个功能会改用户的会话文件，所以每条边界都要钉住。
+    """
+
+    def _write_rollout(self, lines, name="rollout-test.jsonl"):
+        from codex_switcher import paths
+        day = paths.sessions_dir() / "2026" / "09" / "16"
+        day.mkdir(parents=True, exist_ok=True)
+        path = day / name
+        path.write_text("\n".join(json.dumps(l) for l in lines) + "\n", encoding="utf-8")
+        return path
+
+    def _sample(self):
+        return [
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                  "content": [{"type": "input_text", "text": "hi"}]}},
+            # 坏：工具结果没有 call_id —— 服务端会直接 400
+            {"type": "response_item", "payload": {"type": "function_call_output",
+                                                  "id": "fco_1", "output": "done"}},
+            # 好：有 call_id
+            {"type": "response_item", "payload": {"type": "function_call_output",
+                                                  "call_id": "call_1", "output": "ok"}},
+            # OpenAI 专有推理
+            {"type": "response_item", "payload": {"type": "reasoning",
+                                                  "encrypted_content": "xxx", "summary": []}},
+            {"type": "response_item", "payload": {"type": "function_call",
+                                                  "call_id": "call_1", "name": "shell"}},
+        ]
+
+    @staticmethod
+    def _backdate(path, seconds=3600):
+        """把修改时间往前拨，模拟"这个对话早就静下来了"。
+
+        不拨的话会命中"最近 120 秒还在写就别碰"的护栏，清理逻辑根本不会执行。
+        """
+        import os as _os
+        import time as _time
+        old = _time.time() - seconds
+        _os.utime(path, (old, old))
+        return path
+
+    def test_inspect_finds_only_real_problems(self):
+        from codex_switcher import history
+        info = history.inspect(self._write_rollout(self._sample()))
+        self.assertEqual(info["orphan_outputs"], 1)
+        self.assertEqual(info["openai_only"], 1)
+        self.assertTrue(history.is_dirty(info))
+
+    def test_clean_removes_problems_and_keeps_the_rest(self):
+        from codex_switcher import history
+        path = self._backdate(self._write_rollout(self._sample()))
+        report = history.clean([path], moving_off_openai=True)
+        self.assertEqual(report["removed"]["orphan_outputs"], 1)
+        self.assertEqual(report["removed"]["openai_only"], 1)
+        left = [json.loads(l) for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
+        kinds = [l["payload"]["type"] for l in left]
+        self.assertIn("message", kinds)                  # 正常对话不能动
+        self.assertIn("function_call", kinds)            # 配对的调用不能动
+        self.assertEqual(kinds.count("function_call_output"), 1)   # 只留下带 call_id 的那条
+        self.assertNotIn("reasoning", kinds)
+        self.assertTrue(Path(report["backup_dir"]).exists(), "必须留备份")
+
+    def test_moving_off_openai_false_keeps_reasoning(self):
+        """留在官方 OpenAI 时不能删推理条目 —— 官方文档说这些是要保留的。"""
+        from codex_switcher import history
+        path = self._backdate(self._write_rollout(self._sample()))
+        report = history.clean([path], moving_off_openai=False)
+        self.assertEqual(report["removed"]["openai_only"], 0)
+        self.assertEqual(report["removed"]["orphan_outputs"], 1)
+        kinds = [json.loads(l)["payload"]["type"]
+                 for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
+        self.assertIn("reasoning", kinds)
+
+    def test_dry_run_changes_nothing(self):
+        from codex_switcher import history
+        path = self._backdate(self._write_rollout(self._sample()))
+        before = path.read_text(encoding="utf-8")
+        report = history.clean([path], moving_off_openai=True, dry_run=True)
+        self.assertEqual(report["changed"], 1)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_recently_written_file_is_skipped(self):
+        """正在被写入的会话不能改 —— 那多半是用户当前开着的对话。"""
+        import os as _os
+        import time as _time
+        from codex_switcher import history
+        path = self._write_rollout(self._sample())
+        _os.utime(path, (_time.time(), _time.time()))     # 刚写过
+        report = history.clean([path], moving_off_openai=True)
+        self.assertEqual(report["changed"], 0)
+        self.assertEqual(len(report["skipped_active"]), 1)
+        self.assertEqual(history.inspect(path)["orphan_outputs"], 1)   # 原样没动
+
+    def test_clean_result_is_still_valid_json_lines(self):
+        from codex_switcher import history
+        path = self._backdate(self._write_rollout(self._sample()))
+        history.clean([path], moving_off_openai=True)
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            if line.strip():
+                json.loads(line)      # 解不动就抛
+
+
 class I18nTests(unittest.TestCase):
     """界面双语文案必须完整。
 

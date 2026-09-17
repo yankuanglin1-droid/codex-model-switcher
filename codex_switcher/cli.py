@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import (PROJECT_URL, __version__, balance as balance_module, engine, paths, registry,
@@ -268,6 +269,75 @@ def cmd_repair(args) -> int:
     return 0
 
 
+def cmd_history(args) -> int:
+    """检查/清洗会话历史里会让第三方平台拒绝请求的条目。"""
+    from . import history as history_module
+
+    targets: List[Path] = []
+    if args.thread:
+        try:
+            items = threads_module.list_threads()
+        except threads_module.ThreadError as exc:
+            fail("读不到任务列表：%s" % exc)
+        matched = [i for i in items if str(i["id"]).startswith(args.thread)]
+        if not matched:
+            fail("找不到任务：%s" % args.thread)
+        for item in matched:
+            if item.get("rollout_path"):
+                targets.append(Path(item["rollout_path"]))
+    else:
+        targets = history_module.recent_rollouts(0 if args.all else args.scan)
+
+    if not args.clean:
+        report = {"scanned": 0, "dirty": [], "totals": {"orphan_outputs": 0, "openai_only": 0}}
+        for path in targets:
+            report["scanned"] += 1
+            info = history_module.inspect(path)
+            if history_module.is_dirty(info):
+                report["dirty"].append(info)
+                report["totals"]["orphan_outputs"] += info["orphan_outputs"]
+                report["totals"]["openai_only"] += info["openai_only"]
+        out("检查了最近 %d 个会话文件" % report["scanned"])
+        if not report["dirty"]:
+            out("没有发现问题条目 ✅")
+            return 0
+        out("")
+        out("发现 %d 个会话含有会让平台拒绝请求的条目：" % len(report["dirty"]))
+        out("  · 缺 call_id 的工具结果：%d 条（会直接 400：missing field `call_id`）"
+            % report["totals"]["orphan_outputs"])
+        out("  · OpenAI 专有推理条目：%d 条（换平台后无意义，第三方不认）"
+            % report["totals"]["openai_only"])
+        for info in report["dirty"][:5]:
+            out("    %s" % Path(info["path"]).name)
+        if len(report["dirty"]) > 5:
+            out("    … 还有 %d 个" % (len(report["dirty"]) - 5))
+        out("")
+        out("清理：codex-switcher history --clean        （会先备份）")
+        out("预演：codex-switcher history --clean --dry-run")
+        return 0
+
+    official = engine.current_status().get("model_provider") == engine.OFFICIAL_PROVIDER
+    report = history_module.clean(targets, moving_off_openai=not official,
+                                  dry_run=args.dry_run)
+    if args.dry_run:
+        out("预演：会清理 %d 个会话文件" % report["changed"])
+    else:
+        out("已清理 %d 个会话文件" % report["changed"])
+        if report["removed"]["orphan_outputs"] or report["removed"]["openai_only"]:
+            out("  删掉缺 call_id 的工具结果：%d 条" % report["removed"]["orphan_outputs"])
+            out("  删掉 OpenAI 专有推理条目：%d 条" % report["removed"]["openai_only"])
+        if report.get("backup_dir"):
+            out("  备份：%s" % report["backup_dir"])
+    if not report["changed"]:
+        out("没有需要清理的内容。")
+    if report.get("skipped_active"):
+        out("")
+        out("跳过了 %d 个最近还在写入的会话（多半是你正开着的对话）。"
+            % len(report["skipped_active"]))
+        out("完全退出 Codex 之后再跑一次这个命令即可处理它们。")
+    return 0
+
+
 def cmd_use(args) -> int:
     try:
         result = engine.switch_to(args.provider, args.model, dry_run=args.dry_run)
@@ -282,6 +352,11 @@ def cmd_use(args) -> int:
     out("配置备份：%s" % result["backup"])
     out("")
     out("接下来：完全退出（⌘Q）并重新打开 Codex，然后新建任务。")
+    if result["provider"] != engine.OFFICIAL_PROVIDER:
+        # 旧对话的历史里可能带着只有官方 OpenAI 认识的条目，回放到第三方平台会 400。
+        # 这里不主动扫（扫盘要十几秒），只把出路写清楚。
+        out("提示：旧对话如果报 “missing field `call_id`”，说明它的历史里有平台不认的条目，"
+            "跑 codex-switcher history --clean 就地修好。")
     state = state_module.load()
     record = state_module.get_provider(state, args.provider)
     if record and engine.resolve_transport(record) == "bridge":
@@ -503,6 +578,19 @@ def cmd_doctor(args) -> int:
         else:
             problems.append("有平台依赖本地协议桥，但桥没有运行；请执行 codex-switcher bridge "
                             "或 codex-switcher bridge --install-agent")
+
+    if getattr(args, "history", False):
+        from . import history as history_module
+        scan = history_module.scan(limit=getattr(args, "scan", 30))
+        out("会话历史：扫了最近 %d 个文件" % scan["scanned"])
+        if scan["dirty"]:
+            out("  · 含缺 call_id 的工具结果：%d 条" % scan["totals"]["orphan_outputs"])
+            out("  · 含 OpenAI 专有推理条目：%d 条" % scan["totals"]["openai_only"])
+            problems.append(
+                "有 %d 个会话的历史会被第三方平台拒绝（报 missing field `call_id`）；"
+                "执行 codex-switcher history --clean 清理" % len(scan["dirty"]))
+        else:
+            out("  · 没有发现问题条目")
 
     out("")
     if problems:
@@ -794,6 +882,16 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--deep", action="store_true",
                         help="顺带清理会话文件里残留的旧服务商（较慢，约 30 秒）")
 
+    history = sub.add_parser(
+        "history", help="检查/清理会话历史里会让第三方平台拒绝请求的条目")
+    history.add_argument("--clean", action="store_true", help="真的清理（默认只检查）")
+    history.add_argument("--dry-run", action="store_true", help="配合 --clean：只预演")
+    history.add_argument("--thread", help="只处理一个任务（填任务 ID 前缀）")
+    history.add_argument("--scan", type=int, default=30,
+                         help="检查最近多少个会话文件（默认 30）")
+    history.add_argument("--all", action="store_true",
+                         help="检查全部会话（很大很慢，通常不需要）")
+
     quota = sub.add_parser("quota", help="记录套餐额度，用于显示本机用量百分比")
     quota.add_argument("provider")
     quota.add_argument("--tokens", type=int, help="套餐总量，例如 500000000")
@@ -807,7 +905,11 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("--keep-key", action="store_true")
 
     sub.add_parser("status", help="显示当前状态")
-    sub.add_parser("doctor", help="环境自检")
+    doctor = sub.add_parser("doctor", help="环境自检")
+    doctor.add_argument("--history", action="store_true",
+                        help="顺带检查会话历史里会被第三方平台拒绝的条目（较慢）")
+    doctor.add_argument("--scan", type=int, default=30,
+                        help="配合 --history：检查最近多少个会话文件（默认 30）")
 
     app = sub.add_parser("app", help="打开图形界面")
     app.add_argument("--port", type=int, default=0)
@@ -841,6 +943,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "stop": cmd_stop,
         "tasks": cmd_tasks,
         "repair": cmd_repair,
+        "history": cmd_history,
         "quota": cmd_quota,
         "update": cmd_update,
         "remove": cmd_remove,

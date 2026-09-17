@@ -203,6 +203,58 @@ codex-switcher add --name X --base-url https://api.example.com/v1 \
 
 ---
 
+## 报 `missing field call_id`（或第三方平台拒绝整个请求）
+
+```
+Failed to deserialize the JSON body into the target type:
+input: missing field `call_id` at line 1 column 614675
+```
+
+### 这不是平台坏了，是会话历史里有一条坏记录
+
+Codex 会把整段会话历史**原样回放**到下一次请求里。历史里如果有下面这类条目，
+服务端解析请求体时就会直接拒绝：
+
+| 条目 | 为什么会被拒绝 |
+| --- | --- |
+| `function_call_output` 缺 `call_id` | 官方文档把它列为迁移常见错误：<br>“Sending a function result without the matching `call_id`”。<br>服务端只能 400。实测机器上 1089 条里有 15 条是这种孤儿记录，<br>来源是 Codex App 自带的工具（`codex_app` 命名空间）——只写了输出没写调用。 |
+| `reasoning` 带 `encrypted_content` | OpenAI 专有的加密推理状态，官方说明它的用途是<br>“在无状态调用之间复用推理”。换到第三方平台后它没有任何意义。 |
+| `custom_tool_call` / `web_search_call` 等 | OpenAI 专有类型，第三方实现未必认识（工具只报告，不擅自删）。 |
+
+请求体越大越容易撞上（上面报错里的 `column 614675` 就是长对话）。
+
+### 官方有没有开关让它容忍？没有
+
+- **OpenAI 官方**：把它当**客户端错误**，没有服务端开关。官方给的规避方式是
+  **服务端会话状态**（`previous_response_id` / `conversation` / `store`）——
+  客户端不用重放原始 items，自然也就不会把坏条目送出去。
+- **第三方平台官方**：同样没有“容忍畸形输入”的选项。而它们普遍**不支持**
+  `previous_response_id`，只能靠客户端重放历史，所以这条路走不通。
+
+结论：这个只能在**本地把历史清干净**。
+
+### 怎么修
+
+```bash
+codex-switcher history                     # 检查最近 30 个会话（只读）
+codex-switcher history --clean --dry-run   # 预演，看看会删什么
+codex-switcher history --clean             # 真的清（自动备份）
+```
+
+清洗规则刻意保守：**只删“确定是坏的”和“确定对方用不上”的**，
+其余只报告不动。留在官方 OpenAI 时不会删推理条目（官方文档要求保留它们）。
+
+注意事项：
+
+- **正在写入的会话会被跳过**（最近 120 秒有改动）。那多半是你正开着的对话，
+  改写它可能把当前对话写坏。完全退出 Codex 后再跑一次即可。
+- 改之前有备份，放在 `~/.codex/model-switcher/history-backups/`。
+- 这个报错只影响**受影响的那个旧对话**；新建任务不会带着这段历史，所以不受影响。
+
+自检时可以一起看：`codex-switcher doctor --history`
+
+---
+
 ## Python 版本问题
 
 报 `当前 Python 没有 TOML 解析库`：

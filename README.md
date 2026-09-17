@@ -88,6 +88,9 @@ Codex 默认只能用 OpenAI 的模型。想用别的平台的模型，通常要
 - **界面中英双语**：顶栏一键切换 中文 / English，选择会记住；也能用 `?lang=en` 直接打开英文界面。
 - **切换不丢上下文**：自动修复「对话绑着旧平台、却选了新模型」的错配，
   旧对话可以直接用新模型接着聊（详见 [docs/app.md](docs/app.md)）。
+- **历史兼容性清洗**：旧对话里带有只有官方 OpenAI 认识的条目时（典型报错
+  `missing field call_id`），`codex-switcher history --clean` 就地清掉并先备份（详见
+  [docs/troubleshooting.md](docs/troubleshooting.md)）。
 - **协议桥**：内置 Responses ⇄ Chat Completions 转换，让只支持 Chat 的平台也能用。
 - **环境自检**：`codex-switcher doctor` 一次检查 Python、钥匙串、配置、模型、协议桥。
 - **零依赖**：纯标准库，不需要 pip 安装任何东西。
