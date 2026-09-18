@@ -58,7 +58,14 @@ errors. This tool turns the whole mess into two commands and encodes every lesso
 
 - **One-command setup** — 17 built-in presets, or paste any Base URL for a custom/relay provider.
 - **Every model selectable** — full catalog generated from the platform, newest first.
-- **One-click switch / restore** — CLI, interactive menu, or GUI; back to official OpenAI anytime.
+- **One-click switch / restore** — CLI, interactive menu, or GUI; back to official
+  OpenAI anytime. Switching shows a full-screen loading state (task migration takes
+  a while) so it never looks frozen. The desktop app is recognized by bundle id
+  `com.openai.codex`, so the one-click restart works whether Codex ships as
+  `Codex.app` or inside `ChatGPT.app`. Restoring official means exactly that: the
+  tool writes back `model_provider = "openai"` with the official model name and
+  removes third-party catalog references, letting Codex show your account's own
+  model list again — the official subscription has no picker, by design.
 - **Old tasks follow you — all of them** — recent tasks are re-bound to the new provider
   on switch (session files + both databases, backed up); the rest, **including daily
   scheduled (`exec`) automations**, migrate in batches on a background thread, so nothing
