@@ -174,7 +174,7 @@ Codex 只跟一个对话模型说话。工具不会假装这些能力存在 —�
 ## 开发与验证
 
 ```bash
-python3 -m unittest discover -s tests      # 168 项测试，无需联网
+python3 -m unittest discover -s tests      # 171 项测试，无需联网
 python3 tools/preflight.py                 # 发布前总自检
 python3 tools/verify_codex_catalog.py      # 真实 Codex 能否列出我们的模型
 python3 tools/verify_bridge.py             # 真实 Codex 走协议桥拿回答

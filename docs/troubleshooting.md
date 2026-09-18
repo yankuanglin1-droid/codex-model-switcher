@@ -386,6 +386,63 @@ codex-switcher history --sweep --cross-provider
 
 ---
 
+## Codex 取不到密钥：`provider auth command ... exited with status signal: 6 (SIGABRT)`
+
+```
+provider auth command `/Users/<你>/.codex/bin/codex-provider-keychain.py`
+exited with status signal: 6 (SIGABRT)
+dyld: Library not loaded: /System/Library/Frameworks/CoreFoundation.framework/...
+Referenced from: .../Python.framework/Versions/3.7/.../Python
+```
+
+**表现**：图形界面能正常打开、切换也显示成功，但 Codex 一发请求就说取不到密钥，
+所有第三方模型都用不了。一半正常一半坏，特别容易误判成"平台没配对"。
+
+### 原因：凭据助手被绑到了一个启动不了的 Python 上
+
+`~/.codex/bin/codex-provider-keychain.py` 是本工具生成的、Codex 每次请求都要
+执行的取密钥脚本。它以前的第一行是：
+
+```python
+#!/usr/bin/env python3
+```
+
+`env` 的意思是"按 PATH 去找 python3"。而 **Codex 拉起它时的 PATH 不由我们控制**。
+如果 PATH 里第一个 `python3` 是个很老的版本（常见于很早装过 python.org 安装包的
+机器，比如 3.7），它在新版 macOS 上连 `CoreFoundation` 都加载不了，
+进程直接 SIGABRT —— **连 Python 都没起来**，所以报错里是 dyld 的信息，
+看不到任何 Python 报错。
+
+对比：图形界面没事，是因为 `launch.sh` 启动时会**探测**解释器，坏的那个被跳过了。
+
+### 解法
+
+**临时（不用升级）** —— 重跑一次初始化，或直接改那一行：
+
+```bash
+codex-switcher init                    # 升级到 v1.6.9 之后，这一条就够
+```
+
+手改也行，把脚本第一行换成一个确实能用的解释器：
+
+```bash
+# 先确认哪个能用（能打印出版本号、且 ≥ 3.9）
+/usr/bin/python3 --version
+# 换成它
+sed -i '' '1s|.*|#!/usr/bin/python3|' ~/.codex/bin/codex-provider-keychain.py
+```
+
+**根治（v1.6.9 起）** —— 生成脚本时不再把解释器交给 PATH，而是当场**逐个真跑一遍**，
+把第一个能执行的、版本 ≥ 3.9 的解释器**绝对路径**写进 shebang。
+
+判断标准是"能不能真的执行"，不是"版本号看起来够不够"：那个 3.7 的版本号也读得到，
+但它根本启动不了，所以只看版本号是拦不住的。
+
+> 顺带一提：这就是为什么**推荐 Intel Mac 用完整版** —— 完整版自带 Python，
+> 不依赖机器上那个不知道还能不能用的 `python3`。
+
+---
+
 ## 一直在「压缩上下文」，任务却毫无进展
 
 ### 症状

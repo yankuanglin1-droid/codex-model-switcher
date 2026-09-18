@@ -441,6 +441,64 @@ class SecretsTests(unittest.TestCase):
         self.assertIn("…", masked)
         self.assertEqual(secrets.mask(None), "未配置")
 
+    def test_helper_shebang_points_at_a_real_absolute_interpreter(self):
+        """凭据助手不能再用 `#!/usr/bin/env python3`。
+
+        PATH 由 Codex 决定，不在我们控制之内。真机上 PATH 里第一个 python3
+        是个 python.org 装的 3.7，dyld 加载 CoreFoundation 直接 SIGABRT，
+        Codex 取不到密钥 —— 所有第三方模型全废，而图形界面却正常。
+        """
+        from codex_switcher import secrets
+        source = secrets.helper_source()
+        first = source.splitlines()[0]
+        self.assertTrue(first.startswith("#!"), first)
+        self.assertNotIn("/usr/bin/env", first,
+                         "又退回 env 查找了：PATH 不受我们控制")
+        path = first[2:].strip()
+        self.assertTrue(os.path.isabs(path), path)
+        self.assertTrue(os.path.isfile(path) and os.access(path, os.X_OK), path)
+
+    def test_helper_python_skips_an_interpreter_that_cannot_actually_run(self):
+        """判断标准是"能不能真的执行"，不是"版本号看起来够不够"。
+
+        那台机器上的 3.7 版本号也读得到，但它根本启动不了。所以这里造一个
+        退出码非 0 的假解释器，确认它会被跳过 —— 而不是被当成可用。
+        """
+        import stat
+        from codex_switcher import secrets
+        fake = Path(tempfile.mkdtemp()) / "broken-python"
+        fake.write_text("#!/bin/sh\nexit 1\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        original = secrets.sys.executable
+        secrets.sys.executable = str(fake)
+        try:
+            chosen = secrets.helper_python()
+        finally:
+            secrets.sys.executable = original
+        self.assertNotEqual(chosen, str(fake),
+                            "坏掉的解释器被选中了 —— 探测没有真的执行它")
+        # 退回去的结果要么是真能跑的绝对路径，要么是最保守的 env 兜底
+        if chosen != "/usr/bin/env python3":
+            self.assertTrue(os.path.isfile(chosen) and os.access(chosen, os.X_OK))
+
+    def test_helper_source_is_executable_end_to_end(self):
+        """真正跑一次：拿不存在的 provider，应当报"取不到密钥"而不是崩溃。
+
+        dyld 崩掉的话退出码会是 -6 / 134，这里必须落到正常的 1。
+        """
+        import subprocess
+        from codex_switcher import secrets
+        target = Path(tempfile.mkdtemp()) / "probe-helper.py"
+        target.write_text(secrets.helper_source())
+        target.chmod(0o700)
+        result = subprocess.run([str(target), "no-such-provider"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 1,
+                         "凭据助手崩了（stderr=%s）" % result.stderr[:200])
+        self.assertIn("credential unavailable", result.stderr)
+        self.assertEqual(result.stdout, "")
+
 
 class EngineTests(TempCodexHome):
     def test_slugify(self):

@@ -223,10 +223,54 @@ def mask(secret: Optional[str]) -> str:
     return secret[:6] + "…" + secret[-4:]
 
 
+def helper_python() -> str:
+    """凭据助手用哪个解释器：必须是**探测过、真跑通过**的绝对路径。
+
+    以前这里写死 `#!/usr/bin/env python3`，把解释器交给 PATH 去解析 ——
+    真机上出过事故：某台 Mac 上 PATH 里第一个 python3 是个 python.org 装的
+    3.7，太老，dyld 连 CoreFoundation 都加载不了，进程直接 SIGABRT
+    （连 Python 都没起来，报错里能看到 dyld cache not loaded）。
+    于是 Codex 取不到密钥，**所有第三方模型全用不了**；而图形界面却正常，
+    因为 launch.sh 启动时是探测过解释器的 —— 一半正常一半崩，最难排查。
+
+    所以这里改成写死一个当场验证过的解释器：
+      · 先试当前正在跑本工具的这个（它此刻刚刚跑通了我们的代码，必然可用）
+      · 再退到几个常见位置，逐个**真跑一次**，不通就换下一个
+      · 全都不行才退回 env python3（至少保持和以前一样的行为）
+    判断标准是"能不能真的执行"，不是"版本号看起来够不够" —— 上面那个 3.7
+    版本号也能读到，但它根本启动不了。
+    """
+    import subprocess
+
+    probe = (
+        "import sys;"
+        "raise SystemExit(0 if sys.version_info >= (3, 9) else 1)"
+    )
+    candidates = [
+        sys.executable,
+        "/usr/bin/python3",
+        "/usr/local/bin/python3",
+        "/opt/homebrew/bin/python3",
+    ]
+    for candidate in candidates:
+        if not candidate or not os.path.isabs(candidate):
+            continue
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "-c", probe], capture_output=True, timeout=15)
+        except (subprocess.SubprocessError, OSError):
+            continue
+        if result.returncode == 0:
+            return candidate
+    return "/usr/bin/env python3"
+
+
 # 这个脚本是 Codex 每次请求时执行的，必须自己找到本工具的运行时，
 # 所以把路径写死进去；三个平台共用同一份逻辑（macOS 钥匙串 /
 # Linux Secret Service / Windows DPAPI 由 secrets.py 自己判断）。
-HELPER_TEMPLATE = '''#!/usr/bin/env python3
+HELPER_TEMPLATE = '''#!{python}
 """Codex 凭据助手：只把密钥写到 stdout，其它信息一律走 stderr。
 
 由 codex（ChatGPT App）多平台模型切换 生成，删除后重新运行 init 即可恢复。
@@ -266,7 +310,8 @@ def runtime_root() -> Path:
 
 
 def helper_source() -> str:
-    return HELPER_TEMPLATE.format(runtime=str(runtime_root()))
+    return HELPER_TEMPLATE.format(python=helper_python(),
+                                  runtime=str(runtime_root()))
 
 
 def install_helper() -> Path:
