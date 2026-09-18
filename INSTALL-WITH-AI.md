@@ -67,6 +67,106 @@ commands**. It will ask for what it is missing, do the install, verify, and tell
 
 ---
 
+---
+
+## 只要图形界面 / Intel Mac / 不想碰命令行（复制这一段）
+
+适用于：**Intel Mac**、机器上没装 Python、只想双击打开就能用的场景。
+发行包里有两个版本，**Intel Mac 一律选「完整版」** —— 它自带 x86_64 的 Python，
+机器上什么都不用装；标准版依赖系统已有的 Python 3.9+。
+
+```text
+请帮我在这台 Mac 上装好并配置最新版「codex（ChatGPT App）多平台模型切换」
+（仓库：https://github.com/yankuanglin1-droid/codex-model-switcher）。
+
+按顺序做，不要跳步，每一步把实际输出贴给我。
+
+【第一步：看清这台机器】
+1. 先执行 uname -m 并贴出结果。
+   - 结果是 x86_64（Intel）→ 必须下载**完整版**（自带 Intel 架构的 Python）
+   - 结果是 arm64（Apple 芯片）→ 完整版、标准版都行；机器上已有 Python 3.9+
+     （python3 --version 确认）可以用标准版，体积小很多
+2. 顺便确认 macOS 版本（sw_vers），需要 11.0 以上。
+3. 确认 /Applications 或 ~/Applications 可写、当前用户有管理员权限。
+
+【第二步：下载并校验（不要跳过校验）】
+4. 下载（这是永久链接，永远指向最新版，不要自己拼版本号）：
+   完整版（约 52 MB，自带 Python，推荐 Intel Mac 用）：
+     https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest/download/Codex-Model-Switcher-macOS-latest-full.zip
+   标准版（约 1 MB，需要本机已有 Python 3.9+）：
+     https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest/download/Codex-Model-Switcher-macOS-latest.zip
+   下载不通就换办法（gh release download、或换网络环境），但**不要**改成从
+   第三方镜像拿，也**不要**改成 clone 仓库自己打包。
+5. 校验，三项都要做，把结果贴给我：
+   a. 解压后确认 App 主程序是通用二进制：
+        file "<解压目录>/codex（ChatGPT App）多平台模型切换.app/Contents/MacOS/CodexSwitcherApp"
+      期望看到 "universal binary with 2 architectures: [x86_64 ...] [arm64 ...]"
+   b. 如果下的是完整版，确认自带了**本机架构**的 Python：
+        file "<解压目录>/codex（ChatGPT App）多平台模型切换.app/Contents/Resources/runtime/python-$(uname -m)/bin/python3"
+      Intel 机上期望看到 "Mach-O 64-bit executable x86_64"。看不到就说明包不对，换完整版。
+   c. 确认版本：
+        grep __version__ "<解压目录>/codex（ChatGPT App）多平台模型切换.app/Contents/Resources/runtime/codex_switcher/__init__.py"
+   d. 确认签名没坏：
+        codesign --verify --deep "<解压目录>/codex（ChatGPT App）多平台模型切换.app"
+      没有输出就是通过了；报 "code object is not signed at all" 说明包坏了，重新下载。
+
+【第三步：安装】
+6. 把 .app 拖进「应用程序」（/Applications）。命令行等价做法：
+     ditto "<解压目录>/codex（ChatGPT App）多平台模型切换.app" "/Applications/codex（ChatGPT App）多平台模型切换.app"
+   如果机器上已经装过旧版，先备份再替换：
+     mv "/Applications/codex（ChatGPT App）多平台模型切换.app" ~/Desktop/switcher-old.app
+7. 双击打开。如果系统弹「无法打开，因为它来自身份不明的开发者」或「文件已损坏」，
+   **不要**删掉重来：去「系统设置 → 隐私与安全性」，往下滑到刚被拦的那条，点「仍要打开」。
+   这一步是 macOS 的隔离机制，不是包坏了。
+
+【第四步：问我要信息（缺一不可，不要替我猜）】
+8. 问我：
+   - 平台名称（例如 DeepSeek / MiniMax / 智谱 GLM / Kimi / OpenRouter / 我自己的中转站）
+   - Base URL（我不知道的话，你去该平台官方文档查准了再填，**绝对不要凭印象编**）
+   - API Key
+   - 只要某几个模型，还是自动拉全部（不指定就拉全部）
+   如果平台在内置预设里（codex-switcher presets 可以看），用预设；不在就自定义 Base URL。
+
+【第五步：写进去（密钥安全是硬要求）】
+9. 密钥一律走标准输入，或者由我自己在界面里粘贴：
+     printf '%s' "$KEY" | codex-switcher add --preset <预设ID> --key-stdin
+     printf '%s' "$KEY" | codex-switcher add --name "<平台名>" --base-url "<地址>" --key-stdin
+   图形界面里有输入框的，就让我自己贴，不要你在命令里代填。
+   绝对不要：把 Key 写进命令行参数（会进 shell 历史）、写进任何文件、
+   写进 config.toml、粘贴回对话、或者写进提交。
+10. 如果这台上只有图形界面、没有 codex-switcher 命令，就先装命令行：
+      git clone https://github.com/yankuanglin1-droid/codex-model-switcher.git
+      cd codex-model-switcher && bash install.sh
+    然后再回来做第 9 步。
+
+【第六步：切换并拿证据】
+11. 切过去：codex-switcher use <平台ID>（或在界面里点选）。
+12. 拿证据，四项都要贴给我，缺一项就说明还没成：
+      codex-switcher status      # 显示的平台/模型是我要的那套
+      codex-switcher models <平台ID>   # 能列出模型
+      codex-switcher doctor      # 没有报错
+      codex-switcher list        # 平台确实写进去了
+   如果你 doctor 说需要协议桥，执行 codex-switcher bridge --install-agent。
+13. **不要替我宣布成功**：最后一项要我重启 Codex 后自己确认模型列表里有目标模型。
+
+【第七步：告诉我四件事】
+14. 告诉我：
+   - 现在 Codex 用的是哪个平台、哪个模型
+   - 怎么切回官方 OpenAI（给出确切命令）
+   - 切换后必须**完全退出（⌘Q）再重开** Codex 才生效，只关窗口不算
+   - 如果某个旧对话报 "model is not supported when using Codex with a ChatGPT account"，
+     那是旧对话还绑着原来的服务商，不是坏了：执行 codex-switcher repair，或对它分叉
+15. 额外提醒我一句：升级后**要切一次平台（或 codex-switcher refresh）**，
+    模型目录才会重新生成 —— v1.6.8 修的 Kimi tool_search 报错就靠这一步落地。
+    只装新版不切平台的话，能力开关还是旧的。
+```
+
+> Intel Mac 上如果只想用界面、完全不碰终端：做完第一到第三步 + 第四步问到信息后，
+> 可以直接在界面里填 Key、选平台、切换，第五到第七步里带 `codex-switcher` 的命令
+> 可以跳过。但这样就拿不到 `doctor` 的自检证据，出问题不好定位。
+
+---
+
 ## English prompt (copy this one)
 
 ```text
