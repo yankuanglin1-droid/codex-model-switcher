@@ -209,6 +209,9 @@ const I18N = {
     'models.empty': '这个平台还没有模型。点「刷新模型」，或用「手动加模型」。',
     'models.no_match': '没有匹配「{query}」的模型。',
     'models.switch': '切换',
+    'switch.loading': '正在切换到 {label} · {model}…',
+    'switch.loading_detail': '切换包含旧任务迁移，可能需要十几秒，请勿关闭窗口',
+    'switch.done': '切换完成',
 
     'btn.balance': '查询额度',
     'btn.balancing': '查询中…',
@@ -475,6 +478,9 @@ const I18N = {
     'models.empty': 'No models yet. Use “Refresh models”, or “Add a model”.',
     'models.no_match': 'No model matches “{query}”.',
     'models.switch': 'Switch',
+    'switch.loading': 'Switching to {label} · {model}…',
+    'switch.loading_detail': 'Switching also migrates recent tasks; it can take a while. Keep this window open.',
+    'switch.done': 'Switched',
 
     'btn.balance': 'Check balance',
     'btn.balancing': 'Checking…',

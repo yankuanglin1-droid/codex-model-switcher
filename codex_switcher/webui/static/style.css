@@ -599,3 +599,38 @@ h1 {
   .form-grid { grid-template-columns: 1fr; }
   .detail-head h2 { font-size: 24px; }
 }
+
+/* ------------------------------------------------------- 切换 loading 遮罩 */
+
+.switch-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 20, 28, 0.45);
+  backdrop-filter: blur(2px);
+}
+.switch-loading[hidden] { display: none; }
+.switch-loading-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 26px 34px;
+  border-radius: 14px;
+  background: var(--card, #fff);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.switch-loading-spinner {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid rgba(108, 88, 199, 0.25);
+  border-top-color: #6C58C7;
+  animation: switch-spin 0.9s linear infinite;
+}
+@keyframes switch-spin { to { transform: rotate(360deg); } }
+.switch-loading-text { font-size: 15px; font-weight: 600; color: var(--text, #1c1c28); }
+.switch-loading-detail { font-size: 12px; color: var(--muted, #6b6b7a); }

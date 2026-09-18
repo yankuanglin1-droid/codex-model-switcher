@@ -992,6 +992,13 @@ async function refreshModels(providerId, button) {
 }
 
 async function switchTo(provider, model) {
+  // 切换 = 改配置 + 搬旧任务，第三方互切经常要十几秒：
+  // 全屏 loading 遮罩，明确「在干活、别关窗」，避免用户以为卡死乱点。
+  showSwitchLoading(provider, model);
+  const providerLabel = () => {
+    const item = (STATE.providers || []).find((p) => p.id === provider);
+    return (item && item.label) || provider;
+  };
   try {
     const result = await api('switch', { provider, model });
     toast(t('toast.switched', {
@@ -1019,10 +1026,42 @@ async function switchTo(provider, model) {
     if (item) renderDetail(item);
     if (VIEW === 'caps') renderCapsPage();
     // Codex 只在启动时读一次配置：切完弹窗提醒重启，点确认自动重启
+    hideSwitchLoading();
     openRestartModal();
   } catch (error) {
+    hideSwitchLoading();
     toast(error.message, true);
   }
+}
+
+// ---- 切换 loading 遮罩 ------------------------------------------------
+
+function showSwitchLoading(provider, model) {
+  let node = $('switch-loading');
+  if (!node) {
+    node = document.createElement('div');
+    node.id = 'switch-loading';
+    node.className = 'switch-loading';
+    node.innerHTML = '<div class="switch-loading-card">' +
+      '<div class="switch-loading-spinner"></div>' +
+      '<div class="switch-loading-text"></div>' +
+      '<div class="switch-loading-detail"></div>' +
+      '</div>';
+    document.body.appendChild(node);
+  }
+  const text = node.querySelector('.switch-loading-text');
+  const detail = node.querySelector('.switch-loading-detail');
+  const item = (STATE.providers || []).find((p) => p.id === provider);
+  text.textContent = t('switch.loading', {
+    label: (item && item.label) || provider,
+    model: model || (item && item.default_model) || '…' });
+  detail.textContent = t('switch.loading_detail');
+  node.hidden = false;
+}
+
+function hideSwitchLoading() {
+  const node = $('switch-loading');
+  if (node) node.hidden = true;
 }
 
 function openRestartModal() {
