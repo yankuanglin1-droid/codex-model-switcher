@@ -353,6 +353,7 @@ def _pid_is_ours(pid: int) -> bool:
 
 def cmd_stop(args) -> int:
     """停掉后台的图形界面与协议桥。"""
+    from . import platform_compat
     targets = [("图形界面", paths.gui_state_file()), ("协议桥", paths.bridge_pid_file())]
     stopped, skipped = [], []
     for label, record_path in targets:
@@ -365,7 +366,22 @@ def cmd_stop(args) -> int:
         if pid <= 1:
             skipped.append("%s（记录无效）" % label)
         elif not _pid_is_ours(pid):
-            skipped.append("%s（PID %d 已不属于本工具，跳过）" % (label, pid))
+            # 「查不到」和「确认不是」必须分开说。之前统一报"已不属于本工具"，
+            # 但 ps 被系统限制时根本读不到命令行 —— 于是 stop 看似成功、
+            # 实际什么都没停，旧进程继续用旧代码服务，用户看到的就是
+            # "明明更新了，界面还是旧版本"，还以为更新没生效。
+            if platform_compat.process_command_line(pid):
+                skipped.append("%s（PID %d 已不属于本工具，跳过）" % (label, pid))
+            else:
+                # PID 是服务自己写进状态文件的，读不到命令行时按记录处理，
+                # 并把实情告诉用户，而不是假装它"不属于本工具"。
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    stopped.append("%s（PID %d，命令行读不到没法核实身份，按记录处理）" % (label, pid))
+                except ProcessLookupError:
+                    stopped.append("%s（已经不在运行）" % label)
+                except PermissionError:
+                    skipped.append("%s（没有权限结束 PID %d，可手动执行 kill %d）" % (label, pid, pid))
         else:
             try:
                 os.kill(pid, signal.SIGTERM)

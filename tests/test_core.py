@@ -1230,6 +1230,59 @@ class ReadinessTests(TempCodexHome):
         self.assertNotIn("sk-fake-key-from-helper", readiness.to_text(report))
 
 
+class StopCommandTests(TempCodexHome):
+    """codex-switcher stop 的进程身份判定。
+
+    「读不到命令行」和「确认不是我们的」必须分开处理：ps 被系统限制时
+    读不到任何命令行，以前统一当"不属于本工具"跳过 —— stop 看似成功、
+    实际什么都没停，旧进程继续用旧代码服务，用户看到的就是
+    "明明更新了，界面还是旧版本"。
+    """
+
+    def _write_gui_record(self, pid):
+        from codex_switcher import paths
+        paths.ensure_dir(paths.state_dir())
+        (paths.state_dir() / "gui.json").write_text(
+            json.dumps({"port": 1, "pid": pid, "token": "x"}))
+
+    def test_stops_by_record_when_command_line_is_unreadable(self):
+        import codex_switcher.cli as cli
+        from codex_switcher import platform_compat, paths
+        killed = []
+        saved = {"kill": cli.os.kill, "cmdline": platform_compat.process_command_line,
+                 "state_dir": str(paths.state_dir())}
+        try:
+            cli.os.kill = lambda pid, sig: killed.append(pid)
+            # ps 被限制时的真实形态：命令行读不到，返回空串
+            platform_compat.process_command_line = lambda pid: ""
+            self._write_gui_record(424242)
+            cli.cmd_stop(type("A", (), {})())
+        finally:
+            cli.os.kill = saved["kill"]
+            platform_compat.process_command_line = saved["cmdline"]
+        self.assertEqual(killed, [424242], "读不到命令行时也应按记录的 PID 停掉")
+        # 处理完要清掉记录，避免下次又对着同一个 PID
+        self.assertFalse(
+            (Path(saved["state_dir"]) / "gui.json").exists())
+
+    def test_still_skips_verified_foreign_process(self):
+        """能读到命令行、且确实不是我们的 → 照旧跳过，不许误杀。"""
+        import codex_switcher.cli as cli
+        from codex_switcher import platform_compat, paths
+        killed = []
+        saved = {"kill": cli.os.kill, "cmdline": platform_compat.process_command_line}
+        try:
+            cli.os.kill = lambda pid, sig: killed.append(pid)
+            platform_compat.process_command_line = (
+                lambda pid: "/usr/sbin/syslogd")
+            self._write_gui_record(424243)
+            cli.cmd_stop(type("A", (), {})())
+        finally:
+            cli.os.kill = saved["kill"]
+            platform_compat.process_command_line = saved["cmdline"]
+        self.assertEqual(killed, [], "确认是别人的进程，绝不能杀")
+
+
 class EngineContinueTests(TempCodexHome):
     """切换相关的后续用例。
 
