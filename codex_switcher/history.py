@@ -127,7 +127,15 @@ OPENAI_ONLY_IF_MOVING = {"reasoning"}
 # 只有明确「要搬到别的平台」时才删（--cross-provider）。
 CROSS_PROVIDER_TYPES = {"custom_tool_call", "custom_tool_call_output", "web_search_call",
                         "computer_call", "computer_call_output", "file_search_call",
-                        "code_interpreter_call", "image_generation_call"}
+                        "code_interpreter_call", "image_generation_call",
+                        # Codex 自己的内置工具。工具清单太长（插件 / 应用 / MCP）时，
+                        # Codex 不再逐个列工具，而是发一个 tool_search 让模型自己搜。
+                        # 它的 arguments 是**对象**，不像 function_call 那样是字符串
+                        # —— 第三方平台两个都不认：工具类型直接拒（tools.N: tool type
+                        # "tool_search" is not supported），解析 arguments 也会报
+                        # "cannot unmarshal object into ... arguments of type string"。
+                        # 严格校验请求体的平台（实测 Kimi / Moonshot）必须把它剥掉。
+                        "tool_search_call", "tool_search_output"}
 
 
 def _payload_of(line: str) -> Optional[Dict]:

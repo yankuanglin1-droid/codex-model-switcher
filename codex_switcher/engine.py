@@ -32,6 +32,27 @@ class SwitchError(RuntimeError):
 OFFICIAL_PROVIDER = "openai"
 DEFAULT_OFFICIAL_MODEL = "gpt-5-codex"
 
+# Codex 有个内置工具 ``tool_search``：工具清单太长（插件 / 应用 / MCP）时，
+# 它不再把工具逐个列进请求，而是发一个 tool_search 让模型自己搜。
+# 这个工具的 arguments 是**对象**，和 function_call 的字符串 arguments 不一样。
+# 严格校验请求体的平台两边都不认：
+#   · tools.N: tool type "tool_search" is not supported
+#   · json: cannot unmarshal object into Go struct field alias.arguments of type string
+# 实测 Kimi（Moonshot）就是这个情况；deepseek 比较宽松，能容忍。
+# 切到这些平台时把 tool_search 关掉，切回别的平台再打开。
+# 单个平台可以用记录里的 supports_tool_search 覆盖（true / false）。
+TOOL_SEARCH_INCOMPATIBLE = {"moonshot"}
+
+
+def tool_search_disabled(record: Optional[Dict]) -> bool:
+    """切到这个平台时，要不要关掉 Codex 的 tool_search。"""
+    if not record:
+        return False
+    override = record.get("supports_tool_search")
+    if isinstance(override, bool):
+        return not override
+    return record.get("id") in TOOL_SEARCH_INCOMPATIBLE
+
 # 后台全量迁移：切换成功后，把上一个平台的全部任务（含 ChatGPT 的老任务）
 # 分批搬到新平台。前台只搬最近在用的（切换秒回），剩下的在这里慢慢补齐 ——
 # 这是「切完之后所有任务（含每日定时任务）都能正常跑」的保证，不是可选项。
@@ -212,7 +233,8 @@ def discover(record: Dict, api_key: Optional[str]) -> List[str]:
 def save_record(state: Dict, record: Dict) -> None:
     state_module.upsert_provider(state, record)
     state_module.save(state)
-    catalog_module.write_catalog(record["id"], record, list((record.get("models") or {}).keys()))
+    catalog_module.write_catalog(record["id"], record, list((record.get("models") or {}).keys()),
+                                  is_official=(record["id"] == OFFICIAL_PROVIDER))
 
 
 def add_provider(
@@ -295,7 +317,8 @@ def add_provider(
 
     state_module.upsert_provider(state, record)
     state_module.save(state)
-    catalog_module.write_catalog(identifier, record, list((record.get("models") or {}).keys()))
+    catalog_module.write_catalog(identifier, record, list((record.get("models") or {}).keys()),
+                                  is_official=(identifier == OFFICIAL_PROVIDER))
 
     if switch_now:
         chosen = default_model or (model_ids[0] if model_ids else None)
@@ -331,7 +354,8 @@ def refresh_models(provider_id: str) -> Dict:
         raise SwitchError(str(exc))
     state_module.sync_models(record, model_ids)
     state_module.save(state)
-    catalog_module.write_catalog(provider_id, record, list((record.get("models") or {}).keys()))
+    catalog_module.write_catalog(provider_id, record, list((record.get("models") or {}).keys()),
+                                  is_official=(provider_id == OFFICIAL_PROVIDER))
     return {"record": record, "models": model_ids}
 
 
@@ -347,6 +371,8 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
             text, ["model_provider"]).get("model_provider")
         settings = official_settings(model_id or DEFAULT_OFFICIAL_MODEL)
         new_text = configfile.rewrite_model_settings(text, settings)
+        # 官方认 tool_search，切回来要把它打开（第三方那儿可能关过）
+        new_text = configfile.set_feature(new_text, "tool_search", True)
         if dry_run:
             return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "dry_run": True}
         backup = configfile.backup(config)
@@ -408,7 +434,8 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
 
     catalog_target = catalog_module.catalog_path(provider_id)
     if not catalog_target.exists():
-        catalog_module.write_catalog(provider_id, record, models)
+        catalog_module.write_catalog(provider_id, record, models,
+                                     is_official=(provider_id == OFFICIAL_PROVIDER))
 
     auth = None
     if record.get("requires_key", True):
@@ -439,6 +466,9 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         try:
             with_block = configfile.upsert_provider_block(text, provider_id, fields, auth)
             new_text = configfile.rewrite_model_settings(with_block, settings)
+            # 有的平台拒收 Codex 的 tool_search 内置工具，按平台开关它
+            new_text = configfile.set_feature(
+                new_text, "tool_search", not tool_search_disabled(record))
         except configfile.ConfigError as exc:
             raise SwitchError("写入配置失败：%s" % exc)
         if dry_run:
@@ -759,7 +789,7 @@ def set_context_window(provider_id: str, model_id: str, window: Optional[int]) -
     state_module.save(state)
 
     # 目录必须跟着重生成，否则 Codex 读到的还是旧窗口
-    catalog_module.write_catalog(record["id"], record, list(models.keys()))
+    catalog_module.write_catalog(record["id"], record, list(models.keys()), is_official=(record["id"] == OFFICIAL_PROVIDER))
     # 正在用这个模型的话，压缩触发点也得跟着改，否则新窗口在会话里不生效
     applied = _rewrite_if_current(record, model_id)
     return {
@@ -810,7 +840,7 @@ def set_reasoning_effort(provider_id: str, model_id: str, effort: Optional[str])
         overrides.pop(model_id, None)
     record["model_overrides"] = overrides
     state_module.save(state)
-    catalog_module.write_catalog(record["id"], record, list(models.keys()))
+    catalog_module.write_catalog(record["id"], record, list(models.keys()), is_official=(record["id"] == OFFICIAL_PROVIDER))
     applied = _rewrite_if_current(record, model_id)
     return {"provider": provider_id, "model": model_id, "effort": level,
             "label": capabilities_module.EFFORT_TEXT.get(level or "", level or "跟随平台默认"),
@@ -866,7 +896,7 @@ def set_model_capability(provider_id: str, model_id: str,
     record["model_overrides"] = record.get("model_overrides") or {}
     state_module.upsert_provider(state, record)
     state_module.save(state)
-    catalog_module.write_catalog(record["id"], record, list(models.keys()))
+    catalog_module.write_catalog(record["id"], record, list(models.keys()), is_official=(record["id"] == OFFICIAL_PROVIDER))
     outcome["provider"] = provider_id
     outcome["model"] = model_id
     return outcome
@@ -925,7 +955,8 @@ def probe_capabilities(provider_id: str, model_id: Optional[str] = None,
 
     if apply_result:
         state_module.save(state)
-        catalog_module.write_catalog(record["id"], record, models)
+        catalog_module.write_catalog(record["id"], record, models,
+                                     is_official=(record["id"] == OFFICIAL_PROVIDER))
     return {"provider": provider_id, "transport": record.get("transport"),
             "results": results, "applied": apply_result}
 

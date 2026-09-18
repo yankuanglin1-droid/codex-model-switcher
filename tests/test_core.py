@@ -192,6 +192,40 @@ this is not a real table
         self.assertIn("model_providers.x", names)
         self.assertNotIn("model_providers.fake", names)
 
+    def test_set_feature_creates_the_table_when_it_is_missing(self):
+        """没有 [features] 段时新建，别把文件写坏。"""
+        from codex_switcher import configfile
+        text = 'model = "m"\n\n[desktop]\naccent = "#0169cc"\n'
+        new = configfile.set_feature(text, "tool_search", False)
+        parsed = load_document(new)
+        self.assertEqual(parsed["features"]["tool_search"], False)
+        # 原有内容一字不动
+        self.assertEqual(parsed["model"], "m")
+        self.assertEqual(parsed["desktop"]["accent"], "#0169cc")
+
+    def test_set_feature_updates_in_place_and_keeps_the_rest(self):
+        """已有 [features] 时只改那一行，同段其他键和其余段落都不能动。"""
+        from codex_switcher import configfile
+        text = ('model = "m"\n\n[features]\nmemories = true\napps = true\n'
+                'tool_search = true\njs_repl = false\n\n[desktop]\naccent = "#0169cc"\n')
+        new = configfile.set_feature(text, "tool_search", False)
+        parsed = load_document(new)
+        self.assertEqual(parsed["features"]["tool_search"], False)
+        self.assertEqual(parsed["features"]["memories"], True)
+        self.assertEqual(parsed["features"]["apps"], True)
+        self.assertEqual(parsed["features"]["js_repl"], False)
+        self.assertEqual(parsed["desktop"]["accent"], "#0169cc")
+        # 只出现一次，不能重复插
+        self.assertEqual(new.count("tool_search ="), 1)
+
+    def test_set_feature_appends_when_the_key_is_absent(self):
+        from codex_switcher import configfile
+        text = '[features]\nmemories = true\n'
+        new = configfile.set_feature(text, "tool_search", True)
+        parsed = load_document(new)
+        self.assertEqual(parsed["features"]["tool_search"], True)
+        self.assertEqual(parsed["features"]["memories"], True)
+
 
 class CatalogTests(unittest.TestCase):
     def test_build_catalog_shape(self):
@@ -213,17 +247,39 @@ class CatalogTests(unittest.TestCase):
         """这几个字段在 Codex 里都带 #[serde(default)]，不写就是 false。
 
         少写一个就等于关掉一项能力：MCP / 插件 / 搜索 / 原图。
+        注意：include_apps_usage_instructions 仅官方=True，第三方=False，
+        否则 Codex 会把 tool_search 这类 OpenAI-only 工具塞给第三方，
+        触发 `tools.N: tool type "tool_search" is not supported`（Kimi 实测）。
         """
         from codex_switcher import catalog
-        entry = catalog.build_model_entry("MiniMax-M3", "Demo")
+        # 官方模型：apps 开关应当开启
+        entry_official = catalog.build_model_entry("MiniMax-M3", "Demo", is_official=True)
         for key in ("include_skills_usage_instructions",
                     "include_plugin_usage_instructions",
                     "include_apps_usage_instructions",
                     "supports_search_tool",
                     "supports_image_detail_original",
                     "supports_reasoning_summary_parameter"):
-            self.assertTrue(entry[key], "%s 必须为 true，否则 Codex 会关掉这项能力" % key)
-        self.assertEqual(entry["web_search_tool_type"], "text_and_image")
+            self.assertTrue(entry_official[key],
+                            "%s 官方必须为 true" % key)
+        self.assertEqual(entry_official["web_search_tool_type"], "text_and_image")
+
+        # 第三方模型：apps 开关必须关闭，其它照开
+        entry_third = catalog.build_model_entry("MiniMax-M3", "Demo", is_official=False)
+        self.assertFalse(entry_third["include_apps_usage_instructions"],
+                         "第三方必须关闭 include_apps_usage_instructions，否则 tool_search 会触发 400")
+        self.assertTrue(entry_third["include_skills_usage_instructions"])
+        self.assertTrue(entry_third["include_plugin_usage_instructions"])
+        # 第三方必须关 supports_search_tool，否则 Codex 会注册 tool_search
+        self.assertFalse(entry_third["supports_search_tool"],
+                         "第三方必须关闭 supports_search_tool，否则 spec_plan.rs:624 会注册 tool_search")
+        # 用户 override 仍可强制打开
+        entry_override = catalog.build_model_entry(
+            "MiniMax-M3", "Demo", {"supports_search_tool": True}, is_official=False)
+        self.assertTrue(entry_override["supports_search_tool"])
+        # 官方必须开 supports_search_tool（否则 Codex 自家模型会缺搜索能力）
+        entry_official_2 = catalog.build_model_entry("gpt-5-codex", "Demo", is_official=True)
+        self.assertTrue(entry_official_2["supports_search_tool"])
 
     def test_text_only_model_keeps_image_switches_off(self):
         """纯文本模型才把图片相关的开关关掉，其余能力照给。"""
@@ -236,12 +292,17 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(entry["include_skills_usage_instructions"])
 
     def test_unknown_model_gets_full_capabilities(self):
-        """没见过的模型默认给足能力，别默认成阉割版。"""
+        """没见过的模型默认给足能力，别默认成阉割版。
+
+        注意：supports_search_tool 对第三方**默认 False**（spec_plan.rs:624
+        的注册条件），「没见过的模型」也得遵守这个分平台规则。
+        """
         from codex_switcher import catalog
         entry = catalog.build_model_entry("some-future-model-v9", "Demo")
         self.assertIn("image", entry["input_modalities"])
         self.assertTrue(entry["include_skills_usage_instructions"])
-        self.assertTrue(entry["supports_search_tool"])
+        # 默认走第三方路径：supports_search_tool 必须关，否则会注册 tool_search
+        self.assertFalse(entry["supports_search_tool"])
 
     def test_priority_follows_order(self):
         from codex_switcher import catalog
@@ -420,6 +481,53 @@ class EngineTests(TempCodexHome):
         catalog_path = Path(parsed["model_catalog_json"])
         self.assertTrue(catalog_path.exists())
         self.assertEqual(json.loads(catalog_path.read_text())["models"][0]["slug"], "qwen3:32b")
+
+    def test_switching_to_kimi_turns_tool_search_off_and_back_on(self):
+        """Kimi（Moonshot）拒收 Codex 的 tool_search 内置工具，切到它必须关掉。
+
+        真机两条报错都出自这里：
+          · tools.13: tool type "tool_search" is not supported
+          · cannot unmarshal object into ... arguments of type string
+        """
+        from codex_switcher import engine, paths, state as state_module
+
+        def _record(provider_id, label):
+            record = engine.build_provider_record(
+                provider_id=provider_id, label=label,
+                base_url="https://api.example.com/v1",
+                models_url="https://api.example.com/v1/models",
+                transport="native", requires_key=True)
+            record["models"] = {"m1": {}}
+            return record
+
+        state_module.save({"schema_version": 3, "providers": {
+            "moonshot": _record("moonshot", "Kimi"),
+            "deepseek": _record("deepseek", "DeepSeek"),
+        }})
+
+        # 切到 Kimi：关掉
+        engine.switch_to("moonshot", "m1")
+        parsed = load_document(paths.config_path().read_text())
+        self.assertEqual(parsed["features"]["tool_search"], False)
+
+        # 切到别的第三方：打开
+        engine.switch_to("deepseek", "m1")
+        parsed = load_document(paths.config_path().read_text())
+        self.assertEqual(parsed["features"]["tool_search"], True)
+
+        # 切回官方：也要是打开的
+        engine.switch_to("openai")
+        parsed = load_document(paths.config_path().read_text())
+        self.assertEqual(parsed["features"]["tool_search"], True)
+
+    def test_tool_search_switch_can_be_overridden_per_provider(self):
+        """平台记录里写了 supports_tool_search 就以它为准。"""
+        from codex_switcher import engine
+        self.assertTrue(engine.tool_search_disabled({"id": "moonshot"}))
+        self.assertFalse(engine.tool_search_disabled({"id": "deepseek"}))
+        # 覆盖：Kimi 也能显式打开，别的平台也能显式关掉
+        self.assertFalse(engine.tool_search_disabled({"id": "moonshot", "supports_tool_search": True}))
+        self.assertTrue(engine.tool_search_disabled({"id": "deepseek", "supports_tool_search": False}))
 
     def test_switch_to_third_party_auto_cleans_old_sessions(self):
         """切换平台的副作用：把旧会话里别家的服务端工具条目自动剥掉。
@@ -1500,6 +1608,64 @@ class HistoryTests(TempCodexHome):
         text = path.read_text(encoding="utf-8")
         self.assertIn('"call_1"', text)
         self.assertNotIn("codex_app.foo", text)
+
+    def test_tool_search_items_are_stripped_for_strict_providers(self):
+        """Codex 的 tool_search：平台不认工具类型，也解析不了它的对象型 arguments。
+
+        真机报错对：
+          · tools.13: tool type "tool_search" is not supported
+          · cannot unmarshal object into Go struct field alias.arguments of type string
+        根子是同一个：tool_search_call 的 arguments 是**对象**，
+        而平台按 function_call 的约定要求它是字符串。
+        """
+        from codex_switcher import history
+        sample = [
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                  "content": [{"type": "input_text", "text": "hi"}]}},
+            # 注意 arguments 是 dict，不是字符串 —— 和 function_call 不一样
+            {"type": "response_item", "payload": {"type": "tool_search_call",
+                                                  "id": "ts_1", "status": "completed",
+                                                  "arguments": {"query": "jianying"}}},
+            {"type": "response_item", "payload": {"type": "tool_search_output",
+                                                  "call_id": "ts_1", "execution": "client"}},
+            # 普通工具不受影响
+            {"type": "response_item", "payload": {"type": "function_call",
+                                                  "call_id": "call_keep", "name": "shell",
+                                                  "arguments": '{"a": 1}'}},
+        ]
+        path = self._write_rollout(sample, name="rollout-tool-search.jsonl")
+        self._backdate(path)
+
+        # 先确认它会被报出来
+        self.assertEqual(history.inspect(path)["cross_provider"], 2)
+        self.assertIn("tool_search_call", history.inspect(path)["report_only"])
+
+        changed, stats = history.sanitize(path, False, history._backup_root() / "test",
+                                          cross_provider=True)
+        self.assertTrue(changed)
+        self.assertEqual(stats["removed_cross_provider"], 2)
+
+        after = history.inspect(path)
+        self.assertEqual(after["cross_provider"], 0)
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("tool_search", text)
+        # 成对删：call 和 output 一起没了，不会留悬空引用
+        self.assertNotIn("ts_1", text.split("tool_search")[0])
+        self.assertIn('"call_keep"', text)
+
+    def test_tool_search_items_are_left_alone_without_cross_provider(self):
+        """默认模式只清"任何平台都不认"的孤儿，tool_search 属于"搬到第三方才清"。"""
+        from codex_switcher import history
+        sample = [
+            {"type": "response_item", "payload": {"type": "tool_search_call",
+                                                  "id": "ts_1", "arguments": {"query": "x"}}},
+            {"type": "response_item", "payload": {"type": "tool_search_output",
+                                                  "call_id": "ts_1"}},
+        ]
+        path = self._write_rollout(sample, name="rollout-tool-search-keep.jsonl")
+        self._backdate(path)
+        changed, _ = history.sanitize(path, False, history._backup_root() / "test")
+        self.assertFalse(changed)
 
     def test_without_the_flag_they_survive(self):
         """没说要搬平台，就一个都不许删。"""

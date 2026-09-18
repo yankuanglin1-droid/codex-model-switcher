@@ -37,8 +37,22 @@ def build_model_entry(
     model_id: str,
     provider_label: str,
     overrides: Dict = None,
+    *,
+    is_official: bool = False,
 ) -> Dict:
-    """单个模型条目。overrides 允许用户手动指定上下文窗口等信息。"""
+    """单个模型条目。overrides 允许用户手动指定上下文窗口等信息。
+
+    is_official:
+        True  —— 官方 OpenAI：Codex App 的全部内部工具（tool_search /
+                 computer_use / automation_update / App 内工具）都可下发，
+                 客户端会按模型能力正常处理。
+        False —— 第三方平台：默认关闭「include_*_usage_instructions」三道开关。
+                 Codex 看到 False 就不会往请求里塞 `tool_search` 这类 OpenAI-only
+                 的工具，第三方服务端也就不会再因 `tools.N: tool type
+                 "tool_search" is not supported` 把整轮拒收。
+        用户可以在 `model_overrides.<model>` 里强行把这三道开关打开，但默认
+        是关闭 —— 默认开是历史 bug，2026-09 在 Kimi 模型上复现过。
+    """
     overrides = overrides or {}
     hint = hint_for(model_id)
     context = int(overrides.get("context_window") or hint["context"])
@@ -100,13 +114,28 @@ def build_model_entry(
         #   supports_image_detail_original     —— 图片能否用 detail=original
         #   web_search_tool_type               —— 搜索工具形态：text / text_and_image
         #   supports_reasoning_summary_parameter —— 是否接受 reasoning.summary
+        #
+        # 第三方平台与官方在这四道开关上策略不同（见 build_model_entry 注释）：
+        #   include_skills_usage_instructions —— 第三方依然可用 skills（本地加载）
+        #   include_plugin_usage_instructions —— 第三方依然可用 plugins（本地）
+        #   include_apps_usage_instructions   —— App 内工具（tool_search 等）只
+        #                                          官方能用，第三方一律关闭。
+        #   supports_search_tool              —— 决定了 Codex 是否往 outbound
+        #                                          tools 数组里塞 tool_search（spec_plan.rs
+        #                                          第 624 行的注册条件）。第三方平台
+        #                                          服务端不认这个工具名，必须 False，
+        #                                          否则 12:01 那种
+        #                                          `tools.13: tool type "tool_search" is not supported`
+        #                                          的 400 就会复现。
+        # 用户在 model_overrides.<model> 里写什么就以什么为准，不强制。
         "include_skills_usage_instructions": bool(
             overrides.get("include_skills_usage_instructions", True)),
         "include_plugin_usage_instructions": bool(
             overrides.get("include_plugin_usage_instructions", True)),
         "include_apps_usage_instructions": bool(
-            overrides.get("include_apps_usage_instructions", True)),
-        "supports_search_tool": bool(overrides.get("supports_search_tool", True)),
+            overrides.get("include_apps_usage_instructions", is_official)),
+        "supports_search_tool": bool(
+            overrides.get("supports_search_tool", is_official)),
         "supports_image_detail_original": bool(
             overrides.get("supports_image_detail_original", supports_image)),
         "web_search_tool_type": "text_and_image" if supports_image else "text",
@@ -115,8 +144,9 @@ def build_model_entry(
     return entry
 
 
-def build_catalog(provider: Dict, model_ids: Iterable[str]) -> Dict:
-    """按平台生成的完整目录。"""
+def build_catalog(provider: Dict, model_ids: Iterable[str],
+                  *, is_official: bool = False) -> Dict:
+    """按平台生成的完整目录。is_official=True 时开启 include_*_usage_instructions。"""
     overrides_map: Dict[str, Dict] = provider.get("model_overrides") or {}
     ordered: List[str] = list(dict.fromkeys(model_ids))
     configured = provider.get("models") or {}
@@ -127,7 +157,8 @@ def build_catalog(provider: Dict, model_ids: Iterable[str]) -> Dict:
     for index, model_id in enumerate(ordered):
         overrides = dict(overrides_map.get(model_id) or {})
         overrides.setdefault("priority", index)
-        entries.append(build_model_entry(model_id, provider.get("label", ""), overrides))
+        entries.append(build_model_entry(model_id, provider.get("label", ""),
+                                        overrides, is_official=is_official))
     return {"models": entries}
 
 
@@ -135,8 +166,9 @@ def catalog_path(provider_id: str) -> Path:
     return paths.catalog_dir() / (provider_id + ".json")
 
 
-def write_catalog(provider_id: str, provider: Dict, model_ids: Iterable[str]) -> Path:
-    document = build_catalog(provider, model_ids)
+def write_catalog(provider_id: str, provider: Dict, model_ids: Iterable[str],
+                  *, is_official: bool = False) -> Path:
+    document = build_catalog(provider, model_ids, is_official=is_official)
     target = catalog_path(provider_id)
     paths.ensure_dir(target.parent)
     target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")

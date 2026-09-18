@@ -213,6 +213,34 @@ def _render_table(name: str, values: Dict) -> str:
     return "".join(body)
 
 
+def set_feature(text: str, name: str, value: bool) -> str:
+    """在 [features] 表里设置 ``name = value``；没有这个表就新建。
+
+    只动这一行（或表不存在时追加在文件末尾），其余内容逐字保留。
+    用来按平台开关 Codex 的内置特性 —— 例如某些平台拒收 Codex 的
+    ``tool_search`` 内置工具，切到它就关掉，切回来再打开。
+    """
+    rendered = "%s = %s\n" % (name, toml_value(value))
+    lines = text.splitlines(keepends=True)
+    start = end = None
+    for block_name, block_start, block_end in _table_blocks(lines):
+        if block_name == "features":
+            start, end = block_start, block_end
+            break
+    if start is None:
+        return text.rstrip("\n") + "\n\n[features]\n" + rendered
+    body = lines[start + 1:end]
+    for index, line in enumerate(body):
+        stripped = line.split("#", 1)[0].strip()
+        if "=" not in stripped:
+            continue
+        if stripped.split("=", 1)[0].strip() == name:
+            body[index] = rendered
+            return "".join(lines[:start + 1] + body + lines[end:])
+    body.append(rendered)
+    return "".join(lines[:start + 1] + body + lines[end:])
+
+
 def upsert_provider_block(
     text: str,
     provider_id: str,
