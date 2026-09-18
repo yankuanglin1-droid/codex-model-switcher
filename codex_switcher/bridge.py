@@ -646,13 +646,19 @@ def _clear_pid() -> None:
 
 
 def is_running(port: int = DEFAULT_PORT, timeout: float = 1.5) -> bool:
-    import urllib.error
-    import urllib.request
+    """本机这个端口上有没有东西在听。
+
+    刻意用 socket 直连而不是 urlopen：机器上配了 HTTP 代理时，urlopen 会
+    把 127.0.0.1 的请求也交给代理，代理回了任何东西都会被当成"桥在跑"。
+    实测在开着代理的机器上，一个根本没监听的端口会被判成运行中 ——
+    于是「桥没起」这个真正的问题被掩盖，用户只看到一直重连。
+    """
+    import socket
     try:
-        urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=timeout)
-        return True
-    except urllib.error.HTTPError:
-        return True
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
     except Exception:  # noqa: BLE001
         return False
 

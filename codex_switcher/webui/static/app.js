@@ -129,6 +129,9 @@ async function loadState(withBalance = false) {
   renderThreadBanner();
   renderGuardBanner();
   renderProviders();
+  // 上一次自动更新如果成功了，新进程第一次回来时在这里回显一次
+  if (STATE.updated_to) showUpdateResult(STATE.updated_to);
+  renderReadiness(STATE.readiness);
   // 状态回来得比用户点「能力查看」慢时，那一页会渲染成「还没有接入平台」。
   // 这里补一次，保证数据到了页面就跟着刷新。
   if (VIEW === 'caps') renderCapsPage();
@@ -276,16 +279,114 @@ function renderHeader() {
 
 function renderUpdate(info) {
   const node = $('about-update');
-  if (!info) { node.textContent = ''; return; }
-  if (info.status !== 'ok') { node.textContent = ''; return; }
+  const install = $('btn-install-update');
+  const manual = $('btn-manual-update');
+  if (!info) { node.textContent = ''; install.hidden = true; manual.hidden = true; return; }
+  if (info.status !== 'ok') { node.textContent = ''; install.hidden = true; manual.hidden = true; return; }
   if (info.up_to_date) {
     node.className = 'hint';
     node.textContent = t('update.up_to_date');
+    // 已是最新就不需要更新按钮了
+    install.hidden = true; manual.hidden = true;
+    return;
+  }
+  node.className = 'hint update-new';
+  node.textContent = t('update.available', { latest: info.latest, current: info.current });
+
+  // 一键更新只在真能换掉自己时才给按钮。跑在源码目录里、或 App 所在目录
+  // 不可写（装在 /Applications 又要管理员权限）时，只给一个手动下载链接，
+  // 不给一个点了必然失败的按钮 —— 那比没有更糟。
+  const plan = info.self_update || STATE.self_update || {};
+  if (plan.supported) {
+    install.hidden = false;
+    manual.hidden = true;
+    install.textContent = t('update.install', { latest: info.latest });
+    install.dataset.latest = info.latest || '';
   } else {
-    node.className = 'hint update-new';
-    node.textContent = t('update.available', { latest: info.latest, current: info.current });
+    install.hidden = true;
+    manual.hidden = false;
+    if (plan.reason) node.title = t('update.unsupported', { reason: plan.reason });
   }
 }
+
+// 一键更新：点了之后本进程会被新版本替换掉，所以界面不能干等，
+// 只能告诉用户"马上会重启"，然后由新进程自己回来。
+$('btn-install-update').onclick = async (event) => {
+  const button = event.currentTarget;
+  const latest = button.dataset.latest || '';
+  if (!confirm(t('update.restarting', { version: latest.replace(/^v/i, '') }))) return;
+  button.disabled = true;
+  button.textContent = t('update.installing');
+  try {
+    await api('update-apply', { latest: latest });
+    toast(t('update.waiting'));
+  } catch (error) {
+    toast(error.message, true);
+    button.disabled = false;
+    button.textContent = t('update.install', { latest: latest });
+  }
+};
+
+// 更新落地之后，新进程第一次拉状态会带回 updated_to —— 回显一次告诉用户成功了
+function showUpdateResult(record) {
+  if (!record || !record.to) return;
+  toast(t('update.done', { version: record.to }));
+  if (record.backup) {
+    setTimeout(() => toast(t('update.done_detail', { path: record.backup })), 900);
+  }
+}
+
+// ---- 切换结果 ------------------------------------------------------------
+//
+// 切完必须留一个看得见的结果。之前只有一闪而过的 toast：失败时用户常常没
+// 看清就被后面的「旧任务搬运」提示盖掉了，以为切成功了，回到 Codex 才发现
+// 还是旧模型，然后以为是 Codex 的问题。
+
+function renderSwitchResult(result, failed) {
+  const banner = $('switch-result');
+  if (!banner) return;
+  banner.hidden = false;
+  banner.className = 'banner ' + (failed ? 'result-fail' : 'result-ok');
+  $('switch-result-title').textContent = failed
+    ? t('switch.fail_title') : t('switch.ok_title');
+  if (failed) {
+    $('switch-result-detail').textContent = result || '';
+    return;
+  }
+  const lines = [t('switch.ok_detail', {
+    label: result.label || result.provider, model: result.model })];
+  if (result.backup) lines.push(t('switch.backup', { path: result.backup }));
+  const followed = result.threads_followed;
+  if (followed && followed.moved) {
+    const pending = (followed.skipped_active || []).length;
+    lines.push(pending
+      ? t('switch.threads_pending', { moved: followed.moved, pending: pending })
+      : t('switch.threads', { moved: followed.moved }));
+  }
+  $('switch-result-detail').textContent = lines.join(' · ');
+}
+
+$('btn-switch-result-dismiss').onclick = () => { $('switch-result').hidden = true; };
+
+// ---- 链路不通提示 --------------------------------------------------------
+//
+// 「配好了」不等于「能请求」。界面上每一处单独看都可能没报警，但 Codex 就是
+// 发不出去 —— 用户只看到加载不出来、一直重连。这里把断掉的那一环直接说出来。
+
+function renderReadiness(report) {
+  const banner = $('readiness-banner');
+  if (!banner) return;
+  if (!report || report.ok) { banner.hidden = true; return; }
+  const failed = (report.checks || []).filter((item) => item.status === 'fail');
+  if (!failed.length) { banner.hidden = true; return; }
+  banner.hidden = false;
+  // 只说断掉的那几环，每环后面跟上修法；全塞一行会看不清
+  $('readiness-detail').textContent = failed
+    .map((item) => `${item.name}：${item.detail}${item.fix ? ' → ' + item.fix : ''}`)
+    .join(' ｜ ');
+}
+
+$('btn-readiness-dismiss').onclick = () => { $('readiness-banner').hidden = true; };
 
 function renderProviders() {
   const list = $('provider-list');
@@ -1023,9 +1124,13 @@ async function switchTo(provider, model) {
     if (VIEW === 'caps') renderCapsPage();
     // Codex 只在启动时读一次配置：切完弹窗提醒重启，点确认自动重启
     hideSwitchLoading();
+    renderSwitchResult(result, false);
     openRestartModal();
   } catch (error) {
     hideSwitchLoading();
+    // 失败也要明明白白留在界面上：toast 会被后面的提示盖掉，
+    // 用户回头看不出到底切没切成功。
+    renderSwitchResult(error.message, true);
     toast(error.message, true);
   }
 }

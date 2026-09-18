@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -191,6 +192,104 @@ this is not a real table
         names = {name for name, _, _ in blocks}
         self.assertIn("model_providers.x", names)
         self.assertNotIn("model_providers.fake", names)
+
+    def test_rewrite_survives_unmanaged_top_level_keys(self):
+        """第一张表之前有非托管键时，切换不能失败。
+
+        这是真机上的阻断性缺陷：approval_policy / sandbox_mode 这些都是
+        Codex 自己写的正常配置，但只要它们在头部存在，重写后的排版就和原文
+        不同，逐字比对把「排版差异」误判成「篡改」，任何切换都报
+        「拒绝修改模型配置以外的内容」。
+        """
+        from codex_switcher import configfile
+        # 取自真机 config.toml 的头部构成（含三个非托管键 + 空行 + 列表值）
+        heads = [
+            'approval_policy = "never"\n\nsandbox_mode = "danger-full-access"\n\n',
+            'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n',
+            'personality = "pragmatic"\nsandbox_mode = "danger-full-access"\n'
+            'approval_policy = "never"\nweb_search = "live"\n\n\nnotify = ["x"]\n\n',
+            '',
+        ]
+        settings = {"model_provider": "deepseek", "model": "deepseek-flash"}
+        for index, head in enumerate(heads):
+            text = head + '[desktop]\naccent = "#0169cc"\n'
+            try:
+                new = configfile.rewrite_model_settings(text, settings)
+            except configfile.ConfigError as error:
+                self.fail("第 %d 种头部重写失败：%s" % (index, error))
+            parsed = load_document(new)
+            self.assertEqual(parsed["model_provider"], "deepseek")
+            # 非托管内容一个字都不能少
+            self.assertEqual(parsed["desktop"]["accent"], "#0169cc")
+            if head:
+                self.assertEqual(parsed.get("approval_policy"), "never")
+
+    def test_rewrite_keeps_hand_set_managed_keys(self):
+        """本次没给的托管键要沿用原值，不能静默删掉。
+
+        实测丢过 service_tier = "priority" 和 model_verbosity = "medium"。
+        service_tier 恰恰是切回官方才体现价值的，丢了用户还察觉不到。
+        """
+        from codex_switcher import configfile
+        text = ('model_provider = "openai"\nmodel = "gpt"\n'
+                'service_tier = "priority"\nmodel_verbosity = "medium"\n\n'
+                '[desktop]\naccent = "#0169cc"\n')
+        new = configfile.rewrite_model_settings(
+            text, {"model_provider": "deepseek", "model": "deepseek-flash"})
+        parsed = load_document(new)
+        self.assertEqual(parsed["service_tier"], "priority")
+        self.assertEqual(parsed["model_verbosity"], "medium")
+        self.assertEqual(parsed["model_provider"], "deepseek")
+        self.assertEqual(parsed["model"], "deepseek-flash")
+
+    def test_switching_back_to_official_clears_third_party_keys(self):
+        """切回官方是唯一要清空的场景。
+
+        model_catalog_json 还指着第三方目录的话，官方那边会照那份目录认模型，
+        所以这里必须和「沿用原值」的默认行为相反。
+        """
+        from codex_switcher import configfile
+        text = ('model_provider = "deepseek"\nmodel = "deepseek-flash"\n'
+                'model_catalog_json = "/x/deepseek.json"\n'
+                'service_tier = "priority"\n\n[desktop]\naccent = "#0169cc"\n')
+        new = configfile.rewrite_model_settings(
+            text, {"model_provider": "openai", "model": "gpt-5-codex"},
+            keep_others=False)
+        parsed = load_document(new)
+        self.assertNotIn("model_catalog_json", parsed)
+        self.assertNotIn("service_tier", parsed)
+        self.assertEqual(parsed["model_provider"], "openai")
+        self.assertEqual(parsed["desktop"]["accent"], "#0169cc")
+
+    def test_rewrite_leaves_everything_else_intact(self):
+        """放宽的只是空行 —— 段落、值、顺序都必须原样保留。
+
+        让空行退出比对之后，得确认没有把真正的防线一起拆了：这里放上
+        provider 块、MCP 块和头部非托管键，逐项核对值一个都没变。
+        """
+        from codex_switcher import configfile
+        settings = {"model_provider": "deepseek", "model": "deepseek-flash"}
+        body = ('[model_providers.demo]\nname = "X"\n'
+                'base_url = "https://x.example.com"\nwire_api = "responses"\n\n'
+                '[mcp_servers.foo]\ncommand = "uvx"\nargs = ["a", "b"]\n')
+        text = 'approval_policy = "never"\n\n' + body
+        new = configfile.rewrite_model_settings(text, settings)
+
+        # 非空行必须一字不差（空行允许有差异）
+        squeeze = lambda doc: "\n".join(
+            line for line in doc.splitlines() if line.strip())
+        self.assertIn(squeeze(body), squeeze(new))
+
+        parsed = load_document(new)
+        self.assertEqual(parsed["approval_policy"], "never")
+        self.assertEqual(parsed["model_providers"]["demo"]["base_url"],
+                         "https://x.example.com")
+        self.assertEqual(parsed["model_providers"]["demo"]["wire_api"], "responses")
+        self.assertEqual(parsed["mcp_servers"]["foo"]["command"], "uvx")
+        self.assertEqual(parsed["mcp_servers"]["foo"]["args"], ["a", "b"])
+        # 本次要改的确实改了
+        self.assertEqual(parsed["model_provider"], "deepseek")
+        self.assertEqual(parsed["model"], "deepseek-flash")
 
     def test_set_feature_creates_the_table_when_it_is_missing(self):
         """没有 [features] 段时新建，别把文件写坏。"""
@@ -848,6 +947,287 @@ class UpdateTests(unittest.TestCase):
         self.assertIsNone(update.read_cache())
         paths.state_dir().joinpath("update.json").write_text('["不是对象"]')
         self.assertIsNone(update.read_cache())
+
+
+class UpdaterTests(TempCodexHome):
+    """自更新的判定逻辑。
+
+    真的下载换包不在测试里做（那会动到用户正在用的 App），这里钉死的是
+    「该不该换、换哪个包」这些判断 —— 判断错了后果比失败更严重：
+    给完整版用户下标准版，机器上又没系统 Python，更新完就再也打不开。
+    """
+
+    def _fake_app(self, version="1.6.9", bundled_python=False):
+        root = Path(tempfile.mkdtemp()) / "CodexSwitcher.app"
+        runtime = root / "Contents" / "Resources" / "runtime"
+        (runtime / "codex_switcher").mkdir(parents=True)
+        (runtime / "codex_switcher" / "__init__.py").write_text(
+            '__version__ = "%s"\n' % version, encoding="utf-8")
+        if bundled_python:
+            (runtime / "python-arm64" / "bin").mkdir(parents=True)
+            (runtime / "python-arm64" / "bin" / "python3").write_text("")
+        return root
+
+    def test_variant_matches_how_launcher_finds_python(self):
+        """完整版/标准版的判定必须和 launch.sh 找 Python 的方式一致。"""
+        from codex_switcher import updater
+        self.assertEqual(updater.install_variant(self._fake_app()), "standard")
+        self.assertEqual(updater.install_variant(self._fake_app(bundled_python=True)), "full")
+        # 老的完整版可能只放其中一份，launch.sh 两种名字都认
+        for name in ("python", "python-arm64", "python-x86_64"):
+            app = self._fake_app()
+            (app / "Contents/Resources/runtime" / name / "bin").mkdir(parents=True)
+            (app / "Contents/Resources/runtime" / name / "bin/python3").write_text("")
+            self.assertEqual(updater.install_variant(app), "full", name)
+
+    def test_asset_name_follows_variant(self):
+        from codex_switcher import updater
+        self.assertIn("latest.zip", updater.asset_url("standard"))
+        self.assertNotIn("full", updater.asset_url("standard"))
+        self.assertIn("latest-full.zip", updater.asset_url("full"))
+
+    def test_version_read_from_downloaded_bundle(self):
+        from codex_switcher import updater
+        app = self._fake_app(version="2.3.4")
+        self.assertEqual(updater._version_of(app), "2.3.4")
+        # 包体结构不对（比如下到了别的东西）不能读出一个假版本
+        self.assertIsNone(updater._version_of(Path(tempfile.mkdtemp())))
+
+    def test_never_downgrade(self):
+        """下到的版本比现在还旧就拒绝 —— CDN 缓存旧资产时最容易踩到。"""
+        from codex_switcher import __version__, updater
+        newer = updater._numbers("9999.0.0")
+        older = updater._numbers("0.0.1")
+        current = updater._numbers(__version__)
+        self.assertGreater(newer, current)
+        self.assertLess(older, current)
+
+    def test_not_running_as_app_is_reported_not_supported(self):
+        """从源码目录跑的时候必须明确说不支持，而不是给个必然失败的按钮。"""
+        from codex_switcher import updater
+        self.assertIsNone(updater.running_app_path())
+        plan = updater.plan()
+        self.assertFalse(plan["supported"])
+        self.assertIn("reason", plan)
+        self.assertTrue(plan["url"])
+
+    def test_update_script_is_valid_bash_and_quits_nothing_unsafe(self):
+        import subprocess
+        from codex_switcher import updater
+        workdir = Path(tempfile.mkdtemp())
+        script = updater._write_script(Path("/tmp/Old.app"), Path("/tmp/New.app"),
+                                       Path("/tmp/Backup.app"), [4242], workdir)
+        text = script.read_text()
+        # 必须是合法 bash：拼接漏一个 + 就会静默少几行，这里能兜住
+        result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # 换包前必须先把旧的移走，否则新旧文件混在一个包里
+        self.assertIn("mv ", text)
+        self.assertIn('[ -d "', text)
+        # 复制失败要能还原，不能让用户落到一个打不开的 App
+        self.assertIn("还原备份", text)
+        self.assertTrue(script.stat().st_mode & 0o111, "脚本必须是可执行的")
+
+    def test_apply_creates_the_backup_directory_before_swapping(self):
+        """备份目录必须真的建出来。
+
+        之前建的是备份目录的**父目录**（backups/），而备份目标在
+        backups/<时间戳>/App.app —— 那一层没建，脚本里 mv 就 ENOENT，
+        脚本于是正确地中止更新。结果是「永远更新不了，还看不出为什么」。
+        这条测试把整条 apply 流程跑一遍（下载和换包替换成假动作），
+        只断言：目录建好了、更新脚本真的被启动了。
+        """
+        from codex_switcher import __version__, paths, updater
+
+        old_app = self._fake_app(version="0.0.1")
+        new_app = self._fake_app(version="9.9.9")
+        work = Path(tempfile.mkdtemp())
+        zip_path = work / "fake.zip"
+        subprocess.run(["ditto", "-c", "-k", "--keepParent", str(new_app), str(zip_path)],
+                       check=True)
+
+        spawned = {}
+        # 只换掉 updater 模块里那个 subprocess 引用。直接改 subprocess.Popen
+        # 会连 _extract 里的 subprocess.run 一起弄坏（run 内部就调 Popen）。
+        saved = (updater.subprocess, updater.running_app_path, updater._download)
+        try:
+            updater.subprocess = _FakeSubprocess(spawned)
+            updater.running_app_path = lambda: old_app
+            # 假装下载：直接把上面打好的假包放到该去的位置
+            updater._download = lambda url, dest: dest.write_bytes(zip_path.read_bytes())
+            result = updater.apply_update()
+        finally:
+            updater.subprocess, updater.running_app_path, updater._download = saved
+
+        self.assertEqual(result["status"], "restarting")
+        self.assertEqual(result["to"], "9.9.9")
+        self.assertEqual(result["from"], __version__)
+        backup = Path(result["backup"])
+        # 关键：备份的父目录必须已经存在，否则脚本第一步 mv 就失败
+        self.assertTrue(backup.parent.is_dir(), "备份目录没有建出来：%s" % backup.parent)
+        self.assertIn(str(paths.backups_dir()), str(backup))
+        # 更新脚本确实被拉起来了
+        self.assertTrue(spawned["cmd"], "没有启动更新脚本")
+        self.assertTrue(Path(spawned["cmd"][1]).exists())
+
+
+class _FakeProc:
+    pid = 0
+
+
+class _FakeSubprocess:
+    """替身：run 用真的（解压要真的跑 ditto），只有 Popen 是假的。
+
+    假 Popen 只是记下被启动的命令 —— 测试里绝不能真的把 App 换掉。
+    """
+
+    DEVNULL = subprocess.DEVNULL
+    PIPE = subprocess.PIPE
+
+    def __init__(self, sink):
+        self._sink = sink
+
+    def run(self, *args, **kwargs):
+        return subprocess.run(*args, **kwargs)
+
+    def Popen(self, *args, **kwargs):
+        self._sink["cmd"] = args[0] if args else None
+        return _FakeProc()
+
+
+class ReadinessTests(TempCodexHome):
+    """端到端链路检查。
+
+    每一条都对着一个真实报过来的现象：页面加载不出来、反复重新连接、
+    「ChatGPT 订阅无法使用第三方模型」。三张脸，同一条链路。
+    """
+
+    def _write_config(self, body: str) -> None:
+        from codex_switcher import paths
+        config = paths.config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(body, encoding="utf-8")
+
+    @staticmethod
+    def _patch_helper(content: str):
+        """把凭据助手换掉（content 会被写成可执行脚本）。
+
+        必须走 patch 而不是直接改文件：secrets.install_helper() 发现内容
+        不一致就会把它重写回去，直接写文件是拦不住的。
+        """
+        import tempfile
+        from codex_switcher import secrets
+        path = Path(tempfile.mkdtemp()) / "helper.sh"
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+        original = secrets.helper_command
+        secrets.helper_command = lambda provider_id: (str(path), [provider_id])
+        return original, path
+
+    def test_reports_missing_provider_block(self):
+        """config 里写了第三方平台却没有对应配置段。
+
+        这时 Codex 根本不认识这个平台，会退回 ChatGPT 订阅鉴权，
+        于是报「订阅无法使用第三方模型」—— 用户以为是我们没切过去。
+        """
+        from codex_switcher import readiness
+        self._write_config('model_provider = "minimax"\nmodel = "minimax-m2"\n')
+        report = readiness.check()
+        self.assertFalse(report["ok"])
+        names = {item["name"] for item in report["checks"] if item["status"] == readiness.FAIL}
+        self.assertIn("平台配置段", names)
+        self.assertIn("minimax", readiness.describe(report) + readiness.to_text(report))
+
+    def test_reports_conflicting_auth_key(self):
+        """provider 段里混进 requires_openai_auth —— Codex 会改用订阅鉴权。
+
+        这是「ChatGPT 订阅无法使用第三方模型」最直接的一档成因。
+        """
+        from codex_switcher import readiness
+        self._write_config(
+            'model_provider = "minimax"\nmodel = "minimax-m2"\n\n'
+            '[model_providers.minimax]\nname = "MiniMax"\n'
+            'base_url = "https://api.minimax.chat/v1"\n'
+            'requires_openai_auth = true\n')
+        report = readiness.check()
+        self.assertFalse(report["ok"])
+        auth = next(i for i in report["checks"] if i["name"] == "认证方式")
+        self.assertEqual(auth["status"], readiness.FAIL)
+        self.assertIn("requires_openai_auth", auth["detail"])
+
+    def test_reports_helper_that_cannot_even_start(self):
+        """凭据助手文件在，但 shebang 指向的解释器不存在。
+
+        v1.6.9 修的就是这个：文件好好的，一执行就 SIGABRT，Codex 拿到空
+        密钥 → 退回订阅鉴权 → 报「订阅无法使用第三方模型」。
+        只检查"文件在不在"抓不到，必须真跑。
+        """
+        from codex_switcher import readiness, secrets
+        self._write_config(
+            'model_provider = "minimax"\nmodel = "minimax-m2"\n\n'
+            '[model_providers.minimax]\nname = "MiniMax"\n'
+            'base_url = "https://api.minimax.chat/v1"\n')
+        original, _ = self._patch_helper("#!/nonexistent/python-3.7\nprint('never runs')\n")
+        try:
+            report = readiness.check()
+        finally:
+            secrets.helper_command = original
+        self.assertFalse(report["ok"])
+        helper = next(i for i in report["checks"] if i["name"] == "凭据助手")
+        self.assertEqual(helper["status"], readiness.FAIL)
+
+    def test_reports_helper_that_returns_nothing(self):
+        """脚本没崩但也没给密钥 —— 同样是拿不到密钥，同样会退回订阅鉴权。"""
+        from codex_switcher import readiness, secrets
+        self._write_config(
+            'model_provider = "minimax"\nmodel = "minimax-m2"\n\n'
+            '[model_providers.minimax]\nname = "MiniMax"\n'
+            'base_url = "https://api.minimax.chat/v1"\n')
+        original, _ = self._patch_helper("#!/bin/sh\nexit 0\n")
+        try:
+            report = readiness.check()
+        finally:
+            secrets.helper_command = original
+        self.assertFalse(report["ok"])
+        helper = next(i for i in report["checks"] if i["name"] == "凭据助手")
+        self.assertIn("空", helper["detail"])
+
+    def test_reports_dead_local_bridge(self):
+        """走协议桥的平台，桥没跑 → 地址是 127.0.0.1，Codex 连不上。
+
+        现象就是「加载不出来 / 反复重新连接」。
+        """
+        from codex_switcher import readiness
+        self._write_config(
+            'model_provider = "onlychat"\nmodel = "m"\n\n'
+            '[model_providers.onlychat]\nname = "OnlyChat"\n'
+            'base_url = "http://127.0.0.1:65001/onlychat/v1"\n')
+        report = readiness.check()
+        self.assertFalse(report["ok"])
+        bridge_item = next(i for i in report["checks"] if i["name"] == "本地协议桥")
+        self.assertEqual(bridge_item["status"], readiness.FAIL)
+
+    def test_healthy_chain_passes(self):
+        """反过来：都好的时候不许报假警。"""
+        from codex_switcher import readiness, secrets
+        self._write_config(
+            'model_provider = "minimax"\nmodel = "minimax-m2"\n\n'
+            '[model_providers.minimax]\nname = "MiniMax"\n'
+            'base_url = "https://api.minimax.chat/v1"\n')
+        # 让 secrets.load 认为钥匙串里有密钥（这一项单独测过，这里聚焦链路）
+        real_load = secrets.load
+        secrets.load = lambda provider_id: "sk-fake-for-readiness-test"
+        original, _ = self._patch_helper("#!/bin/sh\necho sk-fake-key-from-helper\n")
+        try:
+            report = readiness.check()
+        finally:
+            secrets.helper_command = original
+            secrets.load = real_load
+        self.assertTrue(report["ok"], readiness.to_text(report))
+        self.assertTrue(any(i["name"] == "凭据助手" and i["status"] == readiness.OK
+                            for i in report["checks"]))
+        # 密钥内容绝不能出现在输出里
+        self.assertNotIn("sk-fake-key-from-helper", readiness.to_text(report))
 
 
 class EngineContinueTests(TempCodexHome):
@@ -1987,6 +2367,56 @@ class SweepTests(TempCodexHome):
         self.assertTrue(report["dry_run"])
         self.assertEqual(history.inspect(path)["orphan_outputs"], 1)
         self.assertIsNone(report["backup_dir"])
+
+    def test_engine_sweep_clears_openai_only_items_while_on_third_party(self):
+        """在第三方平台上时，清扫必须连 OpenAI 专有条目一起清。
+
+        界面上的「清扫会话历史」按钮走的是 engine.sweep_history，而它以前
+        **根本没传** moving_off_openai —— 于是界面比命令行清得少，用户点了
+        清扫，旧对话回放照样被第三方平台拒收，一直转圈重连，看着就像
+        「清扫没用」。这里钉死：只要当前不在官方平台，就得自动按搬家处理。
+        """
+        from codex_switcher import configfile, engine, history, paths
+
+        # 当前平台设成第三方
+        config = paths.config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('model_provider = "deepseek"\nmodel = "deepseek-chat"\n',
+                          encoding="utf-8")
+        self.assertEqual(engine.current_status().get("model_provider"), "deepseek")
+
+        reasoning = {"type": "response_item", "payload": {
+            "type": "reasoning", "encrypted_content": "abc-secret-content"}}
+        path = self._rollout("rollout-openai-only.jsonl",
+                             self._healthy() + [reasoning], seconds_ago=7200)
+
+        # 命令行那条路径一直是对的，先确认它确实能清
+        self.assertEqual(history.inspect(path)["openai_only"], 1)
+        history.sweep_all(moving_off_openai=True)
+        self.assertEqual(history.inspect(path)["openai_only"], 0)
+
+        # 界面那条路径（不传任何参数，靠自动判断）也必须能清
+        path2 = self._rollout("rollout-openai-only-2.jsonl",
+                              self._healthy() + [reasoning], seconds_ago=7200)
+        self.assertEqual(history.inspect(path2)["openai_only"], 1)
+        engine.sweep_history()
+        self.assertEqual(history.inspect(path2)["openai_only"], 0)
+
+    def test_engine_sweep_leaves_history_alone_while_on_official(self):
+        """反过来：在官方平台上不能乱清自家条目，否则就是破坏历史。"""
+        from codex_switcher import engine, history, paths
+
+        config = paths.config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('model_provider = "openai"\nmodel = "gpt-5-codex"\n',
+                          encoding="utf-8")
+
+        path = self._rollout("rollout-official.jsonl", self._healthy() + [
+            {"type": "response_item", "payload": {
+                "type": "reasoning", "encrypted_content": "abc-secret-content"}}],
+            seconds_ago=7200)
+        engine.sweep_history()
+        self.assertEqual(history.inspect(path)["openai_only"], 1)
 
     def test_describe_sweep_says_something_a_human_can_act_on(self):
         from codex_switcher import history

@@ -478,6 +478,19 @@ h1 {
 .banner-text strong { font-size: 14px; }
 .banner-actions { display: flex; gap: 8px; }
 
+/* 切换结果：成功/失败要一眼分得出来，不能和「有异常待处理」的黄色横幅混淆 */
+.banner.result-ok {
+  background: rgba(240, 253, 244, .92);
+  border-color: rgba(22, 163, 74, .32);
+}
+.banner.result-fail {
+  background: rgba(254, 242, 242, .94);
+  border-color: rgba(220, 38, 38, .34);
+}
+.banner.result-ok .banner-text strong { color: #15803d; }
+.banner.result-fail .banner-text strong { color: #b91c1c; }
+.banner.result-ok .hint, .banner.result-fail .hint { opacity: .85; }
+
 .context-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .context-row select, .context-row input {
   font: inherit; font-size: 13px; padding: 6px 8px;

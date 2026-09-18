@@ -41,6 +41,31 @@
   </div>
 </div>
 
+<!-- 链路不通：与其让用户面对「加载不出来 / 一直重连」干瞪眼，
+     不如直接说出断在哪一环、怎么修。 -->
+<div class="banner result-fail" id="readiness-banner" hidden>
+  <div class="banner-text">
+    <strong id="readiness-title" data-i18n="ready.title">当前平台暂时发不出请求</strong>
+    <span class="hint" id="readiness-detail"></span>
+  </div>
+  <div class="banner-actions">
+    <button class="btn ghost small" id="btn-readiness-dismiss" data-i18n="ready.dismiss">知道了</button>
+  </div>
+</div>
+
+<!-- 切换结果：切完要让用户看见到底成了没有。
+     只靠一闪而过的 toast 不够 —— 失败时用户往往没看清就被别的提示盖掉了，
+     以为切成功了，结果 Codex 里还是旧模型。 -->
+<div class="banner" id="switch-result" hidden>
+  <div class="banner-text">
+    <strong id="switch-result-title"></strong>
+    <span class="hint" id="switch-result-detail"></span>
+  </div>
+  <div class="banner-actions">
+    <button class="btn ghost small" id="btn-switch-result-dismiss" data-i18n="switch.dismiss">知道了</button>
+  </div>
+</div>
+
 <div class="banner" id="guard-banner" hidden>
   <div class="banner-text">
     <strong id="guard-banner-title" data-i18n="guard.title">当前对话装不下目标模型的上下文窗口</strong>
@@ -90,6 +115,10 @@
   <span id="about-update" class="hint"></span>
   <button class="btn ghost small" id="btn-sweep-history" data-i18n="history.sweep">清扫会话历史</button>
   <button class="btn ghost small" id="btn-check-update" data-i18n="update.check">检查更新</button>
+  <button class="btn primary small" id="btn-install-update" hidden></button>
+  <a class="btn ghost small" id="btn-manual-update"
+     href="https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest"
+     target="_blank" rel="noreferrer" data-i18n="update.manual" hidden>手动下载</a>
   <a id="about-repo" href="https://github.com/yankuanglin1-droid/codex-model-switcher"
      target="_blank" rel="noreferrer" data-i18n="footer.repo">GitHub 项目主页 ↗</a>
   <span class="hint" id="footer-help"></span>

@@ -370,7 +370,10 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
         previous_provider = configfile.read_top_level(
             text, ["model_provider"]).get("model_provider")
         settings = official_settings(model_id or DEFAULT_OFFICIAL_MODEL)
-        new_text = configfile.rewrite_model_settings(text, settings)
+        # 切回官方要**清空**其余托管键：model_catalog_json 还指着第三方目录
+        # 的话，官方那边会按那份目录认模型。第三方之间互切则相反 ——
+        # 用户手工设的 service_tier 之类必须留着（keep_others 默认 True）。
+        new_text = configfile.rewrite_model_settings(text, settings, keep_others=False)
         # 官方认 tool_search，切回来要把它打开（第三方那儿可能关过）
         new_text = configfile.set_feature(new_text, "tool_search", True)
         if dry_run:
@@ -614,6 +617,7 @@ def schedule_full_follow(from_provider: str, to_provider: str, model: Optional[s
 
 def sweep_history(limit: Optional[int] = None, apply: bool = True,
                   cross_provider: bool = False,
+                  moving_off_openai: Optional[bool] = None,
                   budget_seconds: Optional[float] = None) -> Dict:
     """全量清扫会话历史里的"必然被平台拒收"的条目。
 
@@ -625,10 +629,25 @@ def sweep_history(limit: Optional[int] = None, apply: bool = True,
     哪天点开那个对话就炸一次。所以这里不设窗口，靠账本做增量。
     """
     from . import history as history_module
+    # 当前不在官方平台上时，OpenAI 专有的加密推理条目同样是废数据：
+    # 它们只在官方那边有意义，第三方拿到只会拒收整个请求。
+    # 命令行一直是这么做的；这里补上 —— 否则图形界面点"清扫"比命令行
+    # 清得少，用户旧对话回放还是被拒，看着像"清扫没用"。
+    # 读不到配置时不猜：按"在第三方平台上"处理会删掉官方专有条目，
+    # 那是不可逆的；所以解析失败就退回只清孤儿输出（双方都认的坏数据）。
+    try:
+        on_third_party = current_status().get("model_provider", OFFICIAL_PROVIDER) != OFFICIAL_PROVIDER
+    except Exception:  # noqa: BLE001 - 清扫是兜底动作，不能自己先崩
+        on_third_party = False
+    if not cross_provider:
+        cross_provider = on_third_party
+    if moving_off_openai is None:
+        moving_off_openai = on_third_party
     kwargs = {}
     if budget_seconds is not None:
         kwargs["budget_seconds"] = budget_seconds
     return history_module.sweep_all(
+        moving_off_openai=moving_off_openai,
         cross_provider=cross_provider, limit=limit,
         dry_run=not apply, **kwargs)
 
@@ -669,7 +688,8 @@ def remove_provider(provider_id: str, purge_key: bool = True) -> Dict:
         new_text = configfile.remove_provider_block(text, provider_id)
         if new_text != text:
             if parse_check == provider_id:
-                new_text = configfile.rewrite_model_settings(new_text, official_settings(DEFAULT_OFFICIAL_MODEL))
+                new_text = configfile.rewrite_model_settings(
+                    new_text, official_settings(DEFAULT_OFFICIAL_MODEL), keep_others=False)
             backup = configfile.backup(config)
             configfile.atomic_write(config, new_text, text)
     catalog_target = catalog_module.catalog_path(provider_id)

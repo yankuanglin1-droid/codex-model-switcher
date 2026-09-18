@@ -691,6 +691,23 @@ def cmd_use(args) -> int:
                 out("  " + line.replace("\n", "\n  "))
             out("")
             out("  想随时复查：codex-switcher guard")
+
+    # 切完当场验链路。以前切完只说"成功"，可配置写对了不代表能发请求 ——
+    # 凭据助手跑不起来时，用户要等到 Codex 里一直重连、甚至报
+    # 「ChatGPT 订阅无法使用第三方模型」才知道，而那时已经无从下手。
+    try:
+        from . import readiness
+        report = readiness.check(provider_id=result.get("provider"))
+    except Exception:  # noqa: BLE001 - 验不了也不能让切换报失败
+        report = None
+    if report is not None and not report.get("ok"):
+        out("")
+        out("⚠ 切换写好了，但现在还发不出请求：")
+        for line in readiness.to_text(report).splitlines():
+            if line.strip().startswith(("✗", "!")):
+                out("  " + line.strip())
+        out("")
+        out("  详细排查：codex-switcher check")
     return 0
 
 
@@ -859,6 +876,26 @@ def cmd_update(args) -> int:
     return 0
 
 
+def cmd_check(args) -> int:
+    """端到端链路检查。
+
+    单独成一条命令，是因为「页面加载不出来 / 反复重新连接 / 报 ChatGPT 订阅
+    无法使用第三方模型」这三张脸背后是同一条链路断了，而单点检查每处都显示
+    "没问题"。这条命令把整串一起验，凭据助手会真跑一遍。
+    """
+    from . import readiness
+    report = readiness.check(provider_id=getattr(args, "provider", None) or None,
+                             check_history=bool(getattr(args, "history", False)))
+    out("== 链路检查 ==")
+    out(readiness.to_text(report))
+    out("")
+    if report["ok"]:
+        out("✅ " + readiness.describe(report))
+        return 0
+    out("❌ " + readiness.describe(report))
+    return 1
+
+
 def cmd_doctor(args) -> int:
     from . import install
     problems = []
@@ -925,6 +962,17 @@ def cmd_doctor(args) -> int:
                 "执行 codex-switcher history --clean 清理" % len(scan["dirty"]))
         else:
             out("  · 没有发现问题条目")
+
+    # 环境和平台列表都查完了，最后再把整条链路串起来验一遍。
+    # 前面那些检查每一处单独看都可能"没问题"，但 Codex 照样发不出请求 ——
+    # 「加载不出来 / 反复重连 / 报订阅无法使用第三方模型」就是这么来的。
+    out("")
+    out("== 链路检查 ==")
+    from . import readiness
+    report = readiness.check(check_history=bool(getattr(args, "history", False)))
+    out(readiness.to_text(report))
+    if not report["ok"]:
+        problems.append(readiness.describe(report))
 
     out("")
     if problems:
@@ -1271,6 +1319,10 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("--keep-key", action="store_true")
 
     sub.add_parser("status", help="显示当前状态")
+    check = sub.add_parser("check", help="检查「现在真的能请求当前平台吗」（定位用不了/一直重连）")
+    check.add_argument("--provider", help="检查指定平台，默认检查当前正在用的")
+    check.add_argument("--history", action="store_true", help="顺带检查会话历史（较慢）")
+
     doctor = sub.add_parser("doctor", help="环境自检")
     doctor.add_argument("--history", action="store_true",
                         help="顺带检查会话历史里会被第三方平台拒绝的条目（较慢）")
@@ -1318,6 +1370,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "update": cmd_update,
         "remove": cmd_remove,
         "status": cmd_status,
+        "check": cmd_check,
         "doctor": cmd_doctor,
         "app": cmd_app,
         "export": cmd_export,

@@ -106,10 +106,28 @@ if [ "$INIT" -eq 1 ]; then
   mkdir -p "${CODEX_HOME:-$HOME/.codex}/model-switcher"
   printf '%s\n' "$PYTHON" > "${CODEX_HOME:-$HOME/.codex}/model-switcher/python-path"
   printf '%s\n' "$APP_HOME" > "${CODEX_HOME:-$HOME/.codex}/model-switcher/runtime-path"
+
+  # 装完就验一遍链路，别等用户跑起来才发现"加载不出来 / 一直重连"。
+  #
+  # 这一环以前是缺的：安装脚本只负责把东西放好，至于「放好之后到底能不能
+  # 用」，要等用户配上平台、切过去、发第一条消息才知道 —— 而那时报出来的
+  # 错（反复重连、订阅无法使用第三方模型）跟安装阶段的问题对不上号，
+  # 排查起来全靠猜。现在装完当场验，有问题立刻看得见。
+  #
+  # 这里刻意不因检查失败而中断安装：没有 Codex 配置文件、还没添加平台
+  # 都属正常，不该让安装"失败"。
+  say ""
+  if "$TARGET_DIR/codex-switcher" check; then :; else
+    say ""
+    say "（上面这几条不是安装失败，是提醒：现在还没法正常请求。）"
+    say "配好平台之后再跑一次 codex-switcher check 复查。"
+  fi
+
   say ""
   say "完成。接下来："
   say "  1) codex-switcher add --preset deepseek --key-stdin   # 添加平台"
   say "  2) codex-switcher use deepseek                        # 切换"
-  say "  3) 完全退出并重新打开 Codex"
+  say "  3) codex-switcher check                               # 验一遍链路"
+  say "  4) 完全退出并重新打开 Codex"
   say "也可以直接运行 codex-switcher app 打开图形界面。"
 fi

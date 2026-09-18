@@ -120,21 +120,60 @@ def _strip_top_level_model_keys(lines: List[str]) -> Tuple[List[str], int]:
     return kept, split
 
 
-def rewrite_model_settings(text: str, settings: Dict) -> str:
-    """把模型相关配置写到文件头部，其它内容原样保留。"""
+def rewrite_model_settings(text: str, settings: Dict, *, keep_others: bool = True) -> str:
+    """把模型相关配置写到文件头部，其它内容原样保留。
+
+    keep_others（默认 True）：
+        本次没给的托管键**沿用原值**，不要静默删掉。用户手工设的
+        ``service_tier`` / ``model_verbosity`` 跟"用哪个模型"无关，
+        切换平台时不该被抹掉 —— 实测过：priority / medium 切一次就没了，
+        而 service_tier 恰恰是切回官方才体现价值的，丢了用户还察觉不到。
+
+    keep_others=False：
+        清空本次没给的托管键。**切回官方 OpenAI 时用**：第三方专属字段
+        （model_catalog_json 指向第三方目录等）必须清干净，不能残留。
+    """
     unknown = set(settings) - MANAGED_SET
     if unknown:
         raise ConfigError("不认识的配置项：%s" % ", ".join(sorted(unknown)))
+
+    # 合并：本次要改的覆盖原有值，本次没提的沿用原值（keep_others 时）
+    merged = dict(settings)
+    if keep_others:
+        existing = read_top_level(text, MANAGED_KEYS)
+        for key in MANAGED_KEYS:
+            if key in settings or key not in existing:
+                continue
+            merged[key] = existing[key]
+    # 按固定顺序输出，保证同一份输入永远得到同一份文本（幂等）
+    ordered = {key: merged[key] for key in MANAGED_KEYS if key in merged}
+    ordered.update({k: v for k, v in merged.items() if k not in ordered})
+
     lines = text.splitlines(keepends=True)
     kept, split = _strip_top_level_model_keys(lines)
-    head = "".join(kept).rstrip()
+    # 只去掉**尾部**多余的换行，头部内部的结构（含空行）原样保留。
+    # 以前是 rstrip() 抹掉全部换行、再硬塞一个固定的 "\n\n"：一旦头部有
+    # 非托管顶层键（approval_policy / sandbox_mode 这些都是 Codex 自己写的
+    # 正常配置），重写出来的排版就和原文不同，第一道逐字比对必然失败 ——
+    # 结果是任何切换都报「拒绝修改模型配置以外的内容」，整条链路被阻断。
+    head = "".join(kept).rstrip("\n")
     body = "".join(lines[split:])
-    rendered = "".join("%s = %s\n" % (key, toml_value(value)) for key, value in settings.items())
-    new_text = (head + "\n\n" if head else "") + rendered + ("\n" + body if body else "")
+    rendered = "".join("%s = %s\n" % (key, toml_value(value))
+                       for key, value in ordered.items())
+    new_text = "".join(part for part in (
+        head + "\n\n" if head else "",
+        rendered + ("\n" if body else ""),
+        body,
+    ) if part)
 
-    # 第一道校验：顶层模型键之外的文字必须逐字不变（任何 Python 版本都能做）
+    # 第一道校验：顶层模型键之外的文字必须一字不差（任何 Python 版本都能做）
     def remainder(document: str) -> str:
-        """只剔除文件头部（第一张表之前）的模型键，之后的内容必须一模一样。"""
+        """只剔除文件头部（第一张表之前）的模型键，之后的内容必须一模一样。
+
+        空行不参与比对：重写时段落间距本来就会变，而空行在 TOML 里不承载
+        任何语义。拿排版差异去判"篡改"会把正常重写误杀（见上方注释）。
+        真正的内容防线是下面第二道 TOML 语义比对。
+        """
         output = []
         seen_table = False
         for line in document.splitlines(keepends=True):
@@ -142,6 +181,8 @@ def rewrite_model_settings(text: str, settings: Dict) -> str:
                 seen_table = True
                 output.append(line)
                 continue
+            if not line.strip():
+                continue  # 空行是排版，不是配置内容
             if not seen_table and _is_managed_line(line):
                 continue
             output.append(line)
@@ -158,9 +199,11 @@ def rewrite_model_settings(text: str, settings: Dict) -> str:
         protected_after = {k: v for k, v in after.items() if k not in MANAGED_SET}
         if protected_before != protected_after:
             raise ConfigError("拒绝修改模型配置以外的内容")
-        if {k: after[k] for k in MANAGED_SET if k in after} != settings:
+        if {k: after[k] for k in MANAGED_SET if k in after} != ordered:
             raise ConfigError("模型配置校验未通过")
     else:
+        # 降级环境只校验本次要写的这些键：额外保留下来的原值不参与比对，
+        # 免得逐行扫描解析不了某种写法就误判成写入失败。
         if read_top_level(new_text, tuple(settings.keys())) != settings:
             raise ConfigError("模型配置校验未通过")
     return new_text

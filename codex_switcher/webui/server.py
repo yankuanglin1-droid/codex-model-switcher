@@ -202,6 +202,13 @@ def _state_payload(include_balance: bool = False) -> Dict:
         "version": __version__,
         "project_url": PROJECT_URL,
         "update": update_module.read_cache(),
+        # 能不能"一键更新"取决于运行环境（是不是 .app、目录可不可写），
+        # 每次带过去，界面就知道该不该显示那个按钮。
+        "self_update": _self_update_plan(),
+        "updated_to": _last_applied_update(),
+        # 端到端链路：配好了 ≠ 能请求。断在哪一环界面直接说，
+        # 省得用户只看到"一直重连"却无从下手。
+        "readiness": _readiness(),
         "threads": thread_info,
         "current": current,
         "providers": providers,
@@ -212,6 +219,34 @@ def _state_payload(include_balance: bool = False) -> Dict:
         "secret_backend_id": secrets.backend(),
         "codex_missing": not current.get("exists", False),
     }
+
+
+def _self_update_plan() -> Dict:
+    """一键更新的可行性检查。这一层不能抛错 —— 界面靠它决定显示什么。"""
+    try:
+        from .. import updater as updater_module
+        return updater_module.plan()
+    except Exception as exc:  # noqa: BLE001
+        return {"supported": False, "reason": "自动更新不可用（%s）" % type(exc).__name__,
+                "url": PROJECT_URL + "/releases/latest"}
+
+
+def _readiness() -> Optional[Dict]:
+    """当前平台能不能真的发请求。跑一次要调凭据助手，失败也只是显示不出来。"""
+    try:
+        from .. import readiness as readiness_module
+        return readiness_module.check()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _last_applied_update() -> Optional[Dict]:
+    """上一次自动更新是否真的换成功了。重启后回显一次，然后就不再出现。"""
+    try:
+        from .. import updater as updater_module
+        return updater_module.pending()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -489,6 +524,17 @@ class Handler(BaseHTTPRequestHandler):
         if action == "update-check":
             result = update_module.check(force=True)
             result["description"] = update_module.describe(result)
+            # 版本信息变了，能不能一键更新也可能跟着变（比如刚从源码目录换成 .app）
+            result["self_update"] = _self_update_plan()
+            return result
+
+        if action == "update-apply":
+            # 真的把自己换掉。注意：成功时本进程随后就会退出，
+            # 这个响应未必来得及送回浏览器 —— 界面那边不能只靠返回值判断结果。
+            from .. import updater as updater_module
+            result = updater_module.apply_update(
+                expected_tag=str(payload.get("latest") or ""))
+            result["description"] = result["message"]
             return result
 
         if action == "threads":
@@ -505,8 +551,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "sweep_history":
             # 全量清扫会话历史里的孤儿工具结果（缺 call_id 的 function_call_output）。
             # 有预算上限：几百 MB 的大文件不该把界面卡住，剩下的交给后台巡检。
-            report = history_module.sweep_all(
-                dry_run=bool(payload.get("dry_run")),
+            #
+            # 走 engine 而不是直接调 history.sweep_all：只有 engine 那一层会按
+            # 当前平台补上 moving_off_openai —— 在第三方平台上时，OpenAI 专有
+            # 的加密推理条目同样是废数据，不清的话旧对话回放照样被拒。
+            # 命令行一直是清的，界面之前漏了，点清扫看着像"没用"。
+            report = engine.sweep_history(
+                apply=not bool(payload.get("dry_run")),
                 budget_seconds=SWEEP_ON_DEMAND_BUDGET_SECONDS)
             report["description"] = history_module.describe_sweep(report)
             return report
