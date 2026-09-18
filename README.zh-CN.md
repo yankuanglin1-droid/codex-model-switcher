@@ -136,6 +136,7 @@ codex-switcher restore               # 一键切回官方 OpenAI
 | `unknown model 'xxx'` / `invalid params (2013)` | 任务还绑着上一个平台 | 几秒内自动修复，或 `codex-switcher repair --follow`；重开 Codex |
 | `model is not supported ... ChatGPT account` | 在绑着官方 OpenAI 的旧任务里选第三方模型（这类任务刻意不搬） | 对它「分叉」，或新建任务 |
 | `missing field call_id`（任何任务、任何平台） | `codex_app` 命名空间工具写出的 `function_call_output` 没有 `call_id`：会话文件里可选、API 里必填 | **v1.6.6 起自动全量清扫**（所有会话文件：切换时 + 界面巡检）；立刻清一次：`codex-switcher history --sweep`（先备份） |
+| `tool type "tool_search" is not supported`（Kimi 等严格校验的平台） | Codex 的内置工具 `tool_search`：它的 `arguments` 是**对象**，不像 `function_call` 那样是字符串 | **v1.6.8 起已处理**：第三方平台不再下发这个工具，历史里已有的 `tool_search` 成对剥离 |
 | 一直「压缩上下文」毫无进展 | 会话比目标模型的窗口还大 | `codex-switcher guard`，或点横幅上的「**一键换成装得下的模型**」 |
 | `wire_api = "chat" is no longer supported` | 旧的手工配置残留 | `codex-switcher use <平台>` 重写 |
 | 502 / 连接被拒 | 协议桥没在跑 | `codex-switcher bridge --install-agent` |
@@ -173,7 +174,7 @@ Codex 只跟一个对话模型说话。工具不会假装这些能力存在 —�
 ## 开发与验证
 
 ```bash
-python3 -m unittest discover -s tests      # 138 项测试，无需联网
+python3 -m unittest discover -s tests      # 168 项测试，无需联网
 python3 tools/preflight.py                 # 发布前总自检
 python3 tools/verify_codex_catalog.py      # 真实 Codex 能否列出我们的模型
 python3 tools/verify_bridge.py             # 真实 Codex 走协议桥拿回答

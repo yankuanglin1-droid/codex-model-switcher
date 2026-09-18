@@ -44,8 +44,31 @@ def scan_text(text: str, where: str, findings: list, allowed: set) -> None:
             findings.append((where, line, label, match.group(0)[:12] + "…"))
 
 
+def _versioned_files():
+    """git 视角下"会被纳入版本控制"的相对路径集合；拿不到就返回 None。
+
+    工作区扫描要回答的是「有没有密钥会进仓库」，所以**已经被 .gitignore 忽略的
+    本地文件不该算** —— 例如用户自己放在 private-install/ 里的密钥文件，
+    它确实在本机明文躺着，但不会跟着发布出去（git 历史和远端那两项另行校验）。
+    拿不到 git 信息时返回 None，调用方退回全量扫描：宁可多报，不可漏报。
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=ROOT, capture_output=True, timeout=60)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return {name.decode("utf-8", "replace")
+            for name in result.stdout.split(b"\0") if name}
+
+
 def scan() -> int:
     findings = []
+    versioned = _versioned_files()
     for path in sorted(ROOT.rglob("*")):
         if not path.is_file():
             continue
@@ -54,6 +77,8 @@ def scan() -> int:
         relative = path.relative_to(ROOT).as_posix()
         if relative in ALLOWED:
             continue
+        if versioned is not None and relative not in versioned:
+            continue  # 已被 .gitignore 忽略，不会进仓库
         if path.suffix.lower() in SKIP_SUFFIX:
             continue
         try:

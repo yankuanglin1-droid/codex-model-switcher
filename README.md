@@ -8,7 +8,7 @@
 [![macOS 11+](https://img.shields.io/badge/macOS-11%2B-black?style=flat-square&logo=apple)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
 [![Windows / Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-0078D6?style=flat-square&logo=windows)](INSTALL-WITH-AI.md)
 [![Python 3.9+](https://img.shields.io/badge/Python%203.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](README.md)
-[![Tests](https://img.shields.io/badge/tests-160%20passing-2ea44f?style=flat-square)](#development)
+[![Tests](https://img.shields.io/badge/tests-168%20passing-2ea44f?style=flat-square)](#development)
 
 **Codex (ChatGPT App) can officially only talk to OpenAI. This tool opens it up to
 any provider with an OpenAI-compatible API** — DeepSeek, MiniMax, Zhipu GLM, Moonshot
@@ -157,6 +157,7 @@ Everything here is handled automatically or by one command — details in
 | `unknown model 'xxx'` / `invalid params (2013)` | the thread is still bound to the previous provider | self-heals within seconds, or `codex-switcher repair --follow`; restart Codex |
 | `The 'xxx' model is not supported ... ChatGPT account` | continuing an old task that is bound to official OpenAI (those are deliberately never moved) | fork the task, or start a new one |
 | `missing field call_id` (any task, any provider) | `codex_app`-namespace tools write `function_call_output` with no `call_id` — optional in the rollout file, required by the API | **swept automatically since v1.6.6** (every session file: on switch + GUI watchdog); to do it right now: `codex-switcher history --sweep` (backed up) |
+| `tool type "tool_search" is not supported` (Kimi / strict providers) | Codex's built-in `tool_search` tool — unlike `function_call`, its `arguments` is an **object**, not a string | **handled since v1.6.8**: the tool is not offered to third-party providers, and `tool_search` pairs already in history are stripped on switch |
 | Endless "compacting" with no progress | session is larger than the target model's window | `codex-switcher guard` — or click **Switch to a model that fits** in the banner |
 | `wire_api = "chat" is no longer supported` | stale hand-written config | `codex-switcher use <provider>` rewrites it |
 | 502 / connection refused | local bridge isn't running | `codex-switcher bridge --install-agent` |
@@ -219,7 +220,7 @@ More in [docs/troubleshooting.md](docs/troubleshooting.md) and [docs/app.md](doc
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests      # 138 tests, no network needed
+python3 -m unittest discover -s tests      # 168 tests, no network needed
 python3 tools/preflight.py                 # full pre-release check
 python3 tools/verify_providers.py          # provider reachability + local wiring
 python3 tools/verify_codex_catalog.py      # real Codex lists our models

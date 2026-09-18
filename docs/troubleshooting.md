@@ -335,6 +335,57 @@ codex-switcher history --clean --cross-provider  # 顺带剥别家服务端工�
 
 ---
 
+## 报 `tool type "tool_search" is not supported`（Kimi 等平台）
+
+这两条**是同一个根因**，常常先后出现：
+
+```
+invalid_request_error: tools.13: tool type "tool_search" is not supported
+invalid_request_error: json: cannot unmarshal object into Go struct field alias.arguments of type string
+```
+
+### 病根：Codex 有个内置工具 `tool_search`，它的参数和别人不一样
+
+工具清单太长时（装了插件 / 应用 / 一堆 MCP），Codex 不再把工具逐个列进请求，
+而是发一个 `tool_search` 让模型自己搜。问题在于它的 `arguments` 是**对象**，
+而普通 `function_call` 的 `arguments` 是**字符串**：
+
+```jsonc
+{"type": "function_call",     "arguments": "{\"a\": 1}"}   // 字符串
+{"type": "tool_search_call",  "arguments": {"query": "..."}} // 对象
+```
+
+严格校验请求体的平台（实测 Kimi / Moonshot）两条都不认：工具类型直接拒，
+`arguments` 也按字符串去解析。宽松的平台（如 deepseek）能容忍，
+所以常常只有某一家炸，看着像"这个平台有问题"。
+
+实测本机会话文件：`function_call.arguments` 2567 条全是字符串，
+`tool_search_call.arguments` 14 条全是对象。
+
+> 排查时注意：`tools[]` 清单**不落会话文件**，搜会话里的 `"type": "tool_search"`
+> 永远是 0 条。要么按上面看条目类型的 `arguments`，要么抓包。
+
+### 三处一起处理（v1.6.8 起自动）
+
+1. **模型目录**：第三方平台的 `include_apps_usage_instructions` 与
+   `supports_search_tool` 置为 `false`，Codex 就不会注册这个工具。
+   （skills / plugins 仍然开着，本地能力不受影响。）
+2. **按平台的硬开关**：切到不兼容的平台时写 `[features] tool_search = false`，
+   切回官方或别的平台再打开。单个平台可以用 `supports_tool_search` 覆盖。
+3. **清历史残留**：`tool_search_call` / `tool_search_output` **成对剥离**。
+   这一步不做的话，老会话回放照样报错 —— 那些条目已经写进文件了。
+
+切换时自动做（先备份）；想立刻手动清一次：
+
+```bash
+codex-switcher history --sweep --cross-provider
+```
+
+> **改完源码不等于生效**：模型目录是生成物，要重新生成才落盘；`.app` 自带一份
+> 运行时代码，要重建替换界面才跑新版本。核对办法看下面一节。
+
+---
+
 ## 一直在「压缩上下文」，任务却毫无进展
 
 ### 症状
