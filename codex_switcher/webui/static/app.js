@@ -995,10 +995,6 @@ async function switchTo(provider, model) {
   // 切换 = 改配置 + 搬旧任务，第三方互切经常要十几秒：
   // 全屏 loading 遮罩，明确「在干活、别关窗」，避免用户以为卡死乱点。
   showSwitchLoading(provider, model);
-  const providerLabel = () => {
-    const item = (STATE.providers || []).find((p) => p.id === provider);
-    return (item && item.label) || provider;
-  };
   try {
     const result = await api('switch', { provider, model });
     toast(t('toast.switched', {
