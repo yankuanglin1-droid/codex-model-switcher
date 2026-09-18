@@ -52,8 +52,12 @@ ACTIVE_GUARD_SECONDS = 120
 # 探不到 lsof 时再退回 mtime 那道保守护栏。
 LSOF_TIMEOUT_SECONDS = 5.0
 OPEN_FILES_CACHE_SECONDS = 5.0
+# lsof 探针熔断：系统负载高时 lsof -c codex 可能 30s+ 才返回，每次等 5s 超时
+# 会把清扫的时间预算全部烧掉（每个文件卡 5s、25s 预算只够 5 个文件）。
+# 超时一次就本进程内熔断，之后直接退回 mtime 保守护栏——慢机器上宁可保守，
+# 也不能把「全量清扫」拖成「只扫了 5 个」。
 _UNPROBED = object()
-_OPEN_FILES_CACHE: Dict[str, object] = {"at": 0.0, "paths": _UNPROBED}
+_OPEN_FILES_CACHE: Dict[str, object] = {"at": 0.0, "paths": _UNPROBED, "broken": False}
 
 
 def _codex_open_rollouts() -> Optional[set]:
@@ -61,8 +65,11 @@ def _codex_open_rollouts() -> Optional[set]:
 
     结果为 None 只表示"问不出来"（没有 lsof / 不是 unix / 命令失败），
     不表示"没有文件被打开"——调用方必须据此退回保守判定。
+    熔断语义：一旦超时（系统级 lsof 卡死），本次运行内不再重试。
     """
     now = time.time()
+    if _OPEN_FILES_CACHE.get("broken"):
+        return None
     cached = _OPEN_FILES_CACHE.get("paths")
     if cached is not _UNPROBED and now - float(_OPEN_FILES_CACHE["at"] or 0.0) \
             < OPEN_FILES_CACHE_SECONDS:
@@ -78,7 +85,9 @@ def _codex_open_rollouts() -> Optional[set]:
                 if raw.startswith("n") and raw.endswith(".jsonl"):
                     found.add(raw[1:])
     except (OSError, ValueError, subprocess.SubprocessError):
+        # TimeoutExpired 也落在这里：探针超时 = 系统级 lsof 不可用，熔断
         found = None
+        _OPEN_FILES_CACHE["broken"] = True
     _OPEN_FILES_CACHE["at"] = now
     _OPEN_FILES_CACHE["paths"] = found
     return found

@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -28,7 +30,7 @@ APP_NAME = "Codex"
 # 一键重启直接落空。识别一律走 bundle id，app 名只是启动时的参考。
 APP_BUNDLE_ID = "com.openai.codex"
 APP_CANDIDATE_NAMES = ("Codex", "ChatGPT")
-QUIT_TIMEOUT_SECONDS = 10.0
+QUIT_TIMEOUT_SECONDS = 25.0
 POLL_INTERVAL = 0.3
 
 
@@ -111,6 +113,45 @@ def status() -> Dict:
             "running": is_running() if app else False}
 
 
+def _pids() -> List[int]:
+    """当前桌面端进程 PID 集合（Codex / ChatGPT 双名合并）。"""
+    if shutil.which("pgrep") is None:
+        return []
+    pids: List[int] = []
+    for name in APP_CANDIDATE_NAMES:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-x", name],
+                capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                pids.extend(int(x) for x in result.stdout.split())
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
+    return pids
+
+
+def _terminate_gracefully() -> bool:
+    """SIGTERM 软杀：等价于系统层 ⌘Q，给进程存档机会。
+
+    AppleScript 遇到两类墙时用：本机辅助访问权限被关（-1719/-1728）、
+    App 自己弹窗挡住 quit 事件（用户已取消 -128）。SIGTERM 不受这两者影响。
+    """
+    pids = _pids()
+    if not pids:
+        return True
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + QUIT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        if not _pids():
+            return True
+        time.sleep(POLL_INTERVAL)
+    return not _pids()
+
+
 def restart_codex() -> Dict:
     """重启 Codex 桌面 App。返回人话说明，绝不抛错。"""
     result = {"restarted": False, "detail": "", "method": None}
@@ -122,15 +163,25 @@ def restart_codex() -> Dict:
         return result
 
     if is_running():
-        # 优雅退出，等价于 ⌘Q：给 Codex 存状态的机会，别硬杀。
-        # bundle id 是唯一可靠锚点：app 叫 Codex 还是 ChatGPT 都能退。
+        # 退出三级降级，全都等价于 ⌘Q 的「给 Codex 存状态的机会」：
+        #   1) AppleScript（bundle id）—— 最正规，走 App 自己的退出流程；
+        #   2) AppleScript（app 名）—— 老版本兜底；
+        #   3) SIGTERM 软杀 —— 上两级被辅助访问权限/App 弹窗挡住时用。
+        # 三级全失败才让用户手动 ⌘Q，绝不 silent 跳过退出直接 open。
         quit_ok = _osascript(
             'tell application id "%s" to quit' % APP_BUNDLE_ID)
         if not quit_ok:
             quit_ok = _osascript('tell application "%s" to quit' % APP_NAME)
-        if not quit_ok:
-            result["detail"] = "无法向 Codex 发送退出指令（AppleScript 失败），请手动 ⌘Q 后重开。"
-            return result
+        if quit_ok:
+            result["method"] = "quit-and-reopen"
+        else:
+            if _terminate_gracefully():
+                result["method"] = "term-and-reopen"
+            else:
+                result["detail"] = (
+                    "无法自动退出 Codex（AppleScript 与软杀都失败，"
+                    "可能被 App 内弹窗挡住），请手动 ⌘Q 后重开。")
+                return result
         deadline = time.time() + QUIT_TIMEOUT_SECONDS
         while time.time() < deadline:
             if not is_running():
@@ -139,7 +190,6 @@ def restart_codex() -> Dict:
         else:
             result["detail"] = "Codex 在 %g 秒内没有退出，请手动 ⌘Q 后重开。" % QUIT_TIMEOUT_SECONDS
             return result
-        result["method"] = "quit-and-reopen"
     else:
         result["method"] = "open"
 
