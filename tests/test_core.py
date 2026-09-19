@@ -1283,6 +1283,97 @@ class StopCommandTests(TempCodexHome):
         self.assertEqual(killed, [], "确认是别人的进程，绝不能杀")
 
 
+class HistoryBackupTests(TempCodexHome):
+    """清扫备份的容量约束。
+
+    实测事故：9/16-9/18 两天备份攒了 9.9 GB —— 清洗高频发生、会话文件
+    动辄几百 MB，而备份此前没有任何上限和清理机制，只涨不消。
+    """
+
+    def _make_backup(self, root, name, size_mb, age_days=0.0):
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / name
+        path.write_bytes(b"x" * (size_mb * 1024 * 1024))
+        if age_days:
+            stamp = time.time() - age_days * 86400
+            os.utime(path, (stamp, stamp))
+        return path
+
+    def test_prune_enforces_size_cap_and_keeps_newest(self):
+        import tempfile
+        from codex_switcher import history
+        root = Path(tempfile.mkdtemp()) / "history-backups"
+        self._make_backup(root, "20260917-old-1.jsonl", 60, age_days=1)
+        self._make_backup(root, "20260917-old-2.jsonl", 60, age_days=2)
+        newest = self._make_backup(root, "20260919-new.jsonl", 60, age_days=0)
+        # 上限 100MB：三份共 180MB，最老的两份该删，最新的一份必须留下
+        report = history.prune_history_backups(root=root, max_bytes=100 * 1024 * 1024,
+                                               max_age_days=0)
+        self.assertEqual(report["deleted"], 2)
+        self.assertTrue(newest.exists(), "最新一份无论如何都留着")
+        self.assertLessEqual(report["bytes_after"], 100 * 1024 * 1024)
+
+    def test_prune_removes_expired_first(self):
+        import tempfile
+        from codex_switcher import history
+        root = Path(tempfile.mkdtemp()) / "history-backups"
+        expired = self._make_backup(root, "20260801-expired.jsonl", 1, age_days=40)
+        fresh = self._make_backup(root, "20260919-fresh.jsonl", 1, age_days=1)
+        report = history.prune_history_backups(root=root, max_bytes=1024 * 1024 * 1024,
+                                               max_age_days=30)
+        self.assertFalse(expired.exists(), "超过时效的备份该删")
+        self.assertTrue(fresh.exists())
+        self.assertEqual(report["expired"], 1)
+
+    def test_sanitize_reuses_identical_backup(self):
+        """同一份内容已经备份过，就别再整份复制一份。
+
+        一个几百 MB 的会话被多轮清扫碰上，照旧每轮都复制的话，
+        备份目录就是无底洞 —— 这次事故的直接来源。
+        """
+        import tempfile
+        from codex_switcher import history
+        root = Path(tempfile.mkdtemp()) / "history-backups"
+        text = '{"a": 1}\n{"b": 2}\n'
+        self.assertIsNone(history._reuse_identical_backup(root, "rollout-x.jsonl", text))
+        first = root / "20260919-120000-rollout-x.jsonl"
+        root.mkdir(parents=True, exist_ok=True)
+        first.write_text(text, encoding="utf-8")
+        self.assertEqual(history._reuse_identical_backup(root, "rollout-x.jsonl", text),
+                         first, "内容相同应复用旧备份")
+        self.assertEqual(history._reuse_identical_backup(root, "rollout-x.jsonl", text + "x"),
+                         None, "内容变了必须存新备份")
+
+    def test_sweep_prunes_backups_after_cleaning(self):
+        """清扫结束要顺手把备份压回上限，不能只管备份不管清理。"""
+        from codex_switcher import history, paths
+        import datetime
+        import tempfile
+        # 造一个带孤儿条目的会话文件（不依赖 SweepTests 的辅助方法）
+        day = datetime.datetime.now()
+        session_dir = paths.sessions_dir() / str(day.year) / ("%02d" % day.month) / ("%02d" % day.day)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        rollout = session_dir / "rollout-2026-01-01T00-00-00-prune-test.jsonl"
+        rollout.write_text(json.dumps({"type": "response_item", "payload": {
+            "type": "function_call_output", "id": "fco_x", "name": "tool",
+            "namespace": "codex_app", "output": "orphan"}}) + "\n", encoding="utf-8")
+        # 造一个远超默认上限的假备份：不 prune 的话它一直躺在那里
+        fake_root = Path(tempfile.mkdtemp())
+        fake = fake_root / "20260101-huge.jsonl"
+        fake.write_bytes(b"x" * (2 * 1024 * 1024))
+        saved_root = history._backup_root
+        saved_max = history.BACKUP_MAX_BYTES
+        history._backup_root = lambda: fake_root
+        history.BACKUP_MAX_BYTES = 1024 * 1024
+        try:
+            report = history.sweep_all()
+            prune = report.get("backup_prune") or {}
+            self.assertGreater(prune.get("deleted", 0), 0, "超限备份应被清掉")
+        finally:
+            history._backup_root = saved_root
+            history.BACKUP_MAX_BYTES = saved_max
+
+
 class EngineContinueTests(TempCodexHome):
     """切换相关的后续用例。
 

@@ -30,7 +30,9 @@ Codex 会把整段会话历史原样回放到下一次请求里。历史里有�
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -39,6 +41,16 @@ from typing import Dict, List, Optional, Tuple
 from . import paths
 
 BACKUP_DIRNAME = "history-backups"
+
+# 备份的保留上限。这是个必须有的硬约束：清洗发生在每次切换、后台巡检和
+# 定时任务里，而会话文件动辄几百 MB —— 上限一松，备份几天就能吃掉上百 GB
+# （实测 9/16-9/18 两天攒了 9.9 GB，且此前没有任何清理机制，只涨不消）。
+# 备份的价值是"清洗出错时能还原"，不是永久归档；原始会话文件本体始终在
+# sessions/ 里，所以到期的备份可以放心删。
+BACKUP_MAX_BYTES = int(os.environ.get(
+    "CODEX_SWITCHER_HISTORY_BACKUP_MAX_GB", "3")) * 1024 * 1024 * 1024
+BACKUP_MAX_AGE_DAYS = float(os.environ.get(
+    "CODEX_SWITCHER_HISTORY_BACKUP_MAX_DAYS", "30"))
 
 # 最近还在写入的文件不要碰：那多半是你正开着的那个对话。
 # 改写一个正在被追加写的文件，可能把当前对话写坏。等它静下来再清。
@@ -204,6 +216,99 @@ def _backup_root() -> Path:
     return paths.state_dir() / BACKUP_DIRNAME
 
 
+def prune_history_backups(root: Optional[Path] = None,
+                          max_bytes: Optional[int] = None,
+                          max_age_days: Optional[float] = None) -> Dict:
+    """把备份目录压回上限内。按「先过期、再超量（最老的先删）」清理。
+
+    只删备份副本，绝不碰 sessions/ 里的原始会话文件。每个文件都可能被
+    多轮清扫反复备份（几百 MB 一份），不清就是无底洞。
+    """
+    root = root if root is not None else _backup_root()
+    max_bytes = BACKUP_MAX_BYTES if max_bytes is None else max_bytes
+    max_age_days = BACKUP_MAX_AGE_DAYS if max_age_days is None else max_age_days
+    report = {"files": 0, "bytes_before": 0, "expired": 0, "over_limit": 0,
+              "deleted": 0, "bytes_freed": 0, "bytes_after": 0}
+    if not root.exists() or max_bytes <= 0:
+        return report
+    entries = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        report["files"] += 1
+        report["bytes_before"] += stat.st_size
+        entries.append((path, stat.st_mtime, stat.st_size))
+    if not entries:
+        report["bytes_after"] = report["bytes_before"]
+        return report
+
+    now = time.time()
+    # 1) 过期的先删
+    survivors = []
+    for path, mtime, size in entries:
+        if max_age_days > 0 and (now - mtime) > max_age_days * 86400:
+            report["expired"] += _remove(path, report)
+            continue
+        survivors.append((path, mtime, size))
+
+    # 2) 还超量就从最老的开始删，删到达标为止。
+    #    这里必须是硬约束：如果"至少留一份"能架空上限，一份超大的备份
+    #    就永远删不掉 —— 用户看到的还是无底洞。原始会话文件本体始终在
+    #    sessions/ 里，备份删光了也只是放弃还原能力，不是丢数据。
+    survivors.sort(key=lambda item: item[1])
+    total = sum(size for _, _, size in survivors)
+    for path, _mtime, size in survivors:
+        if total <= max_bytes:
+            break
+        report["over_limit"] += _remove(path, report)
+        total -= size
+    report["bytes_after"] = report["bytes_before"] - report["bytes_freed"]
+    return report
+
+
+def _remove(path: Path, report: Dict) -> int:
+    try:
+        size = path.stat().st_size
+        path.unlink()
+        report["deleted"] += 1
+        report["bytes_freed"] += size
+        return 1
+    except OSError:
+        return 0
+
+
+def _reuse_identical_backup(backup_dir: Path, original_name: str, text: str) -> Optional[Path]:
+    """同一份文件内容已经备份过就别再复制一份。
+
+    一个会话文件会被多轮清扫碰：第一轮清掉孤儿条目、第二轮清掉 OpenAI
+    推理条目……每轮都整份复制的话，同一个文件能在备份目录里躺出好几个
+    GB。内容没变就复用旧备份，变了才存新的。
+    """
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    best = None
+    try:
+        for candidate in backup_dir.glob("*-" + original_name):
+            if candidate.is_file() and (best is None
+                                        or candidate.stat().st_mtime > best.stat().st_mtime):
+                best = candidate
+    except OSError:
+        return None
+    if best is None:
+        return None
+    try:
+        if best.stat().st_size != len(text.encode("utf-8", "replace")):
+            return None
+        if hashlib.sha256(best.read_bytes()).hexdigest() == digest:
+            return best
+    except OSError:
+        return None
+    return None
+
+
 def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
              cross_provider: bool = False) -> Tuple[bool, Dict]:
     """删掉指定文件里的问题条目。返回 (是否改动, 统计)。
@@ -245,16 +350,22 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
             or stats["removed_cross_provider"]):
         return False, stats
 
-    # 备份：保留原文件，文件名带时间戳，放工具自己的状态目录里
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    # 备份：保留原文件，文件名带时间戳，放工具自己的状态目录里。
+    # 内容和最近一次备份完全一样就复用，不再整份复制 —— 一个几百 MB 的
+    # 会话被多轮清扫碰上，照旧整份复制的话备份目录几天就能吃掉上百 GB。
     try:
         relative = path.relative_to(paths.codex_home())
     except ValueError:
         relative = Path(path.name)
-    target = backup_dir / (stamp + "-" + relative.name)
-    target.write_text(text, encoding="utf-8")
-    stats["backup"] = str(target)
+    reused = _reuse_identical_backup(backup_dir, relative.name, text)
+    if reused is not None:
+        stats["backup"] = str(reused)
+    else:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = backup_dir / (stamp + "-" + relative.name)
+        target.write_text(text, encoding="utf-8")
+        stats["backup"] = str(target)
 
     # 逐行校验后再落盘：写回去的每一行都必须是合法 JSON
     out = "\n".join(kept)
@@ -595,6 +706,13 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
 
     if not dry_run:
         _save_sweep_ledger(next_ledger)
+    # 清完把备份目录压回上限内。备份必须在每轮清扫里自我约束，否则
+    # 会话文件几百 MB 一份、清扫又高频发生，几天就能吃掉上百 GB。
+    if not dry_run:
+        try:
+            report["backup_prune"] = prune_history_backups()
+        except Exception:  # noqa: BLE001 - 清理失败不能影响清扫结果本身
+            pass
     return report
 
 
