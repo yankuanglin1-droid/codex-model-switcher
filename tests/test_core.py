@@ -2485,6 +2485,62 @@ class SweepTests(TempCodexHome):
                                                   "call_id": "call_1", "output": "ok"}},
         ]
 
+    def test_image_only_outputs_become_text_stubs(self):
+        """纯图片的工具结果必须换文本占位，且调用/结果配对不破。
+
+        实测事故：对话里有 view_image 的调用，结果是 2.1MB 的 base64 图片。
+        在不支持视觉的模型（deepseek）上，Codex 构建请求时把图片结果剥掉、
+        调用却留着 —— API 校验「有调用没结果」直接 400，报
+        No tool output found for tool call ...，整个对话死掉。
+        """
+        from codex_switcher import history, paths
+        call = {"type": "response_item", "payload": {
+            "type": "function_call", "call_id": "call_img_1", "name": "view_image"}}
+        out1 = {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_1", "output": "ok"}}
+        image_out = {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_img_1",
+            "output": [{"type": "input_image",
+                        "image_url": "data:image/png;base64,iVBORw0KGgoAAA"}]}}
+        text_out = {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_img_1",
+            "output": "已生成图片 /tmp/x.png"}}     # 文本结果不许动
+        mixed_out = {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_img_1",
+            "output": [{"type": "input_image", "image_url": "data:image/png;base64,xx"},
+                       {"type": "input_text", "text": "截图如下"}]}}  # 混合型不许动
+        path = self._rollout("rollout-image.jsonl",
+                             [self._healthy()[0], out1, call, image_out, text_out, mixed_out],
+                             seconds_ago=7200)
+
+        # 在官方平台上不动它（图片对视觉模型是有用的上下文）
+        before = path.read_text(encoding="utf-8")
+        backup_dir = Path(tempfile.mkdtemp()) / "history-backups"
+        history.sanitize(path, False, backup_dir, cross_provider=False)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+        # 搬去第三方/已在第三方：图片结果换占位，call_id 保留
+        changed, stats = history.sanitize(path, True, backup_dir, cross_provider=False)
+        self.assertTrue(changed)
+        self.assertEqual(stats["removed_image_outputs"], 1)
+        text = path.read_text(encoding="utf-8")
+        # 纯图片那条被换成占位；混合型（图+文）保留 —— Codex 只剥图片部分，
+        # 文本留着，配对不破
+        self.assertIn("image elided", text)
+        self.assertNotIn("iVBORw0KGgoAAA", text)
+        self.assertIn("call_img_1", text)
+        # 调用与结果仍然成对：call + 占位结果 + 文本结果 + 混合结果 = 4 处
+        self.assertEqual(text.count('"call_img_1"'), 4)
+        # 文本结果与混合型结果原样保留（json 转义后中文是 \u 形式，查路径即可）
+        self.assertIn("/tmp/x.png", text)
+        self.assertIn("截图如下" if "截图如下" in text else "\\u622a\\u56fe", text)
+        # 占位行仍是合法 JSON，payload 结构完整
+        for line in text.splitlines():
+            if "image elided" in line:
+                payload = json.loads(line)["payload"]
+                self.assertEqual(payload["call_id"], "call_img_1")
+                self.assertIsInstance(payload["output"], str)
+
     def test_sweep_reaches_files_the_recent_window_never_sees(self):
         """孤儿躺在最老的文件里也要清掉 —— 这正是以前反复复发的原因。"""
         from codex_switcher import history

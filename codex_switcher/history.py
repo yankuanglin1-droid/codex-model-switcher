@@ -171,7 +171,8 @@ def inspect(path: Path) -> Dict:
     里面有几份几百 MB 的，一次性读进内存会把峰值顶到 GB 级。
     """
     result = {"path": str(path), "orphan_outputs": 0, "openai_only": 0,
-              "cross_provider": 0, "report_only": {}, "lines": 0, "error": None}
+              "cross_provider": 0, "image_outputs": 0,
+              "report_only": {}, "lines": 0, "error": None}
     if not path.exists():
         result["error"] = "文件不存在"
         return result
@@ -193,6 +194,9 @@ def inspect(path: Path) -> Dict:
                 elif kind in CROSS_PROVIDER_TYPES:
                     result["cross_provider"] += 1
                     result["report_only"][kind] = result["report_only"].get(kind, 0) + 1
+                elif kind in ("function_call_output", "custom_tool_call_output") \
+                        and payload.get("call_id") and _is_image_only_output(payload):
+                    result["image_outputs"] += 1
     except OSError as exc:
         result["error"] = type(exc).__name__
         return result
@@ -200,20 +204,50 @@ def inspect(path: Path) -> Dict:
     return result
 
 
-def is_dirty(info: Dict, cross_provider: bool = False) -> bool:
+def is_dirty(info: Dict, cross_provider: bool = False,
+             moving_off_openai: bool = False) -> bool:
     """有没有需要清理的东西。
 
     cross_provider=False 时只看「确定是坏的」两类；
-    要搬去别的平台时，OpenAI 专有条目也得算进去。
+    要搬去别的平台时，OpenAI 专有条目和纯图片结果也得算进去。
     """
     dirty = bool(info.get("orphan_outputs") or info.get("openai_only"))
     if cross_provider:
         dirty = dirty or bool(info.get("cross_provider"))
+    if (cross_provider or moving_off_openai) and info.get("image_outputs"):
+        dirty = True
     return dirty
 
 
 def _backup_root() -> Path:
     return paths.state_dir() / BACKUP_DIRNAME
+
+
+# 纯图片工具结果的占位文本。保留 call_id，调用/结果配对完整；文本形态
+# 是 Responses API 对 function_call_output 的标准形态，任何平台都认。
+IMAGE_STUB_TEXT = ("[image elided] This tool output was an image that cannot be "
+                   "replayed on a text-only model. The original view_image call "
+                   "succeeded at the time; re-run the tool if the image is needed.")
+
+
+def _is_image_only_output(payload: Dict) -> bool:
+    """工具结果是不是只剩图片内容（文本一个字都没有）。"""
+    out = payload.get("output")
+    if not isinstance(out, list) or not out:
+        return False
+    items = [item for item in out if isinstance(item, dict)]
+    if not items or len(items) != len(out):
+        return False
+    return all(item.get("type") == "input_image" for item in items)
+
+
+def _image_stub_line(payload: Dict) -> str:
+    """把纯图片结果改写成文本占位行。保留其余字段（尤其 call_id）。"""
+    stub = dict(payload)
+    stub["output"] = IMAGE_STUB_TEXT
+    stub.pop("image_url", None)
+    return json.dumps({"type": "response_item", "payload": stub},
+                      ensure_ascii=False)
 
 
 def prune_history_backups(root: Optional[Path] = None,
@@ -317,7 +351,9 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
     这样这个会话才能搬到第三方平台上继续。
     """
     stats = {"removed_orphan_outputs": 0, "removed_openai_only": 0,
-             "removed_cross_provider": 0, "kept": 0, "backup": None}
+             "removed_cross_provider": 0, "removed_image_outputs": 0,
+             "kept": 0, "backup": None}
+    deep_clean = moving_off_openai or cross_provider
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -328,7 +364,8 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
     for line in lines:
         payload = _payload_of(line) if cross_provider else (
             _payload_of(line) if ('function_call_output' in line
-                                  or 'encrypted_content' in line) else None)
+                                  or 'encrypted_content' in line
+                                  or deep_clean and '"input_image"' in line) else None)
         if payload is not None:
             kind = payload.get("type")
             if kind == "function_call_output" and not payload.get("call_id"):
@@ -342,12 +379,23 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
                 # call 与 output 都走这一支，所以是成对删，不会留悬空引用
                 stats["removed_cross_provider"] += 1
                 continue
+            # 纯图片的工具结果：不支持视觉的模型上，Codex 构建请求时会把
+            # 图片结果剥掉、调用却留着 —— API 校验「有调用没结果」直接 400
+            # （报 No tool output found for tool call ...）。实测一个文件里
+            # 埋了 50 个、每个约 2MB。换成文本占位并保留 call_id，
+            # 调用/结果配对完整，任何平台都能收。
+            if deep_clean and kind in ("function_call_output",
+                                       "custom_tool_call_output") \
+                    and payload.get("call_id") and _is_image_only_output(payload):
+                stats["removed_image_outputs"] += 1
+                kept.append(_image_stub_line(payload))
+                continue
         if line:
             kept.append(line)
     stats["kept"] = len(kept)
 
     if not (stats["removed_orphan_outputs"] or stats["removed_openai_only"]
-            or stats["removed_cross_provider"]):
+            or stats["removed_cross_provider"] or stats["removed_image_outputs"]):
         return False, stats
 
     # 备份：保留原文件，文件名带时间戳，放工具自己的状态目录里。
@@ -418,10 +466,12 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
     report = {"changed": 0, "dry_run": dry_run, "moved_off_openai": moving_off_openai,
               "cross_provider": cross_provider,
               "items": [], "backup_dir": None, "skipped_active": [],
-              "removed": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0}}
+              "removed": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0,
+                          "image_outputs": 0}}
     for path in paths_to_clean:
         info = inspect(path)
-        if not is_dirty(info, cross_provider=cross_provider):
+        if not is_dirty(info, cross_provider=cross_provider,
+                        moving_off_openai=moving_off_openai):
             continue
         if busy_reason(path):
             report["skipped_active"].append(str(path))
@@ -430,7 +480,9 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
             report["items"].append({"path": str(path), "would_remove": {
                 "orphan_outputs": info["orphan_outputs"],
                 "openai_only": info["openai_only"] if moving_off_openai else 0,
-                "cross_provider": info["cross_provider"] if cross_provider else 0}})
+                "cross_provider": info["cross_provider"] if cross_provider else 0,
+                "image_outputs": info["image_outputs"]
+                if (moving_off_openai or cross_provider) else 0}})
             report["changed"] += 1
             continue
         changed, stats = sanitize(path, moving_off_openai, backup_dir,
@@ -441,10 +493,12 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
             report["removed"]["orphan_outputs"] += stats["removed_orphan_outputs"]
             report["removed"]["openai_only"] += stats["removed_openai_only"]
             report["removed"]["cross_provider"] += stats["removed_cross_provider"]
+            report["removed"]["image_outputs"] += stats["removed_image_outputs"]
             report["items"].append({"path": str(path), "removed": {
                 "orphan_outputs": stats["removed_orphan_outputs"],
                 "openai_only": stats["removed_openai_only"],
-                "cross_provider": stats["removed_cross_provider"]}})
+                "cross_provider": stats["removed_cross_provider"],
+                "image_outputs": stats["removed_image_outputs"]}})
     return report
 
 
@@ -630,6 +684,8 @@ def _would_change(info: Dict, cross_provider: bool, moving_off_openai: bool) -> 
         return True
     if cross_provider and info.get("cross_provider"):
         return True
+    if (cross_provider or moving_off_openai) and info.get("image_outputs"):
+        return True
     return False
 
 
@@ -649,7 +705,8 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
     report = {"scanned": 0, "checked": 0, "cleaned": 0, "skipped_busy": 0,
               "skipped_cached": 0, "budget_exhausted": False, "dry_run": dry_run,
               "cross_provider": cross_provider, "backup_dir": None, "items": [],
-              "removed": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0}}
+              "removed": {"orphan_outputs": 0, "openai_only": 0, "cross_provider": 0,
+                          "image_outputs": 0}}
     try:
         rollouts = recent_rollouts(0 if limit is None else max(0, int(limit)))
     except OSError:
@@ -686,7 +743,9 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
             report["items"].append({"path": str(path), "would_remove": {
                 "orphan_outputs": info["orphan_outputs"],
                 "openai_only": info["openai_only"] if moving_off_openai else 0,
-                "cross_provider": info["cross_provider"] if cross_provider else 0}})
+                "cross_provider": info["cross_provider"] if cross_provider else 0,
+                "image_outputs": info["image_outputs"]
+                if (moving_off_openai or cross_provider) else 0}})
             continue
         changed, stats = sanitize(path, moving_off_openai, backup_dir,
                                   cross_provider=cross_provider)
