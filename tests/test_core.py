@@ -1374,6 +1374,63 @@ class HistoryBackupTests(TempCodexHome):
             history.BACKUP_MAX_BYTES = saved_max
 
 
+class VaultTests(TempCodexHome):
+    """密钥保险库：钥匙串丢失时的自动恢复副本。
+
+    实测事故：登录钥匙串夜间被锁/重置，四个平台 key 全没了，Codex 全线
+    瘫痪。保险库必须在那种时刻兜得住 —— 凭据助手从保险库取密并写回。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._vault_home = tempfile.mkdtemp()
+        self._saved_vault_home = os.environ.get("CODEX_SWITCHER_VAULT_HOME")
+        os.environ["CODEX_SWITCHER_VAULT_HOME"] = self._vault_home
+
+    def tearDown(self):
+        if self._saved_vault_home is None:
+            os.environ.pop("CODEX_SWITCHER_VAULT_HOME", None)
+        else:
+            os.environ["CODEX_SWITCHER_VAULT_HOME"] = self._saved_vault_home
+        super().tearDown()
+
+    def test_roundtrip(self):
+        from codex_switcher import vault
+        self.assertIsNone(vault.get("glm"))
+        self.assertTrue(vault.upsert("glm", "sk-vault-test-glm-key"))
+        self.assertEqual(vault.get("glm"), "sk-vault-test-glm-key")
+        self.assertTrue(vault.remove("glm"))
+        self.assertIsNone(vault.get("glm"))
+
+    def test_two_files_in_two_places(self):
+        """保险库文件和加密密钥文件必须分处两处，单删一个目录不全灭。"""
+        from codex_switcher import vault, paths
+        vault.upsert("glm", "sk-split-test")
+        self.assertNotEqual(vault.key_file().parent, vault.vault_file().parent)
+
+    def test_corrupt_vault_returns_empty_not_crash(self):
+        """保险库文件坏了绝不能让调用方崩 —— 当作没有就行。"""
+        from codex_switcher import vault, paths
+        vault.upsert("glm", "sk-corrupt-test")
+        vault.vault_file().write_text("CSVAULT1:不是合法的base64!!!")
+        self.assertEqual(vault.load_all(), {})
+
+    def test_helper_falls_back_to_vault(self):
+        """端到端：钥匙串里没有这个平台，助手必须从保险库取到密钥。
+
+        用一个真实钥匙串里不存在的 provider id，避免碰真钥匙串。
+        """
+        import subprocess
+        from codex_switcher import paths, secrets, vault
+        vault.upsert("vault-only-provider", "sk-from-vault-1234567890")
+        helper = secrets.install_helper()
+        env = dict(os.environ)
+        result = subprocess.run([str(helper), "vault-only-provider"],
+                                capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "sk-from-vault-1234567890")
+
+
 class EngineContinueTests(TempCodexHome):
     """切换相关的后续用例。
 

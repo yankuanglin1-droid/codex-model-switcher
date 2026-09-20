@@ -112,6 +112,7 @@ def store(provider_id: str, secret: str) -> None:
         ])
         if result.returncode != 0:
             raise RuntimeError("写入 macOS 钥匙串失败：" + (result.stderr or "").strip()[:200])
+        _sync_vault(provider_id, secret)
         return
     if _linux_available():
         result = _run([
@@ -122,6 +123,7 @@ def store(provider_id: str, secret: str) -> None:
         ], stdin=secret)
         if result.returncode != 0:
             raise RuntimeError("写入 Secret Service 失败：" + (result.stderr or "").strip()[:200])
+        _sync_vault(provider_id, secret)
         return
     target = _fallback_file(provider_id)
     paths.ensure_dir(target.parent)
@@ -135,6 +137,21 @@ def store(provider_id: str, secret: str) -> None:
         with os.fdopen(fd, "w") as stream:
             stream.write(secret)
     platform_compat.chmod_private(target, 0o600)
+    _sync_vault(provider_id, secret)
+
+
+def _sync_vault(provider_id: str, secret: str) -> None:
+    """顺手把密钥存进加密保险库。
+
+    钥匙串可能因为系统更新、磁盘写满、清理工具一夜丢光条目（实测事故：
+    2026-09-20 登录钥匙串夜间被锁/重置，四个 key 全没了）。保险库是自动
+    恢复的依据，必须在每次成功写入时同步。失败绝不抛错 —— 它只是副本。
+    """
+    try:
+        from . import vault
+        vault.upsert(provider_id, secret)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def load(provider_id: str) -> Optional[str]:
@@ -207,6 +224,12 @@ def delete(provider_id: str) -> bool:
     if target.exists():
         target.unlink()
         removed = True
+    # 用户明确删除密钥时保险库也要删，否则会被自动恢复救回来
+    try:
+        from . import vault
+        vault.remove(provider_id)
+    except Exception:  # noqa: BLE001
+        pass
     return removed
 
 
@@ -290,8 +313,22 @@ def main() -> int:
     try:
         secret = secrets.load(provider)
     except Exception as error:  # noqa: BLE001
+        secret = None
         print("credential unavailable: %s" % error, file=sys.stderr)
-        return 1
+    if not secret:
+        # 钥匙串读不到时从加密保险库取，并顺手写回钥匙串。
+        # 实测钥匙串可能一夜丢光条目（系统更新/磁盘写满/清理工具），
+        # 没有这道兜底，Codex 的请求和每日自动化会一起断。
+        try:
+            from codex_switcher import vault
+            secret = vault.get(provider)
+            if secret:
+                try:
+                    secrets.store(provider, secret)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
     if not secret:
         print("credential unavailable for provider: " + provider, file=sys.stderr)
         return 1

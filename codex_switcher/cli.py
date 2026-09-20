@@ -912,6 +912,32 @@ def cmd_check(args) -> int:
     return 1
 
 
+def cmd_vault(args) -> int:
+    """密钥保险库：钥匙串丢条目时的自动恢复副本。
+
+    实测事故：2026-09-20 登录钥匙串夜间被锁/重置，四个平台的 key 一夜
+    全没了，只能翻明文文件找回。保险库让这种事故变成无感自愈。
+    """
+    from . import vault
+    if getattr(args, "restore", False):
+        result = vault.restore_all()
+        ok = [p for p, good in result.items() if good]
+        bad = [p for p, good in result.items() if not good]
+        out("已从保险库恢复 %d 个密钥：%s" % (len(ok), "、".join(sorted(ok)) or "无"))
+        if bad:
+            out("恢复失败：%s（保险库解不开或钥匙串写不进）" % "、".join(sorted(bad)))
+            return 1
+        return 0
+    status = vault.sync_from_keychain()
+    data = vault.load_all()
+    out("保险库：%s" % vault.vault_file())
+    out("  已存密钥：%d 个%s" % (len(data), ("（" + "、".join(sorted(data)) + "）") if data else ""))
+    if status["synced"]:
+        out("  本次从钥匙串补存：%s" % "、".join(sorted(status["synced"])))
+    out("  钥匙串再丢条目时会自动恢复：凭据助手兜底 + check 自动恢复 + 本命令 --restore")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     from . import install
     problems = []
@@ -1339,6 +1365,10 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--provider", help="检查指定平台，默认检查当前正在用的")
     check.add_argument("--history", action="store_true", help="顺带检查会话历史（较慢）")
 
+    vault = sub.add_parser("vault", help="密钥保险库（钥匙串丢失时的自动恢复副本）")
+    vault.add_argument("--restore", action="store_true",
+                       help="把保险库里的密钥全部写回钥匙串")
+
     doctor = sub.add_parser("doctor", help="环境自检")
     doctor.add_argument("--history", action="store_true",
                         help="顺带检查会话历史里会被第三方平台拒绝的条目（较慢）")
@@ -1387,6 +1417,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "remove": cmd_remove,
         "status": cmd_status,
         "check": cmd_check,
+        "vault": cmd_vault,
         "doctor": cmd_doctor,
         "app": cmd_app,
         "export": cmd_export,

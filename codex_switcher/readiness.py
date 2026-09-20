@@ -238,8 +238,26 @@ def check(provider_id: Optional[str] = None, check_history: bool = False) -> Dic
     if has_key:
         checks.append(_item(OK, "密钥存储", "钥匙串里有 %s 的密钥" % active))
     else:
-        checks.append(_item(FAIL, "密钥存储", "没有 %s 的密钥" % active,
-                            "codex-switcher add --id %s --key-stdin" % active))
+        # 先试着自动恢复，再报失败 —— 钥匙串可能一夜丢光条目
+        # （实测事故：登录钥匙串被锁/重置，四个 key 全没了）。
+        try:
+            from . import vault as vault_module
+            rescue = vault_module.get(active)
+        except Exception:  # noqa: BLE001
+            rescue = None
+        if rescue:
+            try:
+                from . import secrets
+                secrets.store(active, rescue)
+                has_key = bool(secrets.load(active))
+            except Exception:  # noqa: BLE001
+                has_key = False
+            if has_key:
+                checks.append(_item(OK, "密钥存储",
+                                    "钥匙串里的密钥丢了，已自动从保险库恢复"))
+        if not has_key:
+            checks.append(_item(FAIL, "密钥存储", "没有 %s 的密钥" % active,
+                                "codex-switcher add --id %s --key-stdin" % active))
 
     # ---- 6. 凭据助手真跑一遍 -----------------------------------------
     # 最关键的一环。文件在、密钥也在，但脚本跑不起来 —— 那 Codex 照样
