@@ -22,6 +22,16 @@ MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自
 
 ---
 
+如果它帮你省了折腾时间，欢迎点个 **Star** ⭐ —— 能让更多 Codex 用户搜到它。
+
+<a href="https://star-history.com/#yankuanglin1-droid/codex-model-switcher&Date">
+ <picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=yankuanglin1-droid/codex-model-switcher&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=yankuanglin1-droid/codex-model-switcher&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=yankuanglin1-droid/codex-model-switcher&type=Date" width="480">
+ </picture>
+</a>
+
+
 ## 它解决什么问题
 
 手改 `~/.codex/config.toml` 看似可行，坑都在后面：新版 Codex 直接拒绝

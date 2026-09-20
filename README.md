@@ -8,7 +8,7 @@
 [![macOS 11+](https://img.shields.io/badge/macOS-11%2B-black?style=flat-square&logo=apple)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
 [![Windows / Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-0078D6?style=flat-square&logo=windows)](INSTALL-WITH-AI.md)
 [![Python 3.9+](https://img.shields.io/badge/Python%203.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](README.md)
-[![Tests](https://img.shields.io/badge/tests-171%20passing-2ea44f?style=flat-square)](#development)
+[![Tests](https://img.shields.io/badge/tests-204%20passing-2ea44f?style=flat-square)](#development)
 
 **Codex (ChatGPT App) can officially only talk to OpenAI. This tool opens it up to
 any provider with an OpenAI-compatible API** — DeepSeek, MiniMax, Zhipu GLM, Moonshot
@@ -31,6 +31,16 @@ fake balance endpoint) — it is nobody's real account. UI ships in **Chinese an
 </p>
 
 ---
+
+If this saves you a detour, please **star the repo** — it helps other Codex users find it.
+
+<a href="https://star-history.com/#yankuanglin1-droid/codex-model-switcher&Date">
+ <picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=yankuanglin1-droid/codex-model-switcher&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=yankuanglin1-droid/codex-model-switcher&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=yankuanglin1-droid/codex-model-switcher&type=Date" width="480">
+ </picture>
+</a>
+
 
 ## Why
 
