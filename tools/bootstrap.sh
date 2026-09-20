@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一条命令装好 codex（ChatGPT App）多平台模型切换。
+# 一条命令装好 ChatGPT Model Switcher。
 #
 #   curl -fsSL https://raw.githubusercontent.com/yankuanglin1-droid/codex-model-switcher/main/tools/bootstrap.sh | bash
 #
@@ -78,7 +78,7 @@ if [ "$OS" = "macos" ] && [ "$WITH_APP" != "0" ]; then
   say ""
   say "顺便装一个能双击打开的图形界面 App（自带 Python，约 1 分钟）…"
   if bash packaging/macos/build_app.sh --with-python >/dev/null 2>&1; then
-    say "已装到：~/Applications/codex（ChatGPT App）多平台模型切换.app"
+    say "已装到：~/Applications/ChatGPT Model Switcher.app"
   else
     say "图形界面没装上（不影响命令行使用）。
 想补装：cd \"$SRC_DIR\" && bash packaging/macos/build_app.sh --with-python"

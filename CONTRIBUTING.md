@@ -61,7 +61,7 @@ python3 tools/preflight.py
 # 3) 打 App 与安装包（完整版 + 标准版；会自动生成固定名副本）
 bash packaging/macos/build_app.sh --with-python
 bash packaging/macos/build_app.sh
-bash packaging/macos/package_release.sh --full --app "/tmp/build/codex（ChatGPT App）多平台模型切换.app"
+bash packaging/macos/package_release.sh --full --app "/tmp/build/ChatGPT Model Switcher.app"
 bash packaging/macos/package_release.sh
 # 4) 建 Release，四个附件都传（含两个 -latest 固定名副本）
 ```

@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-APP_NAME="${CODEX_SWITCHER_APP_NAME:-codex（ChatGPT App）多平台模型切换}"
+APP_NAME="${CODEX_SWITCHER_APP_NAME:-ChatGPT Model Switcher}"
 
 # 解析参数。这里刻意不用数组 —— macOS 自带的是 bash 3.2，数组 + set -u 会报错。
 BUNDLE_PYTHON="${CODEX_SWITCHER_BUNDLE_PYTHON:-0}"

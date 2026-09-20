@@ -10,7 +10,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-APP_NAME="${CODEX_SWITCHER_APP_NAME:-codex（ChatGPT App）多平台模型切换}"
+APP_NAME="${CODEX_SWITCHER_APP_NAME:-ChatGPT Model Switcher}"
 OUT_DIR="$REPO_ROOT/dist"
 
 MODE="standard"

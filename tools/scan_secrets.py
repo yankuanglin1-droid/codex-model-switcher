@@ -29,6 +29,13 @@ ALLOWED = {
     "tools/scan_secrets.py",  # 本文件本身包含用于检测的正则
 }
 
+# 明显是造出来的占位值：测试用假密钥（fake / test / vault / 占位数字等）。
+# 真密钥不会起这种名字，所以按词过滤不会漏报真泄漏。
+OVIOUS_FAKE = re.compile(
+    r"(?i)(fake|placeholder|example|sample|dummy|"
+    r"vault[-_]?test|from[-_]?vault|switcher[-_]?test|test[-_]?key|"
+    r"1234567890|x{8,})")
+
 SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
 SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".icns", ".ico",
                ".zip", ".gz", ".whl", ".so", ".dylib", ".pyc"}
@@ -39,6 +46,10 @@ def scan_text(text: str, where: str, findings: list, allowed: set) -> None:
         return
     for label, pattern in PATTERNS:
         for match in pattern.finditer(text):
+            # 测试里的明显假密钥不算泄漏：它们本来就是造出来验证
+            # 「不打印完整密钥」「保险库存取」这些行为的。
+            if OVIOUS_FAKE.search(match.group(0)):
+                continue
             line = text[:match.start()].count("\n") + 1
             # 只打印前 12 个字符做定位，绝不把完整密钥打到终端或日志里
             findings.append((where, line, label, match.group(0)[:12] + "…"))

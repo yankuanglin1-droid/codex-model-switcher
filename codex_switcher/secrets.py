@@ -296,7 +296,7 @@ def helper_python() -> str:
 HELPER_TEMPLATE = '''#!{python}
 """Codex 凭据助手：只把密钥写到 stdout，其它信息一律走 stderr。
 
-由 codex（ChatGPT App）多平台模型切换 生成，删除后重新运行 init 即可恢复。
+由 ChatGPT Model Switcher 生成，删除后重新运行 init 即可恢复。
 """
 import sys
 

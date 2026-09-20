@@ -1,4 +1,4 @@
-# codex（ChatGPT App）多平台模型切换
+# ChatGPT Model Switcher
 
 [English](README.md) · **中文** · [让 AI 帮我装 →](INSTALL-WITH-AI.md)
 

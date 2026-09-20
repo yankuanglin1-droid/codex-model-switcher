@@ -13,7 +13,7 @@ const I18N = {
     'lang.other': 'English',
     'lang.title': '切换界面语言',
 
-    'app.title': 'codex（ChatGPT App）多平台模型切换',
+    'app.title': 'ChatGPT Model Switcher',
     'topbar.status_loading': '正在读取状态…',
     'topbar.search': '搜索平台或模型…',
     'topbar.secret': '密钥存储：{backend}',
@@ -162,7 +162,7 @@ const I18N = {
     'status.current': '当前默认：{provider} · {model}',
     'status.unset': '未设置',
     'status.no_config': '还没有检测到 Codex 配置',
-    'status.version': 'codex（ChatGPT App）多平台模型切换 v{version}',
+    'status.version': 'ChatGPT Model Switcher v{version}',
 
     'update.up_to_date': '已是最新版本',
     'update.available': '有新版本 {latest}（当前 v{current}）',

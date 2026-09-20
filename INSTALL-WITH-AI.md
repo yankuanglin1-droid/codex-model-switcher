@@ -11,7 +11,7 @@ commands**. It will ask for what it is missing, do the install, verify, and tell
 ## 中文指令（复制这一段）
 
 ```text
-请帮我在本机装好并配置「codex（ChatGPT App）多平台模型切换」
+请帮我在本机装好并配置「ChatGPT Model Switcher」
 （仓库：https://github.com/yankuanglin1-droid/codex-model-switcher）。
 
 按顺序做，不要跳步，每一步把结果贴给我：
@@ -76,7 +76,7 @@ commands**. It will ask for what it is missing, do the install, verify, and tell
 机器上什么都不用装；标准版依赖系统已有的 Python 3.9+。
 
 ```text
-请帮我在这台 Mac 上装好并配置最新版「codex（ChatGPT App）多平台模型切换」
+请帮我在这台 Mac 上装好并配置最新版「ChatGPT Model Switcher」
 （仓库：https://github.com/yankuanglin1-droid/codex-model-switcher）。
 
 按顺序做，不要跳步，每一步把实际输出贴给我。
@@ -99,22 +99,22 @@ commands**. It will ask for what it is missing, do the install, verify, and tell
    第三方镜像拿，也**不要**改成 clone 仓库自己打包。
 5. 校验，三项都要做，把结果贴给我：
    a. 解压后确认 App 主程序是通用二进制：
-        file "<解压目录>/codex（ChatGPT App）多平台模型切换.app/Contents/MacOS/CodexSwitcherApp"
+        file "<解压目录>/ChatGPT Model Switcher.app/Contents/MacOS/CodexSwitcherApp"
       期望看到 "universal binary with 2 architectures: [x86_64 ...] [arm64 ...]"
    b. 如果下的是完整版，确认自带了**本机架构**的 Python：
-        file "<解压目录>/codex（ChatGPT App）多平台模型切换.app/Contents/Resources/runtime/python-$(uname -m)/bin/python3"
+        file "<解压目录>/ChatGPT Model Switcher.app/Contents/Resources/runtime/python-$(uname -m)/bin/python3"
       Intel 机上期望看到 "Mach-O 64-bit executable x86_64"。看不到就说明包不对，换完整版。
    c. 确认版本：
-        grep __version__ "<解压目录>/codex（ChatGPT App）多平台模型切换.app/Contents/Resources/runtime/codex_switcher/__init__.py"
+        grep __version__ "<解压目录>/ChatGPT Model Switcher.app/Contents/Resources/runtime/codex_switcher/__init__.py"
    d. 确认签名没坏：
-        codesign --verify --deep "<解压目录>/codex（ChatGPT App）多平台模型切换.app"
+        codesign --verify --deep "<解压目录>/ChatGPT Model Switcher.app"
       没有输出就是通过了；报 "code object is not signed at all" 说明包坏了，重新下载。
 
 【第三步：安装】
 6. 把 .app 拖进「应用程序」（/Applications）。命令行等价做法：
-     ditto "<解压目录>/codex（ChatGPT App）多平台模型切换.app" "/Applications/codex（ChatGPT App）多平台模型切换.app"
+     ditto "<解压目录>/ChatGPT Model Switcher.app" "/Applications/ChatGPT Model Switcher.app"
    如果机器上已经装过旧版，先备份再替换：
-     mv "/Applications/codex（ChatGPT App）多平台模型切换.app" ~/Desktop/switcher-old.app
+     mv "/Applications/ChatGPT Model Switcher.app" ~/Desktop/switcher-old.app
 7. 双击打开。如果系统弹「无法打开，因为它来自身份不明的开发者」或「文件已损坏」，
    **不要**删掉重来：去「系统设置 → 隐私与安全性」，往下滑到刚被拦的那条，点「仍要打开」。
    这一步是 macOS 的隔离机制，不是包坏了。

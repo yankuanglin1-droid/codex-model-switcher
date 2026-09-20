@@ -28,7 +28,10 @@ from typing import Dict, Optional, Tuple
 
 from . import PROJECT_URL, __version__, paths
 
-APP_NAME = "codex（ChatGPT App）多平台模型切换"
+APP_NAME = "ChatGPT Model Switcher"
+# 应用改过名（旧名：codex（ChatGPT App）多平台模型切换）。从旧版升级时
+# 跑的还是旧名的 App，两个名字都得退出，否则旧窗口杀不掉、包体换不干净。
+LEGACY_APP_NAMES = ("codex（ChatGPT App）多平台模型切换",)
 STANDARD_ASSET = "Codex-Model-Switcher-macOS-latest.zip"
 FULL_ASSET = "Codex-Model-Switcher-macOS-latest-full.zip"
 DOWNLOAD_TIMEOUT = 180
@@ -176,8 +179,10 @@ for _ in $(seq 1 {wait_ticks}); do
   sleep 0.5
 done
 
-# 兜底：让原生窗口应用自己走正常退出流程
+# 兜底：让原生窗口应用自己走正常退出流程。
+# 应用改过名，从旧版升级时跑的还是旧名的 App，新旧名字都要退出。
 osascript -e 'tell application "{name}" to quit' >/dev/null 2>&1
+{legacy_quit}
 sleep 1
 
 # 从网上下载的包带隔离标记，不清掉第一次打开会被 Gatekeeper 拦下
@@ -210,10 +215,14 @@ log "更新完成"
 rm -rf "{workdir}" >/dev/null 2>&1
 exit 0
 """
+    legacy_quit = "".join(
+        "osascript -e 'tell application \"%s\" to quit' >/dev/null 2>&1\n"
+        % name.replace('"', '\\"') for name in LEGACY_APP_NAMES)
     script.write_text(template.format(
         log=paths.state_dir() / "update.log",
         pids=pids, wait_ticks=QUIT_WAIT_SECONDS * 2,
         name=APP_NAME.replace('"', '\\"'),
+        legacy_quit=legacy_quit,
         new_app=new_app, old_app=old_app, backup=backup, workdir=workdir,
     ), encoding="utf-8")
     script.chmod(0o755)

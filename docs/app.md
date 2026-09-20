@@ -2,7 +2,7 @@
 
 ## 它是什么
 
-一个原生 macOS 窗口应用：**codex（ChatGPT App）多平台模型切换**。
+一个原生 macOS 窗口应用：**ChatGPT Model Switcher**。
 
 图标和界面用的是同一枚标 —— Codex 的云朵形状加终端提示符，黑白配色、白色为主、
 液态玻璃质感。矢量源文件在 `packaging/macos/icon/appicon.svg`，跑

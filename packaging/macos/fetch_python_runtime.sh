@@ -5,7 +5,7 @@
 #   bash packaging/macos/fetch_python_runtime.sh <目标目录>
 #
 # 目标目录一般传 .app 里的运行时目录，例如：
-#   .../codex（ChatGPT App）多平台模型切换.app/Contents/Resources/runtime
+#   .../ChatGPT Model Switcher.app/Contents/Resources/runtime
 #
 # 结果：<目标目录>/python-arm64/bin/python3 和 <目标目录>/python-x86_64/bin/python3
 # launch.sh 会在启动时按 uname -m 自动挑对应的那一份。

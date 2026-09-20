@@ -33,7 +33,7 @@ OK = "  ✅"
 BAD = "  ❌"
 
 # 产品名只有这一套，其它写法一律视为旧名残留
-APP_NAME = "codex（ChatGPT App）多平台模型切换"
+APP_NAME = "ChatGPT Model Switcher"
 STALE_NAMES = [
     "Codex 多模型切换器",            # 更早的名字
     "Multi-Platform Model Switcher",  # 英文里读作「多操作系统」，实际是「多模型平台」
