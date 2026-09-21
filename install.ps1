@@ -65,11 +65,11 @@ set "PY="
 if exist "%APPHOME%\python-path.txt" set /p PY=<"%APPHOME%\python-path.txt"
 if not defined PY if exist "%APPHOME%\.venv\Scripts\python.exe" set "PY=%APPHOME%\.venv\Scripts\python.exe"
 if not defined PY (
-  where py >nul 2>nul && set "PY=py -3"
+  where py >nul 2>nul && set "PY=py"
 )
 if not defined PY set "PY=python"
 set "PYTHONPATH=%APPHOME%;%PYTHONPATH%"
-%PY% -m codex_switcher %*
+"%PY%" -m codex_switcher %*
 exit /b %ERRORLEVEL%
 "@ | Set-Content -Encoding Default $CmdPath
 

@@ -19,7 +19,7 @@ if not defined PY if exist "%LOCALAPPDATA%\codex-switcher\python-path.txt" (
   set /p PY=<"%LOCALAPPDATA%\codex-switcher\python-path.txt"
 )
 if not defined PY (
-  where py >nul 2>nul && set "PY=py -3"
+  where py >nul 2>nul && set "PY=py"
 )
 if not defined PY (
   where python >nul 2>nul && set "PY=python"
@@ -31,5 +31,5 @@ if not defined PY (
 )
 
 set "PYTHONPATH=%APPHOME%;%PYTHONPATH%"
-%PY% -m codex_switcher %*
+"%PY%" -m codex_switcher %*
 exit /b %ERRORLEVEL%
