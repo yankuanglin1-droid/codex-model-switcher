@@ -1,51 +1,9 @@
-"""上下文窗口守卫 —— 防止切到第三方模型后陷入「反复压缩」。
+"""Estimate whether a conversation fits a target model's context window.
 
-为什么需要这个东西
-------------------
-第三方模型在 ``model_catalog_json`` 里声明的上下文窗口，往往远小于官方模型。
-例如 ``deepseek-flash`` 声明 131072，Codex 按
-``effective_context_window_percent = 95`` 算出可用窗口：
-
-    131072 × 0.95 = 124518
-
-本机实测（2026-09-17，会话 01a0a8cd）发生的事情是这样的：
-
-    1. 会话在官方模型上跑大，回放量稳定在 36 万 token；
-    2. 切到第三方模型后，可用窗口只剩 124518，
-       于是每一轮 Codex 都判定「超出预算」→ 触发压缩；
-    3. 压缩后主对话确实降到 3 万 token，**但下一次请求又回到 36 万**；
-    4. 17 分钟内触发了 **199 次压缩**，平均每 15~20 秒一次，
-       期间模型完全没有推进任务，只是在不停地把历史压了又压。
-
-为什么压不下去
---------------
-看压缩事件本身就知道。每一次 ``compacted`` 会往 rollout 里写一条约 1MB 的
-记录，其中 ``guardian_history``（守护模型拿到的完整历史快照）单独就占
-902KB：
-
-    message（摘要）            5.7 KB
-    replacement_history       41.8 KB   ← 真正留给下一轮的历史，很小
-    guardian_history         902.9 KB   ← 压缩顺带存档的完整快照
-
-也就是说，**压缩产物本身比目标模型的可用窗口还大**。下一轮请求把这条
-900KB 的记录一起回放，体量又回到 36 万，于是再次超限、再次压缩。
-这是一个自我喂养的死循环，不是「历史太长」这么简单。
-
-顺带一提，那条 900KB 的存档也是会话文件膨胀到 269MB 的原因
-（199 × 1MB）。
-
-结论：只靠「多压几次」永远出不来。必须让**会话体量**和**目标模型窗口**
-在切换的那一刻就匹配上。
-
-守卫做两件事
-------------
-1. **切换前体检**：算出「会话体量 ÷ 目标模型可用窗口」的比值。超限就明确
-   要求「分叉 / 新开任务」，而不是让它原地续接后反复压缩。
-2. **给 Codex 一个明确的压缩触发点**：写 ``model_auto_compact_token_limit``
-   进 config.toml。Codex 原生支持这个键，给它一个**留有余量**的触发点，
-   压缩后的历史才装得下，才不会压完又超、超限又压。
-
-设计原则：宁可早压、不可压不住。所有估算在拿不到精确值时一律取保守值。
+Prefer recorded token usage. File-size estimates are approximate: rollout files
+can include archived snapshots and must not be treated as exact request sizes.
+A smaller target window may require compaction or a new task. This module does
+not prove that repeated compaction is caused by replaying archival records.
 """
 
 from __future__ import annotations

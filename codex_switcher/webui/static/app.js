@@ -2,7 +2,8 @@
 
 const TOKEN = new URLSearchParams(location.search).get('t') || '';
 const api = (path, body) => {
-  const url = `/api/${path}?t=${encodeURIComponent(TOKEN)}`;
+  const separator = path.includes('?') ? '&' : '?';
+  const url = `/api/${path}${separator}t=${encodeURIComponent(TOKEN)}`;
   return fetch(url, body ? {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -262,6 +263,11 @@ async function sweepHistory() {
 }
 
 function renderHeader() {
+  const audit = STATE.automations;
+  const node = $('automation-audit');
+  node.hidden = !audit || !audit.total;
+  if (audit && audit.total) node.textContent = t('automation.audit', audit);
+
   const current = STATE.current || {};
   $('current-status').textContent = current.model_provider
     ? t('status.current', { provider: current.model_provider, model: current.model || t('status.unset') })
@@ -371,24 +377,31 @@ $('btn-switch-result-dismiss').onclick = () => { $('switch-result').hidden = tru
 // ---- 一键重启 Codex ------------------------------------------------------
 // 切换后 Codex 必须完全退出再重开才吃进新配置（配置和任务绑定都缓存在
 // 它的进程里）。替用户做掉 ⌘Q + 重新点开：优雅退出、等它退干净、再拉起。
+let recoveryBusy = false;
 async function restartCodex() {
+  if (recoveryBusy || !confirm(t('recovery.confirm'))) return;
+  recoveryBusy = true;
   const button = $('btn-restart-codex');
-  const original = button.textContent;
   button.disabled = true;
-  button.textContent = t('switch.restarting');
+  const panel = $('recovery-status');
+  panel.hidden = false;
+  panel.textContent = t('recovery.working');
   try {
-    const result = await api('restart_codex', {});
-    if (result.ok) {
-      toast(t('switch.restart_done'));
-      $('switch-result').hidden = true;
-    } else {
-      toast(t('switch.restart_fail', { detail: result.detail || '' }));
+    let result = await api('restart_codex', {});
+    if (result.error) throw new Error(result.error);
+    while (['quitting', 'repairing', 'reopening'].includes(result.phase)) {
+      panel.textContent = t('recovery.progress', result);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      result = await api('recovery_status', {});
     }
+    panel.textContent = result.phase === 'done'
+      ? t('recovery.done', result) : t('recovery.failed');
+    if (!result.reopened) panel.textContent += ' ' + t('restart.manual');
   } catch (error) {
-    toast(t('switch.restart_fail', { detail: String(error) }));
+    panel.textContent = t('recovery.failed');
   } finally {
+    recoveryBusy = false;
     button.disabled = false;
-    button.textContent = t('switch.restart');
   }
 }
 $('btn-restart-codex').onclick = restartCodex;
@@ -1205,15 +1218,7 @@ function closeRestartModal() {
 
 async function restartCodexNow() {
   closeRestartModal();
-  toast(t('restart.doing'));
-  try {
-    const result = await api('restart_codex', {});
-    if (result.error) { toast(t('restart.failed', { error: result.error }), true); return; }
-    if (result.restarted) toast(t('restart.done'));
-    else toast(result.detail || t('restart.manual'), true);
-  } catch (error) {
-    toast(t('restart.failed', { error: error.message }), true);
-  }
+  await restartCodex();
 }
 
 async function removeProvider(provider) {
@@ -1431,3 +1436,5 @@ const initialView = new URLSearchParams(location.search).get('view');
 if (initialView === 'caps') setView('caps');
 
 loadState().catch((error) => toast(error.message, true));
+
+$('btn-recovery').onclick = restartCodex;

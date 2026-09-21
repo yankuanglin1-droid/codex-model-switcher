@@ -1,5 +1,11 @@
 # Codex Model Switcher — use any model in Codex
 
+**v1.7.7 — built-in history repair.** Repair foreign message IDs when returning
+ to OpenAI directly in the app, with backup, progress and safe restart.
+ Read the [compatibility audit and remaining limits](docs/debug-audit-v1.7.7.md).
+ Automation diagnostics distinguish fixed-model schedules from heartbeats;
+ successful scheduled execution must still be verified in the host app.
+
 [中文](README.zh-CN.md) · **English** · [Let an AI install it →](INSTALL-WITH-AI.md)
 
 [![Stars](https://img.shields.io/github/stars/yankuanglin1-droid/codex-model-switcher?style=flat-square&logo=github&label=Stars)](https://github.com/yankuanglin1-droid/codex-model-switcher/stargazers)

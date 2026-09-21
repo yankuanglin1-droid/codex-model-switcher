@@ -191,6 +191,8 @@ def _state_payload(include_balance: bool = False) -> Dict:
             item["usage"]["remaining_tokens_human"] = usage.human_tokens(
                 item["usage"].get("remaining_tokens", 0))
     current = engine.current_status()
+    from .. import automation_audit
+    automations = automation_audit.inspect(current.get("model_provider") or "openai", current.get("model"))
     try:
         thread_info = threads_module.summarize()
     except Exception:  # noqa: BLE001 - 任务统计失败不能拖垮主界面
@@ -199,6 +201,7 @@ def _state_payload(include_balance: bool = False) -> Dict:
         # 上下文窗口守卫：界面要能一眼看出「这个对话搬到当前模型上装不装得下」。
         # 装不下又不说，用户看到的就是一直在压缩、什么都不干。
         "guard": _guard_payload(current),
+        "automations": automations,
         "version": __version__,
         "project_url": PROJECT_URL,
         "update": update_module.read_cache(),
@@ -357,6 +360,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(result)
 
     def _dispatch(self, action: str, payload: Dict) -> Dict:
+        from .. import recovery
+        if (recovery.status()["phase"] in ("quitting", "repairing", "reopening")
+                and action not in ("recovery_status", "restart_codex")):
+            return {"error": "History repair is in progress; wait before changing configuration."}
         if action == "fit_switch":
             # 上下文守卫的自动化出口：换到一个装得下当前会话的模型。
             # switch_to 会顺带把最近在用的任务搬过去并重写压缩触发点。
@@ -428,8 +435,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "restart_codex":
             # Codex 只在启动时读一次配置：切完模型点确认，由这里代劳重启
-            from .. import appctl
-            return appctl.restart_codex()
+            from .. import recovery
+            return recovery.start()
 
         if action == "sync_integrations":
             provider_id = (payload.get("provider") or "").strip()
@@ -548,11 +555,9 @@ class Handler(BaseHTTPRequestHandler):
             report["state"] = _state_payload()
             return report
 
-        if action == "restart_codex":
-            # 切换后 Codex 要重启才吃进新配置。替用户做掉 ⌘Q + 重开：
-            # 优雅退出、等进程退干净、按 bundle id 拉起。
-            from .. import codexapp
-            return codexapp.restart()
+        if action == "recovery_status":
+            from .. import recovery
+            return recovery.status()
 
         if action == "sweep_history":            # 全量清扫会话历史里的孤儿工具结果（缺 call_id 的 function_call_output）。
             # 有预算上限：几百 MB 的大文件不该把界面卡住，剩下的交给后台巡检。
@@ -665,6 +670,9 @@ def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
         except Exception:  # noqa: BLE001 - 退出路径，不必细分
             return
         tick += 1
+        from .. import recovery
+        if recovery.status()["phase"] in ("quitting", "repairing", "reopening"):
+            continue
         try:
             report = threads_module.repair()
             if report.get("fixed"):
@@ -724,7 +732,7 @@ def _write_runtime_state(port: int) -> None:
         import os
         paths.ensure_dir(paths.state_dir())
         paths.gui_state_file().write_text(json.dumps(
-            {"port": port, "pid": os.getpid(), "token": Handler.token},
+            {"port": port, "pid": os.getpid(), "token": Handler.token, "version": __version__},
             ensure_ascii=False, indent=2) + "\n")
         os.chmod(paths.gui_state_file(), 0o600)
     except OSError:
@@ -733,8 +741,11 @@ def _write_runtime_state(port: int) -> None:
 
 def _clear_runtime_state() -> None:
     try:
-        paths.gui_state_file().unlink()
-    except OSError:
+        import os
+        record = json.loads(paths.gui_state_file().read_text())
+        if record.get("pid") == os.getpid():
+            paths.gui_state_file().unlink()
+    except (OSError, ValueError):
         pass
 
 
@@ -744,6 +755,26 @@ def existing_url(timeout: float = 1.0) -> Optional[str]:
     try:
         record = json.loads(paths.gui_state_file().read_text())
     except (OSError, json.JSONDecodeError):
+        return None
+    if record.get("version") != __version__:
+        import os
+        import signal
+        from .. import platform_compat
+        pid = record.get("pid")
+        if isinstance(pid, int) and pid > 1:
+            command = platform_compat.process_command_line(pid)
+            if "-m codex_switcher app" in command:
+                os.kill(pid, signal.SIGTERM)
+            elif command:
+                raise RuntimeError("GUI state belongs to another process; refusing to stop it")
+            else:
+                # Unknown identity may be a stale PID or an inaccessible process.
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise RuntimeError("Cannot verify old GUI process identity")
         return None
     port = record.get("port")
     token = record.get("token")

@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -355,8 +356,9 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
              "kept": 0, "backup": None}
     deep_clean = moving_off_openai or cross_provider
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        original_stat = path.stat()
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
         return False, stats
 
     lines = text.split("\n")
@@ -390,8 +392,7 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
                 stats["removed_image_outputs"] += 1
                 kept.append(_image_stub_line(payload))
                 continue
-        if line:
-            kept.append(line)
+        kept.append(line)
     stats["kept"] = len(kept)
 
     if not (stats["removed_orphan_outputs"] or stats["removed_openai_only"]
@@ -425,7 +426,27 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
                 return False, stats          # 校验不过就整单放弃，不写盘
     if text.endswith("\n") and not out.endswith("\n"):
         out += "\n"
-    path.write_text(out, encoding="utf-8")
+    # Recheck after processing; never truncate the file held by the host.
+    if (busy_reason(path) == "codex-open"
+            or path.stat().st_mtime_ns != original_stat.st_mtime_ns
+            or path.read_text(encoding="utf-8") != text):
+        return False, stats
+    fd, temporary = tempfile.mkstemp(prefix=".history-clean-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(out)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, path.stat().st_mode & 0o777)
+        if (busy_reason(path) == "codex-open"
+                or path.stat().st_mtime_ns != original_stat.st_mtime_ns):
+            return False, stats
+        os.replace(temporary, path)
+        if path.read_text(encoding="utf-8") != out:
+            raise OSError("History write verification failed; original is backed up")
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return True, stats
 
 

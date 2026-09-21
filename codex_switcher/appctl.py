@@ -153,49 +153,11 @@ def _terminate_gracefully() -> bool:
 
 
 def restart_codex() -> Dict:
-    """重启 Codex 桌面 App。返回人话说明，绝不抛错。"""
-    result = {"restarted": False, "detail": "", "method": None}
-    app = find_app()
-    if app is None:
-        result["detail"] = (
-            "没有找到 %s.app：Codex 以 CLI 形态运行时，新会话自动读取新配置，"
-            "无需重启。" % APP_NAME)
-        return result
-
-    if is_running():
-        # 退出三级降级，全都等价于 ⌘Q 的「给 Codex 存状态的机会」：
-        #   1) AppleScript（bundle id）—— 最正规，走 App 自己的退出流程；
-        #   2) AppleScript（app 名）—— 老版本兜底；
-        #   3) SIGTERM 软杀 —— 上两级被辅助访问权限/App 弹窗挡住时用。
-        # 三级全失败才让用户手动 ⌘Q，绝不 silent 跳过退出直接 open。
-        quit_ok = _osascript(
-            'tell application id "%s" to quit' % APP_BUNDLE_ID)
-        if not quit_ok:
-            quit_ok = _osascript('tell application "%s" to quit' % APP_NAME)
-        if quit_ok:
-            result["method"] = "quit-and-reopen"
-        else:
-            if _terminate_gracefully():
-                result["method"] = "term-and-reopen"
-            else:
-                result["detail"] = (
-                    "无法自动退出 Codex（AppleScript 与软杀都失败，"
-                    "可能被 App 内弹窗挡住），请手动 ⌘Q 后重开。")
-                return result
-        deadline = time.time() + QUIT_TIMEOUT_SECONDS
-        while time.time() < deadline:
-            if not is_running():
-                break
-            time.sleep(POLL_INTERVAL)
-        else:
-            result["detail"] = "Codex 在 %g 秒内没有退出，请手动 ⌘Q 后重开。" % QUIT_TIMEOUT_SECONDS
-            return result
-    else:
-        result["method"] = "open"
-
-    if _open_app(app):
-        result["restarted"] = True
-        result["detail"] = "Codex 已重启，新模型即刻生效。"
-    else:
-        result["detail"] = "无法自动拉起 Codex（open 失败），请手动打开。"
-    return result
+    """Legacy callers share the guarded quit path; never bypass a cancelled quit."""
+    from . import codexapp
+    try:
+        result = codexapp.restart()
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return {"restarted": False, "detail": "Unable to verify safe host exit", "method": None}
+    return {"restarted": bool(result.get("ok")), "detail": result.get("detail", ""),
+            "method": "quit-and-reopen" if result.get("ok") else None}

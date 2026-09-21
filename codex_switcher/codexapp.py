@@ -12,6 +12,7 @@ bundle id 没变），显示名以后可能再改，bundle id 是稳定的。
 
 from __future__ import annotations
 
+import plistlib
 import subprocess
 import sys
 import time
@@ -40,10 +41,9 @@ def find_app() -> Optional[str]:
         path = Path(candidate).expanduser()
         plist = path / "Contents" / "Info.plist"
         try:
-            if plist.exists() and BUNDLE_ID in plist.read_text(
-                    encoding="utf-8", errors="replace"):
+            if plist.exists() and plistlib.loads(plist.read_bytes()).get("CFBundleIdentifier") == BUNDLE_ID:
                 return str(path)
-        except OSError:
+        except (OSError, ValueError, plistlib.InvalidFileException):
             continue
     return None
 
@@ -58,7 +58,12 @@ def _osascript(script: str) -> bool:
 
 
 def is_running() -> bool:
-    return _osascript('application id "%s" is running' % BUNDLE_ID)
+    result = subprocess.run(["/usr/bin/osascript", "-e",
+                             'application id "%s" is running' % BUNDLE_ID],
+                            capture_output=True, text=True, timeout=20)
+    if result.returncode or result.stdout.strip().lower() not in ("true", "false"):
+        raise RuntimeError("Cannot verify whether ChatGPT/Codex has exited")
+    return result.stdout.strip().lower() == "true"
 
 
 def _quit(timeout: int = QUIT_TIMEOUT_SECONDS) -> bool:

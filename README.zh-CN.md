@@ -1,5 +1,10 @@
 # ChatGPT Model Switcher
 
+**v1.7.7：App 内置历史修复。** 切回官方遇到消息 ID 格式错误时，点击
+「修复官方历史并重启」，即可备份、修复并重新打开宿主，无须额外脚本。
+自动化面板分别检查固定模型计划和心跳任务；实际触发仍需在宿主中验证。
+查看[本次检查报告与已知限制](docs/debug-audit-v1.7.7.md)。
+
 [English](README.md) · **中文** · [让 AI 帮我装 →](INSTALL-WITH-AI.md)
 
 把 **任何提供 OpenAI 兼容 API 的平台** 接进 ChatGPT App 里的 Codex —— DeepSeek、

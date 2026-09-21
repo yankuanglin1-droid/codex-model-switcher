@@ -581,3 +581,21 @@ reasoning state or server-side tools.
 切回官方后若遇到 `invalid_id_prefix`：新版会规范普通历史与压缩历史中的消息
 ID，保留正文、工具调用及配对关系。正在被 ChatGPT/Codex 打开的历史不能直接
 覆盖；须先关闭宿主应用，备份修复后重新打开，避免旧缓存再次提交错误 ID。
+
+### In-app repair (v1.7.7)
+
+Use **Repair official history & restart** in the app footer. The app gracefully
+quits ChatGPT/Codex, backs up affected histories, normalizes message IDs, and
+reopens the host. Progress, skipped files and failures remain visible. Do not
+reopen the host while repair is running. A cancelled quit never force-kills the
+host or edits history. The restart action uses the same recovery path.
+
+App 内点击底部 **修复官方历史并重启**，即可完成退出、备份、消息 ID 修复和
+重新打开，无须下载额外脚本。修复过程中请不要手动打开宿主。界面显示检查、
+修复、跳过及失败数量。若退出被取消，不会强制终止进程。
+
+The automation banner is a read-only audit. Fixed-model schedules and
+thread-bound heartbeats are different: changing the default provider alone
+cannot validate or update both. Review flagged jobs in the host automation
+settings. No schedule, prompt, account credential or trigger time is changed
+by the audit; successful scheduled execution still needs runtime verification.

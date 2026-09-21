@@ -35,11 +35,15 @@ def normalize_record(record):
     return changed
 
 
-def repair_file(path, backup_dir):
+def repair_file(path, backup_dir, host_closed=False):
     """Refuse open/recent files, preserve all records, back up and verify writes."""
     from .history import busy_reason
     path = Path(path)
-    reason = busy_reason(path)
+    def blocked():
+        reason = busy_reason(path)
+        # Caller must have verified host exit; never ignore an open handle.
+        return None if host_closed and reason == "recent" else reason
+    reason = blocked()
     if reason:
         return {"changed": 0, "skipped": reason}
     original = path.read_bytes()
@@ -59,7 +63,7 @@ def repair_file(path, backup_dir):
     if not count:
         return {"changed": 0}
     updated = b"".join(lines)
-    if busy_reason(path) or path.read_bytes() != original:
+    if blocked() or path.read_bytes() != original:
         return {"changed": 0, "skipped": "concurrent-write"}
     backup_dir = Path(backup_dir)
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -74,7 +78,7 @@ def repair_file(path, backup_dir):
             f.flush()
             os.fsync(f.fileno())
         os.chmod(temporary, path.stat().st_mode & 0o777)
-        if busy_reason(path) or path.read_bytes() != original:
+        if blocked() or path.read_bytes() != original:
             return {"changed": 0, "skipped": "concurrent-write"}
         os.replace(temporary, path)
         if path.read_bytes() != updated:

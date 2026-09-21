@@ -228,6 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let file = stateDirectory().appendingPathComponent("gui.json")
         guard let data = try? Data(contentsOf: file),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = object["version"] as? String,
+              version == Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               let port = object["port"] as? Int,
               let token = object["token"] as? String,
               !token.isEmpty

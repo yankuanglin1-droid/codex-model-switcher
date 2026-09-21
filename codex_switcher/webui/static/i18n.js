@@ -10,6 +10,14 @@
 
 const I18N = {
   zh: {
+    'automation.audit': '自动化检查：{total} 个任务，{fixed_model} 个固定模型，{heartbeat} 个心跳任务；{needs_review} 个需核对绑定，{unreadable} 个无法读取。切换默认模型不会修改固定模型计划。实际触发尚未验证，请在 ChatGPT/Codex 自动化设置中核对。',
+    'recovery.button': '修复官方历史并重启',
+    'recovery.confirm': '将正常退出 ChatGPT/Codex，备份并规范官方任务历史中的消息 ID，再重新打开。请先停止运行中的任务并保存工作。不会删除消息内容；不保证修复其他类型的协议错误。继续？',
+    'recovery.working': '正在安全退出 ChatGPT/Codex…',
+    'recovery.progress': '正在检查历史：已检查 {checked} 个任务，修复 {changed} 个消息 ID。请暂时不要启动 ChatGPT/Codex。',
+    'recovery.done': '完成：检查 {checked} 个任务，修复 {changed} 个消息 ID；跳过 {skipped} 个，失败 {failed} 个。请在原任务发送消息验证。',
+    'recovery.failed': '修复未完成。App 可能拒绝退出或被重新打开；请停止任务后重试。',
+
     'lang.other': 'English',
     'lang.title': '切换界面语言',
 
@@ -303,6 +311,14 @@ const I18N = {
   },
 
   en: {
+    'automation.audit': 'Automation audit: {total} jobs, {fixed_model} fixed-model, {heartbeat} heartbeat; {needs_review} need binding review, {unreadable} unreadable. Default model changes do not rewrite fixed-model schedules. Triggering is not verified; review in ChatGPT/Codex automation settings.',
+    'recovery.button': 'Repair official history & restart',
+    'recovery.confirm': 'Quit ChatGPT/Codex, back up and normalize message IDs in official histories, then reopen. Stop running tasks and save work first. Message contents are preserved; other protocol errors may require separate fixes. Continue?',
+    'recovery.working': 'Closing ChatGPT/Codex safely…',
+    'recovery.progress': 'Checked {checked} histories; normalized {changed} message IDs. Keep ChatGPT/Codex closed.',
+    'recovery.done': 'Checked {checked}; normalized {changed} IDs; skipped {skipped}; failed {failed}. Send a message in the original task to verify.',
+    'recovery.failed': 'Repair incomplete. The host may have refused to quit or reopened. Stop tasks and try again.',
+
     'lang.other': '中文',
     'lang.title': 'Switch interface language',
 

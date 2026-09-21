@@ -219,6 +219,9 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     strip_reasoning = (from_provider == OFFICIAL_PROVIDER_ID) or (
         from_provider is None and to_provider != OFFICIAL_PROVIDER_ID)
 
+    if history_module.busy_reason(path) == "codex-open":
+        raise OSError("Session is held open; deferring migration")
+    original_stat = path.stat()
     raw_lines: List[str] = []
     meta_changed = 0
     settings_changed = 0
@@ -272,6 +275,10 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     if not (changed or history_removed):
         return False, 0, 0, 0
 
+    if (history_module.busy_reason(path) == "codex-open"
+            or path.stat().st_mtime_ns != original_stat.st_mtime_ns
+            or path.stat().st_size != original_stat.st_size):
+        raise OSError("Session changed during migration; deferred")
     # 备份原文件（保留目录结构，方便对照）
     relative = path.name
     target = backup_dir / relative
@@ -459,7 +466,8 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
                 pass
         entry["db"] = _update_databases(item["id"], item["provider"], item["expected"], backup_dir)
         report["items"].append(entry)
-        report["fixed"] += 1
+        if entry["session"] or entry["db"]:
+            report["fixed"] += 1
 
     for item in stale_files:
         path = Path(item["rollout_path"])
