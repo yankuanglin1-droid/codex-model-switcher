@@ -563,16 +563,10 @@ class Handler(BaseHTTPRequestHandler):
             from .. import recovery
             return recovery.status()
 
-        if action == "sweep_history":            # 全量清扫会话历史里的孤儿工具结果（缺 call_id 的 function_call_output）。
-            # 有预算上限：几百 MB 的大文件不该把界面卡住，剩下的交给后台巡检。
-            #
-            # 走 engine 而不是直接调 history.sweep_all：只有 engine 那一层会按
-            # 当前平台补上 moving_off_openai —— 在第三方平台上时，OpenAI 专有
-            # 的加密推理条目同样是废数据，不清的话旧对话回放照样被拒。
-            # 命令行一直是清的，界面之前漏了，点清扫看着像"没用"。
+        if action == "sweep_history":
+            # The desktop history button is read-only, even for an older client.
             report = engine.sweep_history(
-                apply=not bool(payload.get("dry_run")),
-                budget_seconds=SWEEP_ON_DEMAND_BUDGET_SECONDS)
+                apply=False, budget_seconds=SWEEP_ON_DEMAND_BUDGET_SECONDS)
             report["description"] = history_module.describe_sweep(report)
             return report
 

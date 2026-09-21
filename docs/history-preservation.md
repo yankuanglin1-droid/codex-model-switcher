@@ -5,6 +5,7 @@
 ## 现在的行为
 
 - 打开 App、切换默认模型、后台检查不再写入已有任务历史或任务数据库。
+- App 中“清扫会话历史”改为“检查会话历史”，点击仅检查，不删除记录；旧客户端也不能通过该接口请求清扫。
 - 旧任务与自动化保留原平台。新任务使用新的默认平台。不要在旧任务中直接选择另一平台的模型；这不构成安全迁移。
 - 显式迁移只修改平台字段及必要的官方记录 ID，保留所有历史记录、工具结果、图片和推理。不能保证每种专有工具或加密历史被其他平台接受。
 - 显式修复遇到忙碌、无法检测占用、文件缺失或读取失败时整条延期，不单独修改数据库，也不报告已成功。
@@ -21,6 +22,6 @@ Windows 上无法确认文件占用时，手动写入会被阻止；不会退回
 
 ## Verification
 
-235 tests passed on macOS. New regression fixtures cover unknown occupancy, lsof error output, late changes before writes, replacement inode with identical content, immutable history/database during default switches, read-only startup/watchdog, and database deferral when history cannot be updated. Tests use temporary histories and synthetic providers, never private sessions or credentials.
+236 tests passed on macOS. New regression fixtures cover unknown occupancy, lsof error output, late changes before writes, replacement inode with identical content, immutable history/database during default switches, read-only startup/watchdog, and database deferral when history cannot be updated. Tests use temporary histories and synthetic providers, never private sessions or credentials.
 
 Startup and switching are read-only for existing transcripts. Explicit migration preserves every source record. This does not provide universal cross-provider replay compatibility or guarantee restoration of UI messages lost before this update.

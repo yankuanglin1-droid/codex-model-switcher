@@ -214,6 +214,16 @@ class HistoryPreservationTests(unittest.TestCase):
                             self.assertEqual(result["moved"], 0)
                         update_databases.assert_not_called()
 
+    def test_desktop_history_button_cannot_request_destructive_sweep(self):
+        from codex_switcher.webui import server
+        from codex_switcher import recovery
+        with patch.object(recovery, "status", return_value={"phase": "idle"}), \
+                patch.object(engine, "sweep_history", return_value={}) as sweep, \
+                patch.object(history, "describe_sweep", return_value="read-only"):
+            handler = object.__new__(server.Handler)
+            handler._dispatch("sweep_history", {"dry_run": False})
+            self.assertIs(sweep.call_args.kwargs["apply"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

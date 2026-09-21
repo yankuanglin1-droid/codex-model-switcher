@@ -233,9 +233,7 @@ async function repairThreads(dryRun) {
   }
 }
 
-// 全量清扫会话历史：把 codex_app 工具留下的"缺 call_id 的孤儿工具结果"清掉。
-// 界面常驻时后台每 60 秒会自己扫一轮，这个按钮是给"Codex 退出后想立刻清干净"
-// 以及手动确认用的（Codex 正开着的会话会被跳过，退出后自动补上）。
+// Read-only history inspection. Never delete source records from the UI.
 async function sweepHistory() {
   const button = $('btn-sweep-history');
   const original = t('history.sweep');
@@ -244,16 +242,11 @@ async function sweepHistory() {
   try {
     const result = await api('sweep_history', {});
     if (result.error) { toast(result.error, true); return; }
-    const removed = result.removed || {};
-    if (!result.cleaned) {
-      toast(t('history.sweep_clean'));
-    } else {
-      const suffix = result.skipped_busy
-        ? t('history.sweep_busy', { busy: result.skipped_busy }) : '';
-      toast(t('history.sweep_done', {
-        cleaned: result.cleaned, orphans: removed.orphan_outputs || 0,
-      }) + suffix);
-    }
+    const suffix = result.skipped_busy
+      ? t('history.sweep_busy', { busy: result.skipped_busy }) : '';
+    toast(t('history.sweep_done', {
+      cleaned: result.cleaned || 0, ids: result.would_normalize_ids || 0,
+    }) + suffix);
   } catch (error) {
     toast(error.message, true);
   } finally {
