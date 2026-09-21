@@ -42,12 +42,15 @@ func runtimeDirectory() -> URL {
     return URL(fileURLWithPath: homeDirectory()).appendingPathComponent(".local/share/codex-switcher")
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusField: NSTextField!
     private var overlay: NSView!
+    private var launchSpinner: NSProgressIndicator!
+    private var retryButton: NSButton!
     private var pollTimer: Timer?
+    private var readinessTimer: Timer?
     private var startedAt = Date()
     private var triedExisting = false
     private var loadedURL: URL?
@@ -123,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         becomePrimaryInstance()
         buildMenu()
         buildWindow()
-        startOrReuse()
+        if !CommandLine.arguments.contains("--preview-loading") && Bundle.main.object(forInfoDictionaryKey: "SwitcherPreviewLoading") as? Bool != true { startOrReuse() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -141,33 +144,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.title = appTitle
         window.minSize = NSSize(width: 880, height: 600)
         window.center()
-        window.titlebarAppearsTransparent = false
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = false
+        window.backgroundColor = .clear
 
         let container = NSView(frame: frame)
         container.autoresizingMask = [.width, .height]
 
         let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(self, name: "switcherLifecycle")
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
         webView = WKWebView(frame: frame, configuration: configuration)
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        webView.isHidden = true
         container.addSubview(webView)
 
-        // 启动阶段的提示层（服务起来之后移除）
-        overlay = NSView(frame: frame)
-        overlay.autoresizingMask = [.width, .height]
-        overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 1).cgColor
+        // Native adaptive material; transparency/reduced motion follow macOS.
+        let glass = NSVisualEffectView(frame: frame)
+        glass.material = .underWindowBackground
+        glass.appearance = NSAppearance(named: .aqua)
+        glass.blendingMode = .behindWindow
+        glass.state = .active
+        glass.autoresizingMask = [.width, .height]
+        overlay = glass
 
-        statusField = NSTextField(labelWithString: "正在启动后台服务…")
-        statusField.font = NSFont.systemFont(ofSize: 15, weight: .medium)
-        statusField.textColor = NSColor(calibratedWhite: 0.85, alpha: 1)
+        let card = NSVisualEffectView()
+        card.material = .popover
+        card.blendingMode = .withinWindow
+        card.state = .active
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 30
+        card.layer?.borderWidth = 0.5
+        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
+        card.translatesAutoresizingMaskIntoConstraints = false
+        glass.addSubview(card)
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 18
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+
+        let icon = NSImageView()
+        if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns") {
+            icon.image = NSImage(contentsOfFile: path)
+        }
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setAccessibilityLabel("ChatGPT Model Switcher")
+        icon.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 84).isActive = true
+        stack.addArrangedSubview(icon)
+        let title = NSTextField(labelWithString: appTitle)
+        title.font = .systemFont(ofSize: 26, weight: .semibold)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+        let subtitle = NSTextField(labelWithString: "MULTIPLE MODELS. ONE WORKSPACE.")
+        subtitle.font = .systemFont(ofSize: 10, weight: .medium)
+        subtitle.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(subtitle)
+        launchSpinner = NSProgressIndicator()
+        launchSpinner.style = .spinning
+        launchSpinner.controlSize = .small
+        launchSpinner.startAnimation(nil)
+        stack.addArrangedSubview(launchSpinner)
+        statusField = NSTextField(wrappingLabelWithString: "正在准备你的模型工作台…")
+        statusField.font = .systemFont(ofSize: 13)
+        statusField.textColor = .secondaryLabelColor
         statusField.alignment = .center
-        statusField.frame = NSRect(x: 40, y: frame.height / 2 - 40, width: frame.width - 80, height: 24)
-        statusField.autoresizingMask = [.width, .minYMargin, .maxYMargin]
-        overlay.addSubview(statusField)
-        container.addSubview(overlay)
+        statusField.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        stack.addArrangedSubview(statusField)
+        retryButton = NSButton(title: "重新尝试 / Retry", target: self, action: #selector(retryLaunch))
+        retryButton.bezelStyle = .rounded
+        retryButton.isHidden = true
+        stack.addArrangedSubview(retryButton)
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let footer = NSTextField(labelWithString: "v\(version)  ·  LOCAL FIRST")
+        footer.font = .systemFont(ofSize: 10, weight: .medium)
+        footer.textColor = .tertiaryLabelColor
+        stack.addArrangedSubview(footer)
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: glass.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: glass.centerYAnchor),
+            card.widthAnchor.constraint(equalToConstant: 480),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 38),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -34),
+            stack.centerXAnchor.constraint(equalTo: card.centerXAnchor)
+        ])
+        container.addSubview(glass)
 
         window.contentView = container
         window.makeKeyAndOrderFront(nil)
@@ -281,11 +346,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         loadedURL = url
         statusField.stringValue = "正在载入界面…"
         webView.load(URLRequest(url: url))
+        readinessTimer?.invalidate()
+        readinessTimer = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
+            guard let self, self.overlay != nil else { return }
+            self.showFailure("载入时间较长，请检查本地服务后重试。 / Loading is taking longer than expected.")
+        }
     }
 
     private func showFailure(_ message: String) {
+        readinessTimer?.invalidate()
         statusField.stringValue = message
         statusField.maximumNumberOfLines = 0
+        launchSpinner?.stopAnimation(nil)
+        retryButton?.isHidden = false
+    }
+
+    @objc private func retryLaunch() {
+        retryButton.isHidden = true
+        launchSpinner.startAnimation(nil)
+        startOrReuse()
+    }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame,
+              let url = message.frameInfo.request.url, isInternal(url),
+              let body = message.body as? String else { return }
+        if body == "ready" {
+            readinessTimer?.invalidate()
+            launchSpinner?.stopAnimation(nil)
+            webView.isHidden = false
+            overlay?.removeFromSuperview()
+            overlay = nil
+            window.isOpaque = true
+            window.backgroundColor = .windowBackgroundColor
+        } else if body == "failed" {
+            showFailure("本地配置载入失败，请重试。 / Could not load local settings.")
+        }
     }
 
     // -------------------------------------------------------- WKNavigation
@@ -333,8 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        overlay?.removeFromSuperview()
-        overlay = nil
+        if overlay != nil { statusField.stringValue = "正在读取模型与本地配置…" }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -447,6 +543,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let pid = object["pid"] as? Int, pid > 1
             else { continue }
+            let probe = Process()
+            let output = Pipe()
+            probe.executableURL = URL(fileURLWithPath: "/bin/ps")
+            probe.arguments = ["-p", String(pid), "-o", "command="]
+            probe.standardOutput = output
+            probe.standardError = Pipe()
+            do { try probe.run() } catch { continue }
+            let probeData = output.fileHandleForReading.readDataToEndOfFile()
+            probe.waitUntilExit()
+            let command = String(data: probeData, encoding: .utf8) ?? ""
+            guard command.contains("-m codex_switcher") else { continue }
             if kill(pid_t(pid), SIGTERM) == 0 {
                 stopped.append(String(pid))
             }

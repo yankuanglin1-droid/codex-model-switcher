@@ -51,3 +51,14 @@ resuming the affected task after the user initiates in-app recovery.
 - Live launch exposed stale UI-server reuse after app replacement. The app and
   UI state now carry matching versions; only a verified old switcher UI process
   may be retired. The model bridge is not stopped by this upgrade check.
+
+## v1.7.8 follow-up
+
+The official built-in provider was incorrectly required to have a custom provider
+table. This was a local diagnostic false positive, now regression-tested for
+explicit and implicit OpenAI, custom overrides, and missing third-party tables.
+The Windows launcher now quotes interpreter paths. Process shutdown requires
+command-line identity, not just a python.exe process name or a stale PID record.
+Unknown identities are preserved for review and not terminated.
+
+Windows runtime validation is pending GitHub workflow permission; see windows.md.

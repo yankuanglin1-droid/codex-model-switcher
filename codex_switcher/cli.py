@@ -373,15 +373,8 @@ def cmd_stop(args) -> int:
             if platform_compat.process_command_line(pid):
                 skipped.append("%s（PID %d 已不属于本工具，跳过）" % (label, pid))
             else:
-                # PID 是服务自己写进状态文件的，读不到命令行时按记录处理，
-                # 并把实情告诉用户，而不是假装它"不属于本工具"。
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    stopped.append("%s（PID %d，命令行读不到没法核实身份，按记录处理）" % (label, pid))
-                except ProcessLookupError:
-                    stopped.append("%s（已经不在运行）" % label)
-                except PermissionError:
-                    skipped.append("%s（没有权限结束 PID %d，可手动执行 kill %d）" % (label, pid, pid))
+                skipped.append("%s（PID %d 身份无法确认，未终止）" % (label, pid))
+            continue  # Preserve the record for diagnosis/retry; never kill an unknown PID.
         else:
             try:
                 os.kill(pid, signal.SIGTERM)

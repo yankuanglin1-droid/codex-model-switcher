@@ -1245,7 +1245,7 @@ class StopCommandTests(TempCodexHome):
         (paths.state_dir() / "gui.json").write_text(
             json.dumps({"port": 1, "pid": pid, "token": "x"}))
 
-    def test_stops_by_record_when_command_line_is_unreadable(self):
+    def test_skips_unknown_process_when_command_line_is_unreadable(self):
         import codex_switcher.cli as cli
         from codex_switcher import platform_compat, paths
         killed = []
@@ -1260,9 +1260,9 @@ class StopCommandTests(TempCodexHome):
         finally:
             cli.os.kill = saved["kill"]
             platform_compat.process_command_line = saved["cmdline"]
-        self.assertEqual(killed, [424242], "读不到命令行时也应按记录的 PID 停掉")
-        # 处理完要清掉记录，避免下次又对着同一个 PID
-        self.assertFalse(
+        self.assertEqual(killed, [], "无法确认身份时不得终止进程")
+        # Unknown identities retain their record for diagnosis rather than being killed.
+        self.assertTrue(
             (Path(saved["state_dir"]) / "gui.json").exists())
 
     def test_still_skips_verified_foreign_process(self):

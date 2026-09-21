@@ -375,6 +375,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = engine.switch_to(provider, model)
             except engine.SwitchError as exc:
                 return {"error": str(exc)}
+            from ..cli import _ensure_bridge
+            _ensure_bridge()
             result["state"] = _state_payload()
             return result
 
@@ -385,6 +387,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = engine.switch_to(engine.OFFICIAL_PROVIDER, model)
             else:
                 result = engine.switch_to(provider, model)
+            from ..cli import _ensure_bridge
+            _ensure_bridge()
             result["state"] = _state_payload()
             return result
 
@@ -763,7 +767,7 @@ def existing_url(timeout: float = 1.0) -> Optional[str]:
         pid = record.get("pid")
         if isinstance(pid, int) and pid > 1:
             command = platform_compat.process_command_line(pid)
-            if "-m codex_switcher app" in command:
+            if "-m codex_switcher app" in command or "packaging/windows/app.py" in command.replace("\\", "/"):
                 os.kill(pid, signal.SIGTERM)
             elif command:
                 raise RuntimeError("GUI state belongs to another process; refusing to stop it")

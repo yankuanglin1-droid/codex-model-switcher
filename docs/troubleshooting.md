@@ -599,3 +599,14 @@ thread-bound heartbeats are different: changing the default provider alone
 cannot validate or update both. Review flagged jobs in the host automation
 settings. No schedule, prompt, account credential or trigger time is changed
 by the audit; successful scheduled execution still needs runtime verification.
+
+### v1.7.8: false missing `[model_providers.openai]` warning
+
+`openai` is the built-in provider. Restoring the official configuration intentionally
+omits a custom provider table. The previous readiness check incorrectly required
+that table for every provider and displayed a red failure. The corrected check
+accepts the built-in provider while keeping third-party table checks. This local
+check does not prove authentication, quota, or network availability.
+
+官方平台缺少自定义配置段的红色提示是旧版检测误报，不代表订阅已失效。
+黄色自动化检查是独立的只读诊断，也不代表那些计划已经执行失败。

@@ -186,6 +186,14 @@ def check(provider_id: Optional[str] = None, check_history: bool = False) -> Dic
     # 缺了这一段，Codex 根本不认识这个平台，会退回 ChatGPT 订阅鉴权，
     # 于是报「订阅无法使用第三方模型」。
     block = _provider_block(text, active)
+    if active == "openai":
+        # The official provider is built in. A custom provider table, API key
+        # helper or local bridge is not a prerequisite for subscription login.
+        if block:
+            checks.append(_item(WARN, "官方配置覆盖", "存在自定义 openai 配置，请确认这是有意设置的。"))
+        checks.append(_item(OK, "官方内置平台", "无需单独的 [model_providers.openai] 配置段"))
+        checks.append(_item(WARN, "订阅与网络", "本地配置检查不验证登录状态、订阅额度或服务端连通性。"))
+        return {"ok": True, "provider": active, "checks": checks, "network_verified": False}
     if block is None:
         checks.append(_item(FAIL, "平台配置段",
                             "config.toml 里没有 [model_providers.%s]" % active,
@@ -308,7 +316,7 @@ def _port_from_url(url: str) -> Optional[int]:
 def describe(report: Dict) -> str:
     """给人看的一句话结论。"""
     if report["ok"]:
-        return "链路检查通过：%s 可以正常请求。" % report.get("provider")
+        return "本地配置检查通过：%s；实际请求与登录状态需另行验证。" % report.get("provider")
     failed = [item for item in report["checks"] if item["status"] == FAIL]
     return "有 %d 处会挡住请求：%s" % (
         len(failed), "；".join(item["name"] for item in failed))

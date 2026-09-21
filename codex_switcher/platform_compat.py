@@ -109,18 +109,17 @@ def process_command_line(pid: int) -> str:
     if pid <= 1:
         return ""
     if IS_WINDOWS:
-        # tasklist 只给映像名，先确认这个 PID 还在、且是 python 进程
+        # Verify the command line, not merely the shared python.exe image name.
         try:
             result = subprocess.run(
-                ["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=10,
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                 "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                 "(Get-CimInstance Win32_Process -Filter 'ProcessId = %d').CommandLine" % pid],
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except Exception:  # noqa: BLE001
+            return (result.stdout or "").strip() if result.returncode == 0 else ""
+        except Exception:
             return ""
-        output = (result.stdout or "").strip()
-        if not output or "PID" in output or "No tasks" in output:
-            return ""
-        return output
     try:
         result = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
                                 capture_output=True, text=True, timeout=10)
@@ -134,11 +133,7 @@ def is_our_process(pid: int, marker: str = "codex_switcher") -> bool:
     command = process_command_line(pid)
     if not command:
         return False
-    if IS_WINDOWS:
-        # tasklist 给的是映像名，python.exe / pythonw.exe 都算
-        lowered = command.lower()
-        return "python" in lowered
-    return marker in command
+    return marker in command or (IS_WINDOWS and "packaging/windows/app.py" in command.replace("\\", "/"))
 
 
 def spawn_detached(command: list, log_path: Optional[Path] = None) -> int:

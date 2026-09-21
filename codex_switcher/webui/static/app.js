@@ -1435,6 +1435,11 @@ renderFooterHelp();
 const initialView = new URLSearchParams(location.search).get('view');
 if (initialView === 'caps') setView('caps');
 
-loadState().catch((error) => toast(error.message, true));
+loadState().then(() => {
+  window.webkit?.messageHandlers?.switcherLifecycle?.postMessage('ready');
+}).catch((error) => {
+  window.webkit?.messageHandlers?.switcherLifecycle?.postMessage('failed');
+  toast(error.message, true);
+});
 
 $('btn-recovery').onclick = restartCodex;
