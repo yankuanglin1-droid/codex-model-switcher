@@ -361,6 +361,7 @@ function renderSwitchResult(result, failed) {
   }
   const lines = [t('switch.ok_detail', {
     label: result.label || result.provider, model: result.model })];
+  if (result.history_preserved) lines.push(t('switch.history_preserved'));
   if (result.backup) lines.push(t('switch.backup', { path: result.backup }));
   const followed = result.threads_followed;
   if (followed && followed.moved) {

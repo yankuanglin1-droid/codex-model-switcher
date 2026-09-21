@@ -1,5 +1,7 @@
 # English README moved
 
+> **v1.7.10 history protection:** startup, default-provider switching and background checks no longer rewrite existing histories or task bindings. Existing tasks and automations retain their provider; new tasks use the new default. Earlier automatic migration/cleanup behavior is retired. See [history preservation](docs/history-preservation.md).
+
 **v1.7.8:** frosted macOS startup screen, corrected official-provider diagnostics,
 safer process shutdown, and [Windows edition/build status](docs/windows.md).
 

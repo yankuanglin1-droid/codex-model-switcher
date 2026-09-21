@@ -62,12 +62,12 @@ ACTIVE_GUARD_SECONDS = 120
 # 早就不新鲜了，文件却随时会被追加写。这时改写它（os.replace 换掉 inode）
 # 会让 Codex 后续的写入落进已经没人引用的旧 inode，整段对话凭空消失。
 # 所以先拿 lsof 问一句"Codex 现在到底攥着哪些文件"，比猜 mtime 准得多；
-# 探不到 lsof 时再退回 mtime 那道保守护栏。
+# 探不到 lsof 时禁止写入，不能用旧 mtime 代替占用证据。
 LSOF_TIMEOUT_SECONDS = 5.0
 OPEN_FILES_CACHE_SECONDS = 5.0
 # lsof 探针熔断：系统负载高时 lsof -c codex 可能 30s+ 才返回，每次等 5s 超时
 # 会把清扫的时间预算全部烧掉（每个文件卡 5s、25s 预算只够 5 个文件）。
-# 超时一次就本进程内熔断，之后直接退回 mtime 保守护栏——慢机器上宁可保守，
+# 超时一次就本进程内熔断，之后拒绝写入——慢机器上宁可保守，
 # 也不能把「全量清扫」拖成「只扫了 5 个」。
 _UNPROBED = object()
 _OPEN_FILES_CACHE: Dict[str, object] = {"at": 0.0, "paths": _UNPROBED, "broken": False}
@@ -77,26 +77,24 @@ def _codex_open_rollouts() -> Optional[set]:
     """Codex 进程当前打开着的会话文件集合；探不到返回 None。
 
     结果为 None 只表示"问不出来"（没有 lsof / 不是 unix / 命令失败），
-    不表示"没有文件被打开"——调用方必须据此退回保守判定。
+    不表示"没有文件被打开"——调用方必须禁止写入。
     熔断语义：一旦超时（系统级 lsof 卡死），本次运行内不再重试。
     """
     now = time.time()
     if _OPEN_FILES_CACHE.get("broken"):
         return None
-    cached = _OPEN_FILES_CACHE.get("paths")
-    if cached is not _UNPROBED and now - float(_OPEN_FILES_CACHE["at"] or 0.0) \
-            < OPEN_FILES_CACHE_SECONDS:
-        return cached  # type: ignore[return-value]
+    # Do not reuse a negative snapshot before replacing an inode. The host
+    # could have opened the file after that snapshot was taken.
     found: Optional[set] = None
     try:
         completed = subprocess.run(["lsof", "-c", "codex", "-c", "Codex", "-c", "ChatGPT", "-Fn"],
                                    capture_output=True, timeout=LSOF_TIMEOUT_SECONDS)
         # lsof 的退出码 0 = 有命中、1 = 没命中，两个都说明它本身跑成功了
-        if completed.returncode in (0, 1):
+        if completed.returncode in (0, 1) and not completed.stderr.strip():
             found = set()
             for raw in completed.stdout.decode("utf-8", "replace").splitlines():
                 if raw.startswith("n") and raw.endswith(".jsonl"):
-                    found.add(raw[1:])
+                    found.add(str(Path(raw[1:]).resolve()))
     except (OSError, ValueError, subprocess.SubprocessError):
         # TimeoutExpired 也落在这里：探针超时 = 系统级 lsof 不可用，熔断
         found = None
@@ -109,14 +107,16 @@ def _codex_open_rollouts() -> Optional[set]:
 def busy_reason(path: Path) -> Optional[str]:
     """这个会话文件现在能不能安全改写；None 表示可以。
 
-    两个"不能碰"的信号取并集（保守优先）：
+    无法检测占用时也禁止写入；已知忙碌信号取并集：
       ``codex-open``  Codex 正持有它的句柄 —— 换了 inode 会吃掉它后续的写入；
       ``recent``      最近 ``ACTIVE_GUARD_SECONDS`` 内被写过，句柄可能还热着。
     """
     opened = _codex_open_rollouts()
+    if opened is None:
+        return "occupancy-unknown"
     if opened:
         try:
-            if str(path) in opened:
+            if str(path.resolve()) in opened:
                 return "codex-open"
         except TypeError:  # pragma: no cover - 只在缓存被外部改坏时发生
             pass
@@ -124,8 +124,19 @@ def busy_reason(path: Path) -> Optional[str]:
         if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
             return "recent"
     except OSError:
-        return None
+        return "unreadable"
     return None
+
+def same_snapshot(path: Path, previous, content: bytes) -> bool:
+    """Detect replacement, append, or same-size edits before a history commit."""
+    try:
+        current = path.stat()
+        fields = ("st_dev", "st_ino", "st_mtime_ns", "st_size")
+        return (all(getattr(current, key) == getattr(previous, key) for key in fields)
+                and path.read_bytes() == content)
+    except OSError:
+        return False
+
 
 # 第三方平台不认识、且删掉不影响语义的条目
 OPENAI_ONLY_IF_MOVING = {"reasoning"}
@@ -354,10 +365,14 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
     stats = {"removed_orphan_outputs": 0, "removed_openai_only": 0,
              "removed_cross_provider": 0, "removed_image_outputs": 0,
              "kept": 0, "backup": None}
+    if busy_reason(path):
+        stats["skipped"] = "unsafe"
+        return False, stats
     deep_clean = moving_off_openai or cross_provider
     try:
         original_stat = path.stat()
-        text = path.read_text(encoding="utf-8")
+        original_bytes = path.read_bytes()
+        text = original_bytes.decode("utf-8")
     except (OSError, UnicodeError):
         return False, stats
 
@@ -427,9 +442,9 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
     if text.endswith("\n") and not out.endswith("\n"):
         out += "\n"
     # Recheck after processing; never truncate the file held by the host.
-    if (busy_reason(path) == "codex-open"
-            or path.stat().st_mtime_ns != original_stat.st_mtime_ns
-            or path.read_text(encoding="utf-8") != text):
+    if (busy_reason(path)
+            or not same_snapshot(path, original_stat, original_bytes)):
+        stats["skipped"] = "concurrent-write"
         return False, stats
     fd, temporary = tempfile.mkstemp(prefix=".history-clean-", dir=path.parent)
     try:
@@ -438,8 +453,9 @@ def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, path.stat().st_mode & 0o777)
-        if (busy_reason(path) == "codex-open"
-                or path.stat().st_mtime_ns != original_stat.st_mtime_ns):
+        if (busy_reason(path)
+                or not same_snapshot(path, original_stat, original_bytes)):
+            stats["skipped"] = "concurrent-write"
             return False, stats
         os.replace(temporary, path)
         if path.read_text(encoding="utf-8") != out:
@@ -612,6 +628,8 @@ def auto_clean(moving_off_openai: bool, limit: int = AUTO_CLEAN_LIMIT,
             changed, stats = sanitize(path, moving_off_openai,
                                       _backup_root() / stamp,
                                       cross_provider=True)
+            if stats.get("skipped"):
+                continue
             if changed:
                 report["cleaned"] += 1
                 report["backup_dir"] = str(_backup_root() / stamp)
@@ -796,7 +814,7 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
                 "cross_provider": stats["removed_cross_provider"]}})
             after = _fingerprint(path)
             next_ledger[key] = after if after is not None else fingerprint
-        else:
+        elif not stats.get("skipped"):
             next_ledger[key] = fingerprint
 
     if not dry_run:

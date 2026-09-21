@@ -187,22 +187,10 @@ def _line_may_hold_provider(line: str) -> bool:
 
 def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider: str,
                           backup_dir: Path) -> Tuple[bool, int, int, int]:
-    """改写会话文件里的服务商记录。返回 (是否改动, 会话头改动数, 设置改动数, 历史剥离数)。
+    """Explicit provider migration. Keep all source history records intact.
 
-    from_provider 为 None 时表示“深度模式”：任何不等于 to_provider 的记录都改。
-
-    历史剥离与绑定改写同一次完成，这是刻意的：凡是把任务从一个平台搬到另一个
-    平台的路径（follow_switch / repair / 深度修复），会话历史里上一层平台留下的
-    服务端工具条目（web_search_call / image_generation_call 等）和孤儿输出
-    （function_call_output 缺 call_id）在目标平台必然 400
-    （实测：ChatGPT 任务搬到 MiniMax 后继续，报 missing field call_id）。
-    清洗必须与改绑不可分割，否则任何一条只改绑不清洗的路径都是事故。
-
-    剥离规则：
-      · 孤儿输出 —— 任何平台都不认，必删；
-      · 服务端工具成对条目 —— 显式跨平台搬（from_provider 非 None）时必删；
-        深度模式不删（目标平台自己产生的条目是合法历史，不能误伤）；
-      · encrypted_content 的 reasoning —— OpenAI 专有，目标不是 openai 时必删。
+    Only provider metadata and supported official item IDs may change. Never
+    remove messages, tools, images or reasoning to satisfy a remote API.
     """
     from . import history as history_module
 
@@ -216,12 +204,10 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
             return value != to_provider
         return value == from_provider
 
-    strip_reasoning = (from_provider == OFFICIAL_PROVIDER_ID) or (
-        from_provider is None and to_provider != OFFICIAL_PROVIDER_ID)
-
-    if history_module.busy_reason(path) == "codex-open":
-        raise OSError("Session is held open; deferring migration")
+    if history_module.busy_reason(path):
+        raise OSError("Session safety cannot be verified; migration deferred")
     original_stat = path.stat()
+    original_bytes = path.read_bytes()
     raw_lines: List[str] = []
     meta_changed = 0
     settings_changed = 0
@@ -242,18 +228,8 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
                 raw_lines.append(line)
                 continue
             payload = document["payload"]
-            # ---- 跨平台历史清洗（与下面的改绑同一事务，不存在漏网路径）
-            kind = payload.get("type")
-            if kind == "function_call_output" and not payload.get("call_id"):
-                history_removed += 1
-                continue
-            if kind in history_module.CROSS_PROVIDER_TYPES and from_provider is not None:
-                history_removed += 1
-                continue
-            if (kind == "reasoning" and payload.get("encrypted_content")
-                    and strip_reasoning):
-                history_removed += 1
-                continue
+            # Preserve every historical record. Protocol adaptation must never
+            # delete source records or their tool results from the transcript.
             touched = False
             if to_provider == OFFICIAL_PROVIDER_ID:
                 from .message_ids import normalize_record
@@ -275,13 +251,12 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     if not (changed or history_removed):
         return False, 0, 0, 0
 
-    if (history_module.busy_reason(path) == "codex-open"
-            or path.stat().st_mtime_ns != original_stat.st_mtime_ns
-            or path.stat().st_size != original_stat.st_size):
+    if (history_module.busy_reason(path)
+            or not history_module.same_snapshot(path, original_stat, original_bytes)):
         raise OSError("Session changed during migration; deferred")
     # 备份原文件（保留目录结构，方便对照）
     relative = path.name
-    target = backup_dir / relative
+    target = backup_dir / (str(time.time_ns()) + "-" + relative)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, target)
 
@@ -289,8 +264,14 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as stream:
             stream.writelines(raw_lines)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.chmod(temp, path.stat().st_mode & 0o777)
+        if history_module.busy_reason(path) or not history_module.same_snapshot(path, original_stat, original_bytes):
+            raise OSError("Session changed during migration; deferred")
         os.replace(temp, path)
+        if path.read_text(encoding="utf-8", errors="surrogateescape") != "".join(raw_lines):
+            raise OSError("Session readback mismatch; original retained in backup")
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
@@ -449,21 +430,19 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
                  "from": item["provider"], "to": item["expected"],
                  "session": False, "meta": 0, "settings": 0, "db": []}
         path = Path(item["rollout_path"]) if item["rollout_path"] else None
-        if path and path.exists():
-            try:
-                # 活动文件保护与 follow_switch 一致：Codex 正写着的文件不碰
-                # （替换 inode 会丢它后续的写入），数据库照样改，
-                # 文件留给后台巡检在 Codex 退出后补上。
-                if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
-                    entry["active"] = True
-                    report["skipped_active"].append(
-                        {"id": entry["id"], "title": entry["title"]})
-                else:
-                    changed, meta, settings, cleaned = _rewrite_session_file(
-                        path, item["provider"], item["expected"], backup_dir)
-                    entry.update(session=changed, meta=meta, settings=settings, history=cleaned)
-            except OSError:
-                pass
+        try:
+            if not path or not path.exists():
+                raise OSError("Session file unavailable")
+            changed, meta, settings, cleaned = _rewrite_session_file(
+                path, item["provider"], item["expected"], backup_dir)
+            if file_has_stale_provider(path, item["expected"]):
+                raise OSError("Session still has mismatched provider")
+            entry.update(session=changed, meta=meta, settings=settings, history=cleaned)
+        except (OSError, ValueError):
+            entry["active"] = True
+            report["skipped_active"].append({"id": entry["id"], "title": entry["title"]})
+            report["items"].append(entry)
+            continue
         entry["db"] = _update_databases(item["id"], item["provider"], item["expected"], backup_dir)
         report["items"].append(entry)
         if entry["session"] or entry["db"]:
@@ -478,8 +457,12 @@ def repair(thread_id: Optional[str] = None, dry_run: bool = False,
                 continue
         except OSError:
             continue
-        changed, meta, settings, cleaned = _rewrite_session_file(
-            path, None, item["provider"], backup_dir)  # 深度模式：全部对齐到数据库的值
+        try:
+            changed, meta, settings, cleaned = _rewrite_session_file(
+                path, None, item["provider"], backup_dir)
+        except (OSError, ValueError):
+            report["skipped_active"].append({"id": item["id"][:8], "title": item["title"][:40]})
+            continue
         if changed:
             report["items"].append({
                 "id": item["id"][:8], "title": item["title"][:40], "model": item["model"],
@@ -561,27 +544,26 @@ def follow_switch(from_provider: str, to_provider: str, model: Optional[str] = N
                  "from": from_provider, "to": to_provider,
                  "session": False, "meta": 0, "settings": 0, "db": [], "active": False}
         path = Path(item["rollout_path"]) if item["rollout_path"] else None
-        if path and path.exists():
-            try:
-                # Codex 正写着的文件不碰：替换 inode 会让它后续写入丢失。
-                # 数据库照样改（没有这个风险），文件留给后台巡检在 Codex
-                # 退出后补上——用户改了配置本来就得重启 Codex。
-                if time.time() - path.stat().st_mtime < ACTIVE_GUARD_SECONDS:
-                    entry["active"] = True
-                    report["skipped_active"].append(entry["id"])
-                else:
-                    changed, meta, settings, cleaned = _rewrite_session_file(
-                        path, from_provider, to_provider, backup_dir)
-                    entry.update(session=changed, meta=meta, settings=settings,
-                                 history=cleaned)
-            except OSError:
-                pass
+        try:
+            if not path or not path.exists():
+                raise OSError("Session file unavailable")
+            changed, meta, settings, cleaned = _rewrite_session_file(
+                path, from_provider, to_provider, backup_dir)
+            if file_has_stale_provider(path, to_provider):
+                raise OSError("Session still has mismatched provider")
+            entry.update(session=changed, meta=meta, settings=settings, history=cleaned)
+        except (OSError, ValueError):
+            entry["active"] = True
+            report["skipped_active"].append(entry["id"])
+            report["items"].append(entry)
+            continue
         entry["db"] = _update_databases(
             item["id"], from_provider, to_provider, backup_dir, model=model)
         if (item.get("source") or "").strip() == "exec":
             report["exec_followed"] += 1
         report["items"].append(entry)
-        report["moved"] += 1
+        if entry["session"] or entry["db"]:
+            report["moved"] += 1
     return report
 
 
@@ -603,7 +585,7 @@ def describe_follow(report: Dict) -> str:
         if item.get("db"):
             extra.append("数据库 " + "、".join(item["db"]))
         if item.get("active"):
-            extra.append("Codex 正在写入，退出后自动补修")
+            extra.append("尚未修改：历史文件未通过安全检查")
         lines.append("  %s  %s" % (item["id"], "；".join(extra) if extra else "无改动"))
     if report.get("backup_dir"):
         lines.append("备份：%s" % report["backup_dir"])
@@ -648,7 +630,7 @@ def watch_once(min_interval: float = 3.0) -> Optional[Dict]:
         return None
     _LAST_CHECK = now
     try:
-        report = repair()
+        report = repair(dry_run=True)
     except Exception as error:  # noqa: BLE001 - 巡检不能把主服务带崩
         return {"error": "%s: %s" % (type(error).__name__, error), "fixed": 0, "items": []}
     return report

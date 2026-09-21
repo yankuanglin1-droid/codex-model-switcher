@@ -86,8 +86,6 @@ class TempCodexHome(unittest.TestCase):
     def tearDown(self) -> None:
         from codex_switcher import engine as _engine
         _engine.ALLOW_BACKGROUND_FOLLOW = self._old_allow_background
-
-    def tearDown(self) -> None:
         if self._old_home is None:
             os.environ.pop("CODEX_HOME", None)
         else:
@@ -686,8 +684,8 @@ class EngineTests(TempCodexHome):
         self.assertFalse(engine.tool_search_disabled({"id": "moonshot", "supports_tool_search": True}))
         self.assertTrue(engine.tool_search_disabled({"id": "deepseek", "supports_tool_search": False}))
 
-    def test_switch_to_third_party_auto_cleans_old_sessions(self):
-        """切换平台的副作用：把旧会话里别家的服务端工具条目自动剥掉。
+    def test_switch_to_third_party_preserves_old_sessions(self):
+        """默认切换必须保留旧会话，不能自动清扫原始记录。
 
         实测事故：MiniMax 跑 web_search 产出的 web_search_call 只有 id 没有
         call_id，切到 deepseek 后 resume 旧会话直接 400（missing field call_id）。
@@ -722,11 +720,9 @@ class EngineTests(TempCodexHome):
         _os.utime(rollout, (old, old))
 
         result = engine.switch_to("deepseek", "deepseek-flash")
-        report = result.get("history_clean")
-        self.assertIsNotNone(report)
-        self.assertEqual(report["cleaned"], 1)
-        self.assertNotIn("web_search_call", rollout.read_text(encoding="utf-8"))
-        self.assertTrue(report["backup_dir"])
+        self.assertIsNone(result.get("history_clean"))
+        self.assertTrue(result["history_preserved"])
+        self.assertIn("web_search_call", rollout.read_text(encoding="utf-8"))
 
     def test_switching_to_openai_does_not_touch_history(self):
         """官方的解析器认自家的条目，切回官方时不该动历史。"""
@@ -2583,10 +2579,10 @@ class SweepTests(TempCodexHome):
             self.assertEqual(history.busy_reason(path), "codex-open")
             history._codex_open_rollouts = lambda: set()
             self.assertIsNone(history.busy_reason(path))   # 老 mtime + 没人开着 = 可以清
-            history._codex_open_rollouts = lambda: None    # 问不出来 → 退回 mtime 兜底
-            self.assertIsNone(history.busy_reason(path))
+            history._codex_open_rollouts = lambda: None
+            self.assertEqual(history.busy_reason(path), "occupancy-unknown")
             os.utime(path, None)                          # 刚被写过 → 保守跳过
-            self.assertEqual(history.busy_reason(path), "recent")
+            self.assertEqual(history.busy_reason(path), "occupancy-unknown")
         finally:
             history._codex_open_rollouts = original
 
@@ -2625,8 +2621,8 @@ class SweepTests(TempCodexHome):
         self.assertEqual(history.inspect(path)["orphan_outputs"], 1)
         self.assertIsNone(report["backup_dir"])
 
-    def test_engine_sweep_clears_openai_only_items_while_on_third_party(self):
-        """在第三方平台上时，清扫必须连 OpenAI 专有条目一起清。
+    def test_engine_sweep_never_infers_destructive_scope_from_default(self):
+        """默认平台不是批量删除其他任务历史的授权。
 
         界面上的「清扫会话历史」按钮走的是 engine.sweep_history，而它以前
         **根本没传** moving_off_openai —— 于是界面比命令行清得少，用户点了
@@ -2657,7 +2653,7 @@ class SweepTests(TempCodexHome):
                               self._healthy() + [reasoning], seconds_ago=7200)
         self.assertEqual(history.inspect(path2)["openai_only"], 1)
         engine.sweep_history()
-        self.assertEqual(history.inspect(path2)["openai_only"], 0)
+        self.assertEqual(history.inspect(path2)["openai_only"], 1)
 
     def test_engine_sweep_leaves_history_alone_while_on_official(self):
         """反过来：在官方平台上不能乱清自家条目，否则就是破坏历史。"""
@@ -3075,15 +3071,15 @@ class ThreadBindingTests(TempCodexHome):
         self.assertEqual(self._read_thread("bbb222")[1], "openai")
 
     def test_follow_switch_skips_a_file_codex_is_still_writing(self):
-        """Codex 正在写的文件不能替换 inode，数据库照改，文件留到巡检补。"""
+        """Codex 正在写入时，文件和数据库一起延期。"""
         from codex_switcher import threads
         path = self._make_rollout("task-c", "minimax")
         self._make_db([self._thread_row("ccc333", "MiniMax-M3", "minimax", path)])
         os.utime(path, None)  # 刚刚写过 → 活动文件
         report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
-        self.assertEqual(report["moved"], 1)
+        self.assertEqual(report["moved"], 0)
         self.assertEqual(report["items"][0]["active"], True)
-        self.assertEqual(self._read_thread("ccc333")[1], "deepseek")
+        self.assertEqual(self._read_thread("ccc333")[1], "minimax")
         self.assertIn("minimax", path.read_text())
 
     def test_repair_fixes_a_stale_session_file_without_the_deep_flag(self):
@@ -3107,7 +3103,7 @@ class ThreadBindingTests(TempCodexHome):
         self.assertIn('"model_provider": "minimax"', path.read_text())
 
     def test_switch_to_moves_recent_tasks_onto_the_new_provider(self):
-        """端到端：切换平台时，最近在用的任务跟着搬过去。"""
+        """端到端：切换默认平台时，已有任务与历史保持不变。"""
         from codex_switcher import engine, threads
         from codex_switcher import state as state_module
         path = self._make_rollout("task-f", "minimax")
@@ -3127,8 +3123,9 @@ class ThreadBindingTests(TempCodexHome):
         engine.switch_to("minimax", "MiniMax-M3")
         result = engine.switch_to("deepseek", "deepseek-flash")
         followed = result.get("threads_followed") or {}
-        self.assertEqual(followed.get("moved"), 1, followed)
-        self.assertEqual(self._read_thread("fff666"), ("deepseek-flash", "deepseek"))
+        self.assertFalse(followed)
+        self.assertTrue(result["history_preserved"])
+        self.assertEqual(self._read_thread("fff666"), ("MiniMax-M3", "minimax"))
 
     # ---- 绑定改写必须连带清洗跨平台历史（missing field call_id 的根治） ----
 
@@ -3154,7 +3151,7 @@ class ThreadBindingTests(TempCodexHome):
         os.utime(path, (old, old))
         return path
 
-    def test_repair_of_chatgpt_task_strips_openai_only_history(self):
+    def test_repair_of_chatgpt_task_preserves_all_history(self):
         """ChatGPT 任务被修绑到第三方时，历史里的 OpenAI 专有条目必须同一次清掉。
 
         用户实测：ChatGPT 执行过的任务切到第三方继续，报
@@ -3168,15 +3165,15 @@ class ThreadBindingTests(TempCodexHome):
         text = path.read_text()
         self.assertIn('"model_provider":"minimax"', text)
         # 这些条目在第三方平台上必然 400，改绑的同一事务里必须剥掉
-        self.assertNotIn("web_search_call", text)
-        self.assertNotIn("encrypted_content", text)
-        self.assertNotIn("function_call_output", text)
+        self.assertIn("web_search_call", text)
+        self.assertIn("encrypted_content", text)
+        self.assertIn("function_call_output", text)
         # 正常对话条目不能误伤
         self.assertIn('"output_text"', text)
         item = report["items"][0]
-        self.assertEqual(item.get("history"), 3, item)
+        self.assertEqual(item.get("history"), 0, item)
 
-    def test_follow_switch_between_third_parties_strips_history_too(self):
+    def test_follow_switch_between_third_parties_preserves_history(self):
         """第三方之间互搬：上一层平台的服务端工具条目同样必须剥掉。"""
         from codex_switcher import threads
         path = self._make_dirty_rollout("task-mini-dirty", "minimax")
@@ -3184,11 +3181,11 @@ class ThreadBindingTests(TempCodexHome):
         report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
         self.assertEqual(report["moved"], 1, report)
         text = path.read_text()
-        self.assertNotIn("web_search_call", text)
-        self.assertNotIn("function_call_output", text)
+        self.assertIn("web_search_call", text)
+        self.assertIn("function_call_output", text)
         self.assertIn('"model_provider":"deepseek"', text)
         # web_search_call + 孤儿 function_call_output，共 2 条
-        self.assertEqual(report["items"][0].get("history"), 2, report["items"][0])
+        self.assertEqual(report["items"][0].get("history"), 0, report["items"][0])
 
     def test_exec_scheduled_task_follows_switch_even_from_openai(self):
         """每日定时任务（source=exec）必须无条件跟随切换，哪怕来自 ChatGPT。
@@ -3228,7 +3225,7 @@ class ThreadBindingTests(TempCodexHome):
         self.assertEqual(self._read_thread("old02"), ("MiniMax-M3", "minimax"))
         self.assertEqual(totals["exec_followed"], 1)
 
-    def test_follow_back_to_openai_moves_exec_and_strips_third_party_history(self):
+    def test_follow_back_to_openai_moves_exec_and_preserves_history(self):
         """切回官方 OpenAI：定时任务照搬，第三方产生的垃圾条目同一次清掉。
 
         MiniMax 执行 web_search 产出的条目（只有 id 没有 call_id）回放给
@@ -3243,10 +3240,10 @@ class ThreadBindingTests(TempCodexHome):
         self.assertEqual(report["exec_followed"], 1)
         text = path.read_text()
         self.assertIn('"model_provider":"openai"', text)
-        self.assertNotIn("web_search_call", text)
-        self.assertNotIn("function_call_output", text)
+        self.assertIn("web_search_call", text)
+        self.assertIn("function_call_output", text)
         # 加密思考是 OpenAI 专有，第三方不会有；目标是 openai 时 reasoning 不误删
-        self.assertEqual(report["items"][0].get("history"), 2, report["items"][0])
+        self.assertEqual(report["items"][0].get("history"), 0, report["items"][0])
 
     def test_repair_skips_active_session_file(self):
         """看门狗每 12 秒跑一次 repair：Codex 正写着的文件绝不能改写。
@@ -3261,9 +3258,9 @@ class ThreadBindingTests(TempCodexHome):
         os.utime(path, (time.time(), time.time()))
         self._make_db([self._thread_row("jjj000", "deepseek-flash", "minimax", path)])
         report = threads.repair()
-        self.assertEqual(report["fixed"], 1, report)
-        # 数据库已对齐
-        self.assertEqual(self._read_thread("jjj000"), ("deepseek-flash", "deepseek"))
+        self.assertEqual(report["fixed"], 0, report)
+        # Defer both database and file while the history is active.
+        self.assertEqual(self._read_thread("jjj000"), ("deepseek-flash", "minimax"))
         # 但文件原样未动：不是活动文件保护失效后那种被改写的样子
         self.assertIn('"model_provider": "minimax"', path.read_text())
         self.assertTrue(report["skipped_active"], report)

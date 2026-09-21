@@ -1,5 +1,7 @@
 # Codex Model Switcher — use any model in Codex
 
+> **v1.7.10 历史保护变更：** 启动、默认模型切换和后台巡检不再自动改写原始对话或任务绑定。旧任务与自动化保留原平台，新任务使用新默认平台。旧版本关于自动迁移、自动清扫的说明已失效。参见 [历史保护说明](docs/history-preservation.md)。
+
 **v1.7.8:** frosted macOS startup screen, corrected official-provider diagnostics,
 safer process shutdown, and [Windows edition/build status](docs/windows.md).
 

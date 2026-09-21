@@ -107,7 +107,7 @@ const I18N = {
     'caps.sync_failed': '配置失败：{error}',
     'docs.integrations_missing': '该平台的官方 MCP Server / CLI 环境还没配置，生图、生视频、语音等能力暂时调不了。',
     'restart.title': '重启 Codex',
-    'restart.body': 'Codex 只在启动时读取一次模型配置。现在重启，刚切换的模型和迁移好的任务（含每日定时任务）立即生效。',
+    'restart.body': '重启以读取新的默认模型配置。已有任务和自动化保留原绑定，切换器不会自动改写历史。',
     'restart.now': '重启 Codex',
     'restart.later': '稍后自己重启',
     'restart.doing': '正在重启 Codex…',
@@ -189,7 +189,8 @@ const I18N = {
 
     'switch.ok_title': '✅ 切换成功',
     'switch.fail_title': '❌ 切换失败',
-    'switch.ok_detail': '当前平台已改为 {label} · {model}',
+    'switch.ok_detail': '默认平台已改为 {label} · {model}',
+    'switch.history_preserved': '原始历史已保留，旧任务和自动化绑定未更改。新任务使用新平台；旧任务请继续使用原平台或另行迁移。',
     'switch.config': '配置文件：{path}',
     'switch.backup': '已备份：{path}',
     'switch.threads': '旧任务：跟随搬运 {moved} 个',
@@ -261,7 +262,7 @@ const I18N = {
     'transport.bridge': '本地协议桥',
     'transport.auto': '自动探测',
 
-    'switch.notice': '切换成功后要完全退出（⌘Q）并重新打开 Codex 才生效。最近还在用的旧任务会一起搬到新平台，重启后直接继续即可；只是很久没用过的老任务会留在原平台，继续它时如果报 unknown model，本工具会在几秒内自动纠正，重试一次就好。',
+    'switch.notice': '切换只更新默认配置，不会删改原始历史。重启后新任务使用新平台；旧任务保留原平台绑定，不要在其中直接选择另一平台的模型。',
 
     'toast.models_updated': '已更新 {count} 个模型',
     'toast.switched': '已切换为 {label} · {model}',
@@ -408,7 +409,7 @@ const I18N = {
     'caps.sync_failed': 'Setup failed: {error}',
     'docs.integrations_missing': 'This provider\'s official MCP Server / CLI environment is not set up yet — image, video and speech generation stay out of reach until then.',
     'restart.title': 'Restart Codex',
-    'restart.body': 'Codex reads its model config once at launch. Restart now and the switched model plus migrated tasks (including daily scheduled ones) take effect immediately.',
+    'restart.body': 'Restart to load the new default model. Existing tasks and automations keep their bindings; histories are not rewritten automatically.',
     'restart.now': 'Restart Codex',
     'restart.later': 'I\'ll restart later',
     'restart.doing': 'Restarting Codex…',
@@ -490,7 +491,8 @@ const I18N = {
 
     'switch.ok_title': '✅ Switched',
     'switch.fail_title': '❌ Switch failed',
-    'switch.ok_detail': 'Now using {label} · {model}',
+    'switch.ok_detail': 'Default changed to {label} · {model}',
+    'switch.history_preserved': 'History, existing tasks and automation bindings are preserved. New tasks use the new provider; keep the original provider for existing tasks or migrate separately.',
     'switch.config': 'Config: {path}',
     'switch.backup': 'Backed up: {path}',
     'switch.threads': 'Threads: {moved} carried over',
@@ -562,7 +564,7 @@ const I18N = {
     'transport.bridge': 'Local bridge',
     'transport.auto': 'Auto-detect',
 
-    'switch.notice': 'Quit Codex completely (⌘Q) and reopen it for the switch to take effect. Recently used tasks are moved to the new provider along with the switch, so you can continue them right away. Tasks untouched for a long time stay where they were; if one of those reports an unknown model, this tool fixes the binding within seconds — just retry.',
+    'switch.notice': 'Switching updates defaults without changing history. After restart, new tasks use the new provider. Existing tasks retain their provider; do not select a model from another provider in them.',
 
     'toast.models_updated': 'Updated {count} models',
     'toast.switched': 'Switched to {label} · {model}',

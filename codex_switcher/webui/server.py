@@ -656,17 +656,7 @@ def _log_sweep(report: Dict) -> None:
 
 
 def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
-    """后台巡检：修任务绑定 + 清会话历史里的坏条目。
-
-    为什么需要它：minimax / deepseek / glm 都是 transport=native，直连平台
-    API，根本不过本地协议桥，所以桥上那个巡检线程管不到它们。而「切换后
-    继续任务」产生的错位，往往是在 Codex 把新模型写回数据库**之后**才出现
-    的 —— 只在切换那一刻修一次根本来不及。这里定期复查，几秒内自动纠偏。
-
-    历史清扫也放这儿，因为 `codex_app` 命名空间的工具（automation_update
-    等）**会持续**写出缺 call_id 的孤儿工具结果：定时任务每跑一次就可能
-    多一条。一次性清完不够用，得有人一直盯着。账本保证每轮只读变过的文件。
-    """
+    """Read-only diagnostics; never mutate existing transcripts or bindings."""
     tick = 0
     while True:
         try:
@@ -678,7 +668,7 @@ def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
         if recovery.status()["phase"] in ("quitting", "repairing", "reopening"):
             continue
         try:
-            report = threads_module.repair()
+            report = threads_module.repair(dry_run=True)
             if report.get("fixed"):
                 threads_module.log_watch(report)
         except Exception:  # noqa: BLE001 - 巡检绝不能把界面拖垮
@@ -686,7 +676,7 @@ def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
         if tick % SWEEP_EVERY_N_TICKS == 0:
             try:
                 sweep = history_module.sweep_all(
-                    budget_seconds=WATCHDOG_SWEEP_BUDGET_SECONDS)
+                    budget_seconds=WATCHDOG_SWEEP_BUDGET_SECONDS, dry_run=True)
                 if sweep.get("cleaned"):
                     _log_sweep(sweep)
             except Exception:  # noqa: BLE001 - 同上
@@ -704,9 +694,9 @@ def run(port: int = 0, open_browser: bool = True, token: Optional[str] = None) -
     actual_port = server.server_address[1]
     url = "http://127.0.0.1:%d/?t=%s" % (actual_port, Handler.token)
     _write_runtime_state(actual_port)
-    # 开界面先自查一遍，再交给后台巡检兜着
+    # Startup and recurring checks are diagnostics only.
     try:
-        threads_module.repair()
+        threads_module.repair(dry_run=True)
     except Exception:  # noqa: BLE001
         pass
     _start_watchdog()

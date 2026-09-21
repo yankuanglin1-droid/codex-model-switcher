@@ -63,7 +63,7 @@ _FULL_FOLLOW_RUNNING = threading.Lock()
 # 和全量迁移一样是守护线程，测试里一起关掉。
 _HISTORY_SWEEP_RUNNING = threading.Lock()
 # 测试环境把后台迁移关掉：测试要求全同步，后台线程会和临时目录的清理打架
-ALLOW_BACKGROUND_FOLLOW = True
+ALLOW_BACKGROUND_FOLLOW = False
 
 
 def slugify(value: str) -> str:
@@ -380,43 +380,15 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
             return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "dry_run": True}
         backup = configfile.backup(config)
         configfile.atomic_write(config, new_text, text)
-        # 切回官方同样要把旧任务搬过来：任务还记着第三方，恢复时就会拿
-        # gpt 的模型名去敲第三方的门，那边一样回 unknown model。
+        # Switching defaults must not rewrite historical tasks or their databases.
         followed = None
         full_follow_scheduled = False
-        if previous_provider and previous_provider != OFFICIAL_PROVIDER:
-            try:
-                followed = threads_module.follow_switch(
-                    previous_provider, OFFICIAL_PROVIDER, settings["model"])
-            except Exception:  # noqa: BLE001
-                followed = None
-            # 第三方平台的任务总量不大，后台把它们全部搬回官方，不留死角
-            try:
-                full_follow_scheduled = schedule_full_follow(
-                    previous_provider, OFFICIAL_PROVIDER, settings["model"])
-            except Exception:  # noqa: BLE001
-                full_follow_scheduled = False
         repaired = 0
-        try:
-            repaired = threads_module.repair().get("fixed", 0)
-        except Exception:  # noqa: BLE001
-            repaired = 0
-        # 注意：切回官方**不做** auto_clean —— 官方解析器认自家的条目类型，
-        # 保留完整历史（test_switching_to_openai_does_not_touch_history 锁定）。
-        # 跨平台清洗只在「任务真的搬家」时发生（_rewrite_session_file 内联）。
-        #
-        # 但**孤儿工具结果**是另一回事：它缺 call_id，官方同样拒收
-        # （call_id 在官方线上格式里也是必填）。所以这里挂一次全量清扫，
-        # 它只清孤儿，不碰合法的历史条目。
         history_sweep = False
-        try:
-            history_sweep = schedule_history_sweep()
-        except Exception:  # noqa: BLE001 - 清扫排队失败不影响切换本身
-            history_sweep = False
         return {"provider": OFFICIAL_PROVIDER, "model": settings["model"], "backup": str(backup),
                 "threads_fixed": repaired, "threads_followed": followed,
                 "full_follow": {"scheduled": full_follow_scheduled},
-                "history_sweep": {"scheduled": history_sweep}}
+                "history_sweep": {"scheduled": history_sweep}, "history_preserved": True}
 
     record = state_module.get_provider(state, provider_id)
     if not record:
@@ -486,36 +458,10 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
     state_module.upsert_provider(state, record)
     state_module.save(state)
 
-    # 旧任务跟着一起搬到新平台。不做这一步，切完继续任务就会报
-    # 「unknown model xxx」：Codex 恢复旧任务时取的是任务自己记的服务商，
-    # 发出去的却是当前配置里的模型名，新旧一分家请求就打错门了。
+    # Existing histories are immutable during a default-provider switch.
     threads_followed = None
-    if previous_provider and previous_provider != provider_id:
-        try:
-            threads_followed = threads_module.follow_switch(previous_provider, provider_id, chosen)
-        except Exception:  # noqa: BLE001 - 搬不动也不能影响切换本身
-            threads_followed = None
-
-    # 顺手把「模型和服务商对不上」的旧任务修好，
-    # 否则切完在旧对话里换模型还会报 model is not supported
     threads_fixed = 0
-    try:
-        threads_fixed = threads_module.repair().get("fixed", 0)
-    except Exception:  # noqa: BLE001 - 修不动也不能影响切换本身
-        threads_fixed = 0
-
-    # 跨平台自动清洗会话历史。实测：MiniMax 执行 web_search 产出的
-    # web_search_call 条目（只有 id 没有 call_id）在 deepseek 那边直接
-    # 400（missing field call_id / queries）。切换后用户多半会 resume
-    # 旧会话，所以这里自动把别家的服务端工具条目剥掉（先备份）。
     history_clean = None
-    if previous_provider != provider_id:
-        try:
-            from . import history as history_module
-            history_clean = history_module.auto_clean(
-                moving_off_openai=(previous_provider == OFFICIAL_PROVIDER))
-        except Exception:  # noqa: BLE001 - 清洗失败绝不影响切换
-            history_clean = None
 
     # 切到哪家，就把哪家的 MCP / CLI 环境配好（幂等：已配置就原地刷新）
     integrations_result = None
@@ -525,29 +471,14 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
     except Exception:  # noqa: BLE001 - 周边配置失败绝不影响切换
         integrations_result = None
 
-    # 前台只搬了最近在用的（秒回）；剩下的老任务（含 ChatGPT 的）和
-    # 每日定时任务在后台分批搬完，保证「切完之后所有任务都能正常跑」。
     full_follow_scheduled = False
-    if previous_provider and previous_provider != provider_id:
-        try:
-            full_follow_scheduled = schedule_full_follow(previous_provider, provider_id, chosen)
-        except Exception:  # noqa: BLE001 - 后台迁移排队失败不影响切换本身
-            full_follow_scheduled = False
-
-    # 全量扫一遍会话历史，清掉 codex_app 工具留下的"缺 call_id"孤儿条目。
-    # 它们散落在任意老文件里，用户点开哪个就炸哪个 —— 只扫最近的窗口
-    # 兜不住，所以这里挂一次不设窗口的全量清扫（后台，带账本，增量）。
     history_sweep = False
-    try:
-        history_sweep = schedule_history_sweep()
-    except Exception:  # noqa: BLE001 - 清扫排队失败不影响切换本身
-        history_sweep = False
     return {"provider": provider_id, "label": record["label"], "model": chosen,
             "backup": str(backup), "threads_fixed": threads_fixed,
             "threads_followed": threads_followed, "history_clean": history_clean,
             "integrations": integrations_result,
             "full_follow": {"scheduled": full_follow_scheduled},
-            "history_sweep": {"scheduled": history_sweep}}
+            "history_sweep": {"scheduled": history_sweep}, "history_preserved": True}
 
 
 def sync_integrations(provider_id: str) -> Dict:
@@ -629,20 +560,10 @@ def sweep_history(limit: Optional[int] = None, apply: bool = True,
     哪天点开那个对话就炸一次。所以这里不设窗口，靠账本做增量。
     """
     from . import history as history_module
-    # 当前不在官方平台上时，OpenAI 专有的加密推理条目同样是废数据：
-    # 它们只在官方那边有意义，第三方拿到只会拒收整个请求。
-    # 命令行一直是这么做的；这里补上 —— 否则图形界面点"清扫"比命令行
-    # 清得少，用户旧对话回放还是被拒，看着像"清扫没用"。
-    # 读不到配置时不猜：按"在第三方平台上"处理会删掉官方专有条目，
-    # 那是不可逆的；所以解析失败就退回只清孤儿输出（双方都认的坏数据）。
-    try:
-        on_third_party = current_status().get("model_provider", OFFICIAL_PROVIDER) != OFFICIAL_PROVIDER
-    except Exception:  # noqa: BLE001 - 清扫是兜底动作，不能自己先崩
-        on_third_party = False
-    if not cross_provider:
-        cross_provider = on_third_party
+    # Never infer permissions to strip ALL histories from the default provider.
+    # Destructive conversion, if explicitly requested, must specify its scope.
     if moving_off_openai is None:
-        moving_off_openai = on_third_party
+        moving_off_openai = False
     kwargs = {}
     if budget_seconds is not None:
         kwargs["budget_seconds"] = budget_seconds
@@ -662,7 +583,7 @@ def schedule_history_sweep(limit: Optional[int] = None,
 
     def _job():
         try:
-            sweep_history(limit=limit, cross_provider=cross_provider)
+            sweep_history(limit=limit, cross_provider=cross_provider, apply=False)
         except Exception:  # noqa: BLE001 - 后台清扫失败不能影响任何前台功能
             pass
         finally:
