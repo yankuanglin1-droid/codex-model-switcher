@@ -548,8 +548,13 @@ class Handler(BaseHTTPRequestHandler):
             report["state"] = _state_payload()
             return report
 
-        if action == "sweep_history":
-            # 全量清扫会话历史里的孤儿工具结果（缺 call_id 的 function_call_output）。
+        if action == "restart_codex":
+            # 切换后 Codex 要重启才吃进新配置。替用户做掉 ⌘Q + 重开：
+            # 优雅退出、等进程退干净、按 bundle id 拉起。
+            from .. import codexapp
+            return codexapp.restart()
+
+        if action == "sweep_history":            # 全量清扫会话历史里的孤儿工具结果（缺 call_id 的 function_call_output）。
             # 有预算上限：几百 MB 的大文件不该把界面卡住，剩下的交给后台巡检。
             #
             # 走 engine 而不是直接调 history.sweep_all：只有 engine 那一层会按

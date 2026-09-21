@@ -912,6 +912,26 @@ def cmd_check(args) -> int:
     return 1
 
 
+def cmd_restart(args) -> int:
+    """优雅重启 Codex 桌面版，让切换后的配置立即生效。
+
+    切换后必须重启 Codex 的原因：配置和任务绑定都缓存在它的进程里。
+    这里替你做掉 ⌘Q + 重新点开这两步：优雅退出（等它自己退干净，
+    不强杀），再按 bundle id 拉起 —— 不依赖显示名，OpenAI 改名也不怕。
+    """
+    from . import codexapp
+    out("正在重启 Codex 桌面版…")
+    result = codexapp.restart()
+    if result["ok"]:
+        out("✅ 已重启 Codex（%s），新配置已生效。" % result["app"])
+        return 0
+    if result.get("reason") == "not-found":
+        out("没找到 Codex 桌面应用。" + result["detail"])
+        return 1
+    out("重启没完成：" + result["detail"])
+    return 1
+
+
 def cmd_vault(args) -> int:
     """密钥保险库：钥匙串丢条目时的自动恢复副本。
 
@@ -1369,6 +1389,8 @@ def build_parser() -> argparse.ArgumentParser:
     vault.add_argument("--restore", action="store_true",
                        help="把保险库里的密钥全部写回钥匙串")
 
+    sub.add_parser("restart", help="优雅重启 Codex 桌面版（切换后让配置立即生效）")
+
     doctor = sub.add_parser("doctor", help="环境自检")
     doctor.add_argument("--history", action="store_true",
                         help="顺带检查会话历史里会被第三方平台拒绝的条目（较慢）")
@@ -1418,6 +1440,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "status": cmd_status,
         "check": cmd_check,
         "vault": cmd_vault,
+        "restart": cmd_restart,
         "doctor": cmd_doctor,
         "app": cmd_app,
         "export": cmd_export,

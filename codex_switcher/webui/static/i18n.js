@@ -187,6 +187,10 @@ const I18N = {
     'switch.threads': '旧任务：跟随搬运 {moved} 个',
     'switch.threads_pending': '旧任务：跟随搬运 {moved} 个，{pending} 个等 Codex 退出后补',
     'switch.dismiss': '知道了',
+    'switch.restart': '重启 Codex 生效',
+    'switch.restarting': '正在重启 Codex…',
+    'switch.restart_done': '✅ Codex 已重启，新配置已生效',
+    'switch.restart_fail': '重启 Codex 失败：{detail}',
 
     'ready.title': '当前平台暂时发不出请求',
     'ready.dismiss': '知道了',
@@ -476,6 +480,10 @@ const I18N = {
     'switch.threads': 'Threads: {moved} carried over',
     'switch.threads_pending': 'Threads: {moved} carried over, {pending} pending until Codex exits',
     'switch.dismiss': 'Got it',
+    'switch.restart': 'Restart Codex',
+    'switch.restarting': 'Restarting Codex…',
+    'switch.restart_done': '✅ Codex restarted — new config is live',
+    'switch.restart_fail': 'Failed to restart Codex: {detail}',
 
     'ready.title': 'Requests to the current provider will fail',
     'ready.dismiss': 'Got it',

@@ -368,6 +368,31 @@ function renderSwitchResult(result, failed) {
 
 $('btn-switch-result-dismiss').onclick = () => { $('switch-result').hidden = true; };
 
+// ---- 一键重启 Codex ------------------------------------------------------
+// 切换后 Codex 必须完全退出再重开才吃进新配置（配置和任务绑定都缓存在
+// 它的进程里）。替用户做掉 ⌘Q + 重新点开：优雅退出、等它退干净、再拉起。
+async function restartCodex() {
+  const button = $('btn-restart-codex');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = t('switch.restarting');
+  try {
+    const result = await api('restart_codex', {});
+    if (result.ok) {
+      toast(t('switch.restart_done'));
+      $('switch-result').hidden = true;
+    } else {
+      toast(t('switch.restart_fail', { detail: result.detail || '' }));
+    }
+  } catch (error) {
+    toast(t('switch.restart_fail', { detail: String(error) }));
+  } finally {
+    button.disabled = false;
+    button.textContent = t('switch.restart');
+  }
+}
+$('btn-restart-codex').onclick = restartCodex;
+
 // ---- 链路不通提示 --------------------------------------------------------
 //
 // 「配好了」不等于「能请求」。界面上每一处单独看都可能没报警，但 Codex 就是
