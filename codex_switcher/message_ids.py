@@ -1,4 +1,4 @@
-"""Non-destructive message ID normalization for Responses history portability."""
+"""Non-destructive Responses item ID normalization for Responses history portability."""
 from __future__ import annotations
 
 import hashlib
@@ -8,6 +8,9 @@ import tempfile
 import uuid
 from pathlib import Path
 
+
+# Item IDs identify records; call_id links calls to outputs and must stay intact.
+ITEM_ID_PREFIXES = {"message": "msg", "function_call": "fc", "reasoning": "rs"}
 
 def normalize_record(record):
     """Only visit typed history items, never user text or arbitrary tool output."""
@@ -26,16 +29,19 @@ def normalize_record(record):
                 items.extend(value)
     changed = 0
     for item in items:
-        if not isinstance(item, dict) or item.get("type") != "message":
+        if not isinstance(item, dict):
+            continue
+        prefix = ITEM_ID_PREFIXES.get(item.get("type"))
+        if prefix is None:
             continue
         value = item.get("id")
-        if isinstance(value, str) and value and not value.startswith("msg"):
-            item["id"] = "msg_" + hashlib.sha256(value.encode()).hexdigest()[:32]
+        if isinstance(value, str) and value and not value.startswith(prefix):
+            item["id"] = prefix + "_" + hashlib.sha256(value.encode()).hexdigest()[:32]
             changed += 1
     return changed
 
 
-def repair_file(path, backup_dir, host_closed=False):
+def repair_file(path, backup_dir, host_closed=False, dry_run=False):
     """Refuse open/recent files, preserve all records, back up and verify writes."""
     from .history import busy_reason
     path = Path(path)
@@ -62,6 +68,8 @@ def repair_file(path, backup_dir, host_closed=False):
         lines.append(line)
     if not count:
         return {"changed": 0}
+    if dry_run:
+        return {"changed": 0, "would_change": count}
     updated = b"".join(lines)
     if blocked() or path.read_bytes() != original:
         return {"changed": 0, "skipped": "concurrent-write"}

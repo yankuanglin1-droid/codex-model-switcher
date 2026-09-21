@@ -687,7 +687,7 @@ def _sweep_mode(cross_provider: bool, moving_off_openai: bool) -> str:
     否则先跑一次默认（只清孤儿）把文件记成"干净"，再跑 --cross-provider
     就会被账本跳过，深度模式等于白跑。
     """
-    return "ids-v1:%s%s" % ("c" if cross_provider else "-", "o" if moving_off_openai else "-")
+    return "ids-v2:%s%s" % ("c" if cross_provider else "-", "o" if moving_off_openai else "-")
 
 
 def _would_change(info: Dict, cross_provider: bool, moving_off_openai: bool) -> bool:
@@ -757,7 +757,16 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
         report["checked"] += 1
         if not moving_off_openai:
             from .message_ids import repair_file
-            id_repair = repair_file(path, backup_dir)
+            try:
+                id_repair = repair_file(path, backup_dir, dry_run=dry_run)
+            except (OSError, ValueError):
+                report["failed"] = report.get("failed", 0) + 1
+                continue  # Never cache failed validation as clean.
+            if id_repair.get("skipped"):
+                report["skipped_busy"] += 1
+                continue
+            if id_repair.get("would_change"):
+                report["would_normalize_ids"] = report.get("would_normalize_ids", 0) + id_repair["would_change"]
             if id_repair.get("changed"):
                 report["normalized_message_ids"] = report.get("normalized_message_ids", 0) + id_repair["changed"]
                 fingerprint = _fingerprint(path)

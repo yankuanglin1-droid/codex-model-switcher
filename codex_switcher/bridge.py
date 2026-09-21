@@ -492,13 +492,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         if response.status >= 400:
-            detail = response.read(8000).decode("utf-8", "replace")
+            detail = response.read(8000)
             connection.close()
             self.send_response(response.status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(detail)))
             self.end_headers()
-            self.wfile.write(detail.encode("utf-8"))
+            self.wfile.write(detail)
             return
 
         if not streaming:

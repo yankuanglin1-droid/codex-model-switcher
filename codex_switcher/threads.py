@@ -229,7 +229,7 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     changed = False
     with path.open("r", encoding="utf-8", errors="surrogateescape") as stream:
         for line in stream:
-            is_response = '"response_item"' in line
+            is_response = '"response_item"' in line or '"compacted"' in line
             if not _line_may_hold_provider(line) and not is_response:
                 raw_lines.append(line)
                 continue
