@@ -88,7 +88,7 @@ def _codex_open_rollouts() -> Optional[set]:
         return cached  # type: ignore[return-value]
     found: Optional[set] = None
     try:
-        completed = subprocess.run(["lsof", "-c", "codex", "-Fn"],
+        completed = subprocess.run(["lsof", "-c", "codex", "-c", "Codex", "-c", "ChatGPT", "-Fn"],
                                    capture_output=True, timeout=LSOF_TIMEOUT_SECONDS)
         # lsof 的退出码 0 = 有命中、1 = 没命中，两个都说明它本身跑成功了
         if completed.returncode in (0, 1):
@@ -666,7 +666,7 @@ def _sweep_mode(cross_provider: bool, moving_off_openai: bool) -> str:
     否则先跑一次默认（只清孤儿）把文件记成"干净"，再跑 --cross-provider
     就会被账本跳过，深度模式等于白跑。
     """
-    return "%s%s" % ("c" if cross_provider else "-", "o" if moving_off_openai else "-")
+    return "ids-v1:%s%s" % ("c" if cross_provider else "-", "o" if moving_off_openai else "-")
 
 
 def _would_change(info: Dict, cross_provider: bool, moving_off_openai: bool) -> bool:
@@ -734,6 +734,12 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
             report["skipped_busy"] += 1
             continue  # 不记账：等它静下来下一轮再来
         report["checked"] += 1
+        if not moving_off_openai:
+            from .message_ids import repair_file
+            id_repair = repair_file(path, backup_dir)
+            if id_repair.get("changed"):
+                report["normalized_message_ids"] = report.get("normalized_message_ids", 0) + id_repair["changed"]
+                fingerprint = _fingerprint(path)
         info = inspect(path)
         if not _would_change(info, cross_provider, moving_off_openai):
             next_ledger[key] = fingerprint

@@ -252,6 +252,9 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
                 history_removed += 1
                 continue
             touched = False
+            if to_provider == OFFICIAL_PROVIDER_ID:
+                from .message_ids import normalize_record
+                touched = bool(normalize_record(document))
             if document.get("type") == "session_meta" and should_replace(payload.get("model_provider")):
                 payload["model_provider"] = to_provider
                 meta_changed += 1

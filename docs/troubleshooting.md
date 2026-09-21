@@ -564,3 +564,20 @@ ls -lt ~/.codex/model-switcher/backups/ | head
 ```
 
 挑一个时间点，复制回 `~/.codex/config.toml` 即可。备份是改前的原文，逐字节一致。
+
+### Returning to OpenAI: `invalid_id_prefix` / expected `msg`
+
+Some native Responses providers emit message IDs that OpenAI rejects when a
+conversation is resumed. The switcher now normalizes non-OpenAI message IDs in
+ordinary response records and compacted history. Message text, tool calls and
+`call_id` associations are preserved. Already valid message IDs are unchanged.
+
+History files held open by ChatGPT/Codex must be closed before on-disk repair.
+The repair keeps a private backup and checks the written bytes. Restart the
+host after repair to discard its cached copy of the old history. This addresses
+message-ID validation; it does not promise compatibility for every provider's
+reasoning state or server-side tools.
+
+切回官方后若遇到 `invalid_id_prefix`：新版会规范普通历史与压缩历史中的消息
+ID，保留正文、工具调用及配对关系。正在被 ChatGPT/Codex 打开的历史不能直接
+覆盖；须先关闭宿主应用，备份修复后重新打开，避免旧缓存再次提交错误 ID。
