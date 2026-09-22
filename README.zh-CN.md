@@ -1,20 +1,22 @@
 # ChatGPT Model Switcher
 
+> **历史恢复更新：** 普通重启与显式恢复已分离；恢复仅处理未归档任务，保留已有消息，并验证重建后的显示内容。见 [历史保护说明](docs/history-preservation.md)。
+
 **v1.7.8：** 修复官方配置误报，新增原生磨砂加载页，强化进程保护。
 [Windows 源码安装与独立窗口版构建状态](docs/windows.md)。
 
-**v1.7.7：App 内置历史修复。** 切回官方遇到消息 ID 格式错误时，点击
-「修复官方历史并重启」，即可备份、修复并重新打开宿主，无须额外脚本。
+**v1.7.11：历史和服务商绑定默认不可变。** 遇到旧任务兼容问题时，App 会给出
+兼容续接方案；显式历史恢复只在宿主完全退出后执行，并先完成独立备份和读取校验。
 自动化面板分别检查固定模型计划和心跳任务；实际触发仍需在宿主中验证。
 查看[本次检查报告与已知限制](docs/debug-audit-v1.7.7.md)。
 
 [English](README.md) · **中文** · [让 AI 帮我装 →](INSTALL-WITH-AI.md)
 
-把 **任何提供 OpenAI 兼容 API 的平台** 接进 ChatGPT App 里的 Codex —— DeepSeek、
+把 **通过兼容性验证的平台** 接进 ChatGPT App 里的 Codex —— DeepSeek、
 MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自己搭的中转站，
 本机的 Ollama —— 全部出现在 Codex 输入框旁的模型列表里，随时一键切回官方 OpenAI。
 
-> **不是只会列表里那几家。** 只要平台对外提供 OpenAI 兼容接口就能接：
+> 支持内置平台预设和自定义接口；可用模型与工具能力以接口实际支持为准：
 > 官方 API、第三方中转、自建网关、本地模型，一视同仁。
 > 要准备的只有三样：平台名、Base URL、API Key。
 
@@ -55,10 +57,10 @@ MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自
 | 模型列表 | 手写 JSON，易错 | 固定 | **自动拉取**生成目录，随时刷新 |
 | 协议 | 必须 `responses`，否则拒绝启动 | 不一定 | 永远写 `responses`；只支持 Chat 的平台走**内置协议桥** |
 | API Key | 明文进配置 | 不一 | **只进系统钥匙串**（Keychain / Secret Service / DPAPI） |
-| 旧对话 | 切换后报错 | 不处理 | 切换时**自动把最近任务搬过去** + 后台巡检自愈 |
+| 旧对话 | 容易误配平台 | 不处理 | 保留原平台绑定，默认只读检查不改写历史 |
 | 上下文 | 靠猜 | 不处理 | **三层守卫**：官方窗口 → Codex 可用 → 自动压缩线，超限一键「换成装得下的模型」 |
 | 模型能力 | 靠猜 | 不处理 | **真实请求实测**（读图 / 思考 / 工具），结论写回目录 |
-| 历史兼容 | 不处理 | 不处理 | 全量清扫每个会话文件：剥掉缺 `call_id` 的孤儿输出（400 元凶），真搬家时再剥 OpenAI 专有条目，全程备份 |
+| 历史兼容 | 不处理 | 不处理 | 请求副本适配；显式离线恢复、独立备份与读取校验 |
 | 切回官方 | 手工改回 | 常常做不到 | `codex-switcher restore`，第三方配置保留 |
 
 ## 功能
@@ -66,25 +68,17 @@ MiniMax、智谱 GLM、Kimi、通义、硅基流动、OpenRouter、Groq，你自
 - **一键接入**：17 个内置预设，也能手动填任意 Base URL（中转站、自建网关都行）。
 - **全部模型可选**：自动拉取完整清单生成 Codex 模型目录。
 - **一键切换 / 还原**：命令行、菜单、图形界面三种方式。切换过程有全屏加载
-  反馈（含旧任务迁移，耗时明确告知），不会误以为卡死。
+  反馈；默认切换保留旧任务及自动化绑定。
 - **适配新版 ChatGPT.app**：Codex 桌面端已并入 `ChatGPT.app`（bundle id 仍是
   `com.openai.codex`），本工具按 bundle id 识别，「一键重启」对 Codex.app 与
   ChatGPT.app 两种形态都有效。
 - **切回官方 = 恢复原生订阅**：`restore` / 界面「恢复官方」只写回
   `model_provider = openai` 与官方模型名，清掉第三方模型目录引用，
   Codex 恢复显示你账号自己的模型列表——官方不提供可选清单，也不该有。
-- **旧任务全跟着走**：切换时把最近在用的任务整体搬到新平台（会话文件 + 两个数据库，
-  先备份）；其余任务——**包括每日定时（`exec`）自动化任务**——由后台线程分批搬完，
-  不会留下指向旧平台的死绑定。只有 OpenAI 认识的历史条目（`web_search_call` 等）
-  在同一次改写里剥掉。切换成功后弹窗提醒「Codex 只在启动时读配置」，
-  点确认**自动重启 Codex**。
-- **`missing field call_id` 从根上治了**：Codex App 自带工具（`codex_app` 命名空间，
-  如 `automation_update`）写出的 `function_call_output` **没有 `call_id`** ——
-  在会话文件里合法、在 API 请求里必填，所以这段历史一回放服务端就 400。这种孤儿
-  藏在**任意**老会话文件里，只扫"最近 N 个"永远找不到。v1.6.6 起**全量清扫**每个
-  会话文件（账本增量，之后每轮几乎零成本）：切换时、开界面时、界面常驻时每 60 秒
-  各补一轮——因为那些工具还在持续产生新的。判断「文件是不是正在被用」改用 `lsof`
-  实测句柄，不再靠猜 mtime。
+- **旧任务历史保护**：默认切换、启动和后台巡检不改写消息、工具记录或任务平台绑定。
+  普通重启与显式离线恢复分开，详见[历史保护说明](docs/history-preservation.md)。
+- **协议兼容明确报告**：缺失、重复或孤儿 `call_id` 会阻止不兼容请求。协议桥只适配请求副本，
+  不伪造调用 ID，不通过删除原始工具结果绕过错误。
 - **上下文守卫会动手**：切换前体检会话体量；过了建议压缩线会告诉你 Codex 会自动
   压缩、无需操作；真装不下时横幅上直接给「**一键换成装得下的模型**」。
 - **能力看得见、测得准**：读图 / 思考 / 工具标注「实测 / 官方 / 推断」，
@@ -107,8 +101,8 @@ DeepSeek · MiniMax · 智谱 GLM · 月之暗面 Kimi · 阿里云百炼 · 硅
 Groq · Together · Mistral · xAI · Cerebras · Fireworks · DeepInfra · Ollama（本机） ·
 LM Studio（本机） · **自定义 / 中转站** —— 任何 OpenAI 兼容接口。
 
-自带 `responses` 接口的平台直连；只有 Chat Completions 的平台走本地协议桥
-（`127.0.0.1:8787`，密钥不落盘）。
+第三方平台默认走本地协议桥（`127.0.0.1:8787`，密钥不落盘）。只有收到结构
+正确的 Responses 成功响应后才允许直连，避免将不兼容的历史原样发给远端。
 
 ## 安装
 
@@ -137,7 +131,7 @@ curl -fsSL https://raw.githubusercontent.com/yankuanglin1-droid/codex-model-swit
 
 ```bash
 echo "$YOUR_API_KEY" | codex-switcher add --preset deepseek --key-stdin   # 或 --name "我的中转" --base-url https://...
-codex-switcher use deepseek          # 切换（最近任务一起搬）
+codex-switcher use deepseek          # 切换新任务的默认服务商
 codex-switcher app                   # 图形界面
 codex-switcher restore               # 一键切回官方 OpenAI
 ```
@@ -146,15 +140,15 @@ codex-switcher restore               # 一键切回官方 OpenAI
 
 ## 突发情况怎么办
 
-以下都有自动化处理或一条命令的解法，全部先备份再动；详见
+下面列出诊断与支持的恢复路径；修复前先备份，无法确认的记录保留待复核。详见
 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
 | 症状 | 原因 | 解法 |
 | --- | --- | --- |
-| `unknown model 'xxx'` / `invalid params (2013)` | 任务还绑着上一个平台 | 几秒内自动修复，或 `codex-switcher repair --follow`；重开 Codex |
+| `unknown model` / `invalid params` | 模型与任务绑定的平台不一致 | 检查任务平台，选兼容模型或在目标平台新建任务；不自动改写旧任务 |
 | `model is not supported ... ChatGPT account` | 在绑着官方 OpenAI 的旧任务里选第三方模型（这类任务刻意不搬） | 对它「分叉」，或新建任务 |
-| `missing field call_id`（任何任务、任何平台） | `codex_app` 命名空间工具写出的 `function_call_output` 没有 `call_id`：会话文件里可选、API 里必填 | **v1.6.6 起自动全量清扫**（所有会话文件：切换时 + 界面巡检）；立刻清一次：`codex-switcher history --sweep`（先备份） |
-| `tool type "tool_search" is not supported`（Kimi 等严格校验的平台） | Codex 的内置工具 `tool_search`：它的 `arguments` 是**对象**，不像 `function_call` 那样是字符串 | **v1.6.8 起已处理**：第三方平台不再下发这个工具，历史里已有的 `tool_search` 成对剥离 |
+| `missing field call_id` | 目标协议无法配对调用与结果 | 检查明确指出的配对问题；保留原始记录，不再自动删除工具结果 |
+| `tool type "tool_search" is not supported` | 目标平台无法表达该工具 | 改用支持该工具的接口；不静默删除已有历史 |
 | 一直「压缩上下文」毫无进展 | 会话比目标模型的窗口还大 | `codex-switcher guard`，或点横幅上的「**一键换成装得下的模型**」 |
 | `wire_api = "chat" is no longer supported` | 旧的手工配置残留 | `codex-switcher use <平台>` 重写 |
 | 502 / 连接被拒 | 协议桥没在跑 | `codex-switcher bridge --install-agent` |
@@ -176,8 +170,8 @@ MCP、项目信任）逐字节保留 —— 写前备份、写后用 TOML 解析
 ## 常见问题
 
 **切换后旧对话还能继续吗？**
-第三方 ↔ 第三方可以：最近的任务会自动搬过去。绑着官方 OpenAI 的任务刻意不动
-（动了会丢账号绑定），要继续就对它「分叉」或新建任务。
+既有任务不会被自动搬到另一家平台。为避免 ID、工具记录和推理状态混用，请在目标
+服务商下分叉或新建兼容续接任务；原任务和原历史保持不动。
 
 **画图 / 联网搜索 / 操作电脑能用吗？**
 不能。这些是 OpenAI 服务器侧工具或平台上的独立模型（image-01、video-01…），

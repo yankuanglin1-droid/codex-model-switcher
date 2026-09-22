@@ -86,7 +86,12 @@ def build_model_entry(
         "base_instructions": "You are Codex, a coding agent based on %s. "
                              "You and the user share a workspace and collaborate to complete the user's goals."
                              % model_id,
-        "supports_reasoning_summaries": bool(overrides.get("supports_reasoning_summaries", True)),
+        # Responses reasoning state is provider-specific.  Generic third-party
+        # entries must opt in explicitly; advertising it by default caused
+        # non-empty `reasoning.content` to be replayed to endpoints that only
+        # accept an empty array.
+        "supports_reasoning_summaries": bool(
+            overrides.get("supports_reasoning_summaries", is_official)),
         "default_reasoning_summary": "none",
         "support_verbosity": False,
         "apply_patch_tool_type": "freeform",
@@ -139,7 +144,8 @@ def build_model_entry(
         "supports_image_detail_original": bool(
             overrides.get("supports_image_detail_original", supports_image)),
         "web_search_tool_type": "text_and_image" if supports_image else "text",
-        "supports_reasoning_summary_parameter": True,
+        "supports_reasoning_summary_parameter": bool(
+            overrides.get("supports_reasoning_summary_parameter", is_official)),
     }
     return entry
 

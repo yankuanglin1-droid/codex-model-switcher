@@ -13,6 +13,7 @@ bundle id 没变），显示名以后可能再改，bundle id 是稳定的。
 from __future__ import annotations
 
 import plistlib
+import os
 import subprocess
 import sys
 import time
@@ -66,6 +67,90 @@ def is_running() -> bool:
     return result.stdout.strip().lower() == "true"
 
 
+def _storage_files(home: Path):
+    databases = sorted(set(Path(home).glob('state_*.sqlite')) |
+                       set(Path(home).glob('thread_history_*.sqlite')))
+    files = {}
+    for database in databases:
+        for path in (database, Path(str(database) + '-wal'), Path(str(database) + '-shm')):
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                if path == database:
+                    raise OSError('History database changed during shutdown verification') from None
+                continue
+            files[str(path)] = (info.st_dev, info.st_ino)
+    return tuple(str(path) for path in databases), files
+
+
+def assert_history_idle(home: Path) -> None:
+    """Refuse old host workers or external database handles after the UI exits.
+
+    Only this recovery process and its children (private read-only replay
+    clients) are allowed. A failed process/handle probe never means idle.
+    """
+    if sys.platform != 'darwin':
+        raise OSError('Automatic storage shutdown verification requires macOS')
+    expected_databases, _ = _storage_files(home)
+    for _ in range(3):
+        if _history_idle_probe(home, expected_databases):
+            return
+    raise OSError('History storage changed during shutdown verification')
+
+
+def _history_idle_probe(home: Path, expected_databases) -> bool:
+    """Require a clean probe of a stable file set, including after sidecar churn.
+
+    SQLite may remove WAL/SHM between enumeration and lsof. Retry that race from
+    a fresh process inventory; never ignore stderr or accept the failed probe.
+    The main database set is not allowed to disappear or change.
+    """
+    process_list = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,command='],
+                                  capture_output=True, text=True, timeout=20)
+    if process_list.returncode:
+        raise OSError('Cannot verify remaining host processes')
+    processes = {}
+    for line in process_list.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            raise OSError('Unexpected process inventory')
+        processes[int(parts[0])] = (int(parts[1]), parts[2])
+    allowed = {os.getpid()}
+    while True:
+        expanded = allowed | {pid for pid, (parent, _) in processes.items() if parent in allowed}
+        if expanded == allowed:
+            break
+        allowed = expanded
+    application = find_app()
+    if not application:
+        raise OSError('Cannot identify desktop host installation')
+    for pid, (_, command) in processes.items():
+        if pid not in allowed and command.startswith(application + '/Contents/'):
+            if '/Contents/MacOS/' in command or '/Resources/codex' in command:
+                raise OSError('Desktop host worker is still running')
+    databases, files = _storage_files(home)
+    if databases != expected_databases:
+        raise OSError('History database changed during shutdown verification')
+    if files:
+        handles = subprocess.run(['/usr/sbin/lsof', '-t', '--', *files],
+                                 capture_output=True, text=True, timeout=20)
+        after_databases, after_files = _storage_files(home)
+        if (after_databases != databases or
+                any(after_files.get(path) != files[path] for path in databases)):
+            raise OSError('History database changed during shutdown verification')
+        if after_files != files:
+            return False
+        if handles.returncode not in (0, 1) or handles.stderr.strip():
+            raise OSError('Cannot verify history storage handles')
+        try:
+            holders = {int(value) for value in handles.stdout.split()}
+        except ValueError as error:
+            raise OSError('Unexpected history handle inventory') from error
+        if holders - allowed:
+            raise OSError('Another process still has history storage open')
+    return True
+
+
 def _quit(timeout: int = QUIT_TIMEOUT_SECONDS) -> bool:
     """优雅退出。用户在 Codex 里点了不允许退出的弹窗时，等超时放弃。"""
     if not _osascript('tell application id "%s" to quit' % BUNDLE_ID):
@@ -91,7 +176,7 @@ def restart(quit_timeout: int = QUIT_TIMEOUT_SECONDS) -> Dict:
     """优雅重启 Codex 桌面版，让它重新读配置。"""
     if sys.platform != "darwin":
         return {"ok": False, "reason": "unsupported",
-                "detail": "目前只有 macOS 有桌面版可重启"}
+                "detail": "目前仅 macOS 实现自动重启；请手动重新打开宿主"}
     app = find_app()
     if not app:
         return {"ok": False, "reason": "not-found",

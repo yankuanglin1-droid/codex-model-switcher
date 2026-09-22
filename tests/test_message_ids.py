@@ -31,12 +31,12 @@ class MessageIDs(unittest.TestCase):
             raw = b'\n'+json.dumps({'type':'response_item','payload':{'type':'message','id':'foreign_msg','content':[]}}).encode()+b'\n\n'
             p.write_bytes(raw)
             with patch('codex_switcher.history.busy_reason', return_value=None):
-                result = repair_file(p, Path(d)/'backups')
+                result = repair_file(p, Path(d)/'backups', host_closed=True)
                 self.assertEqual(result['changed'], 1)
                 self.assertEqual(Path(result['backup']).read_bytes(), raw)
                 self.assertTrue(p.read_bytes().startswith(b'\n'))
                 self.assertTrue(p.read_bytes().endswith(b'\n\n'))
-                self.assertEqual(repair_file(p, Path(d)/'backups')['changed'], 0)
+                self.assertEqual(repair_file(p, Path(d)/'backups', host_closed=True)['changed'], 0)
 
     def test_busy_file_is_untouched(self):
         with tempfile.TemporaryDirectory() as d:
@@ -84,7 +84,7 @@ class MessageIDs(unittest.TestCase):
             original = b'\n'.join(json.dumps(r).encode() for r in records)
             p.write_bytes(original)
             with patch('codex_switcher.history.busy_reason', return_value=None):
-                result = repair_file(p, Path(d)/'backups')
+                result = repair_file(p, Path(d)/'backups', host_closed=True)
             self.assertEqual(result['changed'], 1)
             self.assertEqual(Path(result['backup']).read_bytes(), original)
             actual = [json.loads(l) for l in p.read_bytes().splitlines()]
@@ -102,7 +102,7 @@ class MessageIDs(unittest.TestCase):
                     {'type': 'function_call_output', 'call_id': 'pair', 'output': 'retained'}]}}]
             p.write_text('\n'.join(json.dumps(r) for r in rows)+'\n')
             with patch('codex_switcher.history.busy_reason', return_value=None):
-                threads._rewrite_session_file(p, 'example', 'openai', Path(d)/'backups')
+                threads._rewrite_session_file(p, 'example', 'openai', Path(d)/'backups', host_closed=True)
             result = [json.loads(l) for l in p.read_text().splitlines()]
             items = result[1]['payload']['replacement_history']
             self.assertTrue(items[0]['id'].startswith('fc_'))

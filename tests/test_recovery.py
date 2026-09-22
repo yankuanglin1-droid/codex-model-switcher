@@ -7,6 +7,11 @@ from unittest.mock import patch, Mock
 from codex_switcher import recovery, codexapp
 
 class RecoveryTests(unittest.TestCase):
+    def setUp(self):
+        idle = patch.object(codexapp, 'assert_history_idle')
+        idle.start()
+        self.addCleanup(idle.stop)
+
     def test_false_applescript_output_is_not_running(self):
         with patch.object(codexapp.subprocess, 'run', return_value=Mock(returncode=0, stdout='false\n')):
             self.assertFalse(codexapp.is_running())
@@ -22,27 +27,27 @@ class RecoveryTests(unittest.TestCase):
             with patch.object(codexapp.sys,'platform','darwin'), patch.object(codexapp,'CANDIDATES',[str(p)]):
                 self.assertEqual(codexapp.find_app(),str(p))
 
-    def test_exit_refusal_does_not_repair_or_relaunch(self):
+    def test_running_host_never_triggers_repair_or_relaunch(self):
         recovery._LOCK.acquire()
         with patch.object(codexapp,'find_app',return_value='/fixture'), patch.object(codexapp,'is_running',return_value=True), patch.object(codexapp,'_quit',return_value=False), patch.object(codexapp,'_reopen') as reopen, patch.object(recovery.message_ids,'repair_file') as repair:
             recovery._run()
             repair.assert_not_called(); reopen.assert_not_called()
-            self.assertEqual(recovery.status()['phase'],'error')
+            self.assertEqual(recovery.status()['phase'],'online-readonly')
 
-    def test_official_only_and_success_after_reopen(self):
-        with tempfile.TemporaryDirectory() as d:
-            files=[]
-            for name,provider in [('official','openai'),('third','example')]:
-                p=Path(d)/(name+'.jsonl');p.write_text(json.dumps({'type':'session_meta','payload':{'model_provider':provider}})+'\n');files.append(p)
-            recovery._set(checked=0,changed=0,skipped=0,failed=0)
-            recovery._LOCK.acquire()
-            with patch.object(codexapp,'find_app',return_value='/fixture'), patch.object(codexapp,'is_running',return_value=False), patch.object(codexapp,'_reopen',return_value=True), patch.object(recovery.history,'recent_rollouts',return_value=files), patch.object(recovery.paths,'state_dir',return_value=Path(d)), patch.object(recovery.message_ids,'repair_file',return_value={'changed':2}) as repair:
-                recovery._run()
-                repair.assert_called_once()
-                self.assertEqual(repair.call_args.args[0],files[0])
-                self.assertEqual(recovery.status()['changed'],2)
-                self.assertTrue(recovery.status()['reopened'])
-                self.assertEqual(recovery.status()['phase'],'done')
+    def test_success_after_verified_closed_pipeline_and_reopen(self):
+        recovery._set(checked=0,changed=0,skipped=0,failed=0)
+        recovery._LOCK.acquire()
+        with patch.object(codexapp,'find_app',return_value='/fixture'), patch.object(codexapp,'is_running',return_value=False), patch.object(codexapp,'_reopen',return_value=True), patch.object(recovery,'run_closed',return_value={'phase':'done'}) as repair:
+            recovery._run()
+            repair.assert_called_once()
+            self.assertTrue(recovery.status()['reopened'])
+            self.assertEqual(recovery.status()['phase'],'done')
+
+    def test_partial_repair_does_not_report_done(self):
+        recovery._LOCK.acquire()
+        with patch.object(codexapp,'find_app',return_value='/fixture'), patch.object(codexapp,'is_running',return_value=False), patch.object(codexapp,'_reopen',return_value=True), patch.object(recovery,'run_closed',return_value={'phase':'partial'}):
+            recovery._run()
+            self.assertEqual(recovery.status()['phase'],'partial')
 
     def test_second_click_reuses_existing_job(self):
         recovery._LOCK.acquire()
@@ -50,6 +55,39 @@ class RecoveryTests(unittest.TestCase):
             with patch.object(recovery.sys,'platform','darwin'),patch.object(recovery.threading,'Thread') as thread:
                 recovery.start();thread.assert_not_called()
         finally: recovery._LOCK.release()
+
+    def test_manual_wait_stays_active_until_host_exits_without_forcing_quit(self):
+        recovery._LOCK.acquire()
+        recovery._CANCEL_WAIT.clear()
+        with patch.object(codexapp, 'find_app', return_value='/fixture'), \
+                patch.object(codexapp, 'is_running', side_effect=[True, True, False, False]), \
+                patch.object(codexapp, '_quit') as quit_host, \
+                patch.object(codexapp, '_reopen', return_value=True), \
+                patch.object(recovery._CANCEL_WAIT, 'wait', return_value=False) as wait, \
+                patch.object(recovery, 'run_closed', return_value={'phase': 'done'}) as repair:
+            recovery._run(wait_for_exit=True)
+        self.assertEqual(wait.call_count, 2)
+        quit_host.assert_not_called()
+        repair.assert_called_once()
+        self.assertEqual(recovery.status()['phase'], 'done')
+
+    def test_manual_wait_cancel_does_not_write_or_reopen(self):
+        recovery._LOCK.acquire()
+        with patch.object(codexapp, 'find_app', return_value='/fixture'), \
+                patch.object(codexapp, 'is_running', return_value=True), \
+                patch.object(recovery._CANCEL_WAIT, 'wait', side_effect=lambda _: recovery.cancel_wait()['cancelled']), \
+                patch.object(codexapp, '_reopen') as reopen, \
+                patch.object(recovery, 'run_closed') as repair:
+            recovery._run(wait_for_exit=True)
+        repair.assert_not_called()
+        reopen.assert_not_called()
+        self.assertEqual(recovery.status()['phase'], 'cancelled')
+        recovery._CANCEL_WAIT.clear()
+
+    def test_cancel_is_refused_once_repairing(self):
+        recovery._set(phase='repairing')
+        self.assertFalse(recovery.cancel_wait()['cancelled'])
+        recovery._set(phase='idle')
 
 class AutomationAuditTests(unittest.TestCase):
     def test_fixed_model_and_missing_heartbeat_are_reported_without_writes(self):
@@ -77,9 +115,10 @@ class HistoryWriteTests(unittest.TestCase):
             p.write_text(original)
             with patch.object(history,'busy_reason',return_value=None):
                 changed, stats=history.sanitize(p,False,Path(d)/'backup')
-            self.assertTrue(changed)
-            self.assertEqual(p.read_text(),'\n'+valid+'\n\n')
-            self.assertEqual(Path(stats['backup']).read_text(),original)
+            self.assertFalse(changed)
+            self.assertEqual(p.read_text(),original)
+            self.assertEqual(stats['skipped'], 'destructive-cleanup-disabled')
+            self.assertFalse((Path(d)/'backup').exists())
 
     def test_clean_wont_replace_host_open_file(self):
         from codex_switcher import history

@@ -219,7 +219,7 @@ async function fitSwitch(pick) {
 async function repairThreads(dryRun) {
   try {
     const result = await api('repair', dryRun ? { dry_run: true } : {});
-    if (dryRun) {
+    if (dryRun || result.continuation_required) {
       const lines = (result.items || []).map((item) =>
         `${item.id}  ${item.from} → ${item.to}  （${item.model}）`);
       alert(t('repair.preview_title', { count: result.items.length }) + '\n\n' + lines.join('\n'));
@@ -372,7 +372,7 @@ $('btn-switch-result-dismiss').onclick = () => { $('switch-result').hidden = tru
 // 切换后 Codex 必须完全退出再重开才吃进新配置（配置和任务绑定都缓存在
 // 它的进程里）。替用户做掉 ⌘Q + 重新点开：优雅退出、等它退干净、再拉起。
 let recoveryBusy = false;
-async function restartCodex() {
+async function recoverHistory() {
   if (recoveryBusy || !confirm(t('recovery.confirm'))) return;
   recoveryBusy = true;
   const button = $('btn-restart-codex');
@@ -381,22 +381,42 @@ async function restartCodex() {
   panel.hidden = false;
   panel.textContent = t('recovery.working');
   try {
-    let result = await api('restart_codex', {});
+    let result = await api('recover_history', {wait_for_exit: true});
     if (result.error) throw new Error(result.error);
-    while (['quitting', 'repairing', 'reopening'].includes(result.phase)) {
-      panel.textContent = t('recovery.progress', result);
+    while (['awaiting-exit', 'quitting', 'snapshotting', 'repairing', 'verifying', 'reopening'].includes(result.phase)) {
+      $('btn-cancel-recovery-wait').hidden = result.phase !== 'awaiting-exit';
+      panel.textContent = result.phase === 'awaiting-exit' ? t('recovery.awaitingExit') : t('recovery.progress', result);
       await new Promise(resolve => setTimeout(resolve, 1500));
       result = await api('recovery_status', {});
     }
-    panel.textContent = result.phase === 'done'
-      ? t('recovery.done', result) : t('recovery.failed');
-    if (!result.reopened) panel.textContent += ' ' + t('restart.manual');
+    panel.textContent = result.phase === 'online-readonly' ? t('recovery.onlineReadonly')
+      : result.phase === 'cancelled' ? t('recovery.cancelled')
+      : result.phase === 'wait-timeout' ? t('recovery.waitTimeout')
+      : result.phase === 'done' ? t('recovery.done', result)
+      : result.phase === 'partial' ? t('recovery.partial', result) : t('recovery.failed');
+    if (result.backup_root) panel.textContent += ' ' + t('recovery.report', {path: result.backup_root});
+    if (result.reason_code) panel.textContent += ' [' + result.reason_code + ']';
+    if (result.failure_receipt) panel.textContent += ' ' + t('recovery.report', {path: result.failure_receipt});
+    if (!result.reopened && !['cancelled', 'wait-timeout'].includes(result.phase)) panel.textContent += ' ' + t('restart.manual');
   } catch (error) {
     panel.textContent = t('recovery.failed');
   } finally {
+    $('btn-cancel-recovery-wait').hidden = true;
     recoveryBusy = false;
     button.disabled = false;
   }
+}
+async function restartCodex() {
+  if (recoveryBusy || !confirm(t('restart.confirm'))) return;
+  const button = $('btn-restart-codex');
+  button.disabled = true;
+  try {
+    const result = await api('restart_codex', {});
+    if (!result.ok) throw new Error(t('restart.manual'));
+    toast(t('restart.done'));
+  } catch (error) {
+    toast(error.message, true);
+  } finally { button.disabled = false; }
 }
 $('btn-restart-codex').onclick = restartCodex;
 
@@ -1436,4 +1456,5 @@ loadState().then(() => {
   toast(error.message, true);
 });
 
-$('btn-recovery').onclick = restartCodex;
+$('btn-recovery').onclick = recoverHistory;
+$('btn-cancel-recovery-wait').onclick = () => api('cancel_recovery_wait', {});

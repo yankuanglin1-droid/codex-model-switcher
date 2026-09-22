@@ -166,11 +166,10 @@ def probe_responses(base_url: str, api_key: Optional[str] = None,
 
     返回 {"transport": "native" | "bridge" | "unknown", "evidence": ...}
 
-    判定依据（实测过 Codex 的真实行为）：
-      · 200 / 400 / 422        接口存在，只是我们没带对参数 → native
-      · 429                    接口存在，是额度不足 → native（GLM 就是这样）
-      · 404 / 405              平台没有这个接口       → bridge
-      · 401 / 403              可能是先鉴权后路由，无法据此判断 → unknown
+    只有成功响应能被验证为 Responses 对象时才判为 ``native``。HTTP 400、
+    422、429 只能证明某个网关接到了请求，不能证明它能承载 Codex 的完整
+    历史、推理项和工具调用；把这些状态当作 native 会把不兼容的原始历史
+    直送第三方，从而污染后续续接。
     """
     base = (base_url or "").rstrip("/")
     if not base:
@@ -190,19 +189,36 @@ def probe_responses(base_url: str, api_key: Optional[str] = None,
                                      headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read(2000)
-            return {"transport": "native", "evidence": "HTTP %d" % response.status}
+            raw = response.read(200000).decode("utf-8", "replace")
+            try:
+                document = json.loads(raw)
+            except json.JSONDecodeError:
+                return {"transport": "unknown", "evidence": "HTTP %d non-JSON" % response.status,
+                        "verified_native": False}
+            # A Responses result is an object with a typed output array.  A
+            # generic JSON 200, proxy page, or chat-completions envelope is
+            # not sufficient evidence for raw Codex transport.
+            if isinstance(document, dict) and isinstance(document.get("output"), list):
+                return {"transport": "native", "evidence": "verified Responses HTTP %d" % response.status,
+                        "verified_native": True}
+            return {"transport": "unknown", "evidence": "HTTP %d incompatible JSON" % response.status,
+                    "verified_native": False}
     except urllib.error.HTTPError as exc:
         try:
             exc.read(400)
         except Exception:
             pass
         if exc.code in (404, 405):
-            return {"transport": "bridge", "evidence": "HTTP %d" % exc.code}
-        if exc.code in (200, 400, 422, 429):
-            return {"transport": "native", "evidence": "HTTP %d" % exc.code}
+            return {"transport": "bridge", "evidence": "HTTP %d" % exc.code,
+                    "verified_native": False}
+        if exc.code in (400, 422, 429):
+            return {"transport": "unknown", "evidence": "HTTP %d (unverified)" % exc.code,
+                    "verified_native": False}
         if exc.code in (401, 403):
-            return {"transport": "unknown", "evidence": "HTTP %d" % exc.code}
-        return {"transport": "unknown", "evidence": "HTTP %d" % exc.code}
+            return {"transport": "unknown", "evidence": "HTTP %d" % exc.code,
+                    "verified_native": False}
+        return {"transport": "unknown", "evidence": "HTTP %d" % exc.code,
+                "verified_native": False}
     except Exception as exc:  # noqa: BLE001
-        return {"transport": "unknown", "evidence": type(exc).__name__}
+        return {"transport": "unknown", "evidence": type(exc).__name__,
+                "verified_native": False}

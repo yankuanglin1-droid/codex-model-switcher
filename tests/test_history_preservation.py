@@ -44,8 +44,10 @@ class HistoryPreservationTests(unittest.TestCase):
             self.assertEqual(result["changed"], 0)
             self.assertTrue(result.get("skipped"))
         elif writer == "sanitize":
-            changed, _ = history.sanitize(path, False, backup)
+            changed, stats = history.sanitize(path, False, backup)
             self.assertFalse(changed)
+            self.assertEqual(stats["skipped"], "destructive-cleanup-disabled")
+            self.assertFalse(backup.exists())
         else:
             with self.assertRaises(OSError):
                 threads._rewrite_session_file(path, "source", "target", backup)
@@ -88,7 +90,7 @@ class HistoryPreservationTests(unittest.TestCase):
                         patch.object(os, "replace", wraps=os.replace) as replace:
                     self._assert_writer_refused(writer, path)
                     replace.assert_not_called()
-                self.assertTrue(phase["temporary_created"])
+                self.assertEqual(phase["temporary_created"], writer != "sanitize")
                 self.assertEqual(path.read_bytes(), original)
                 self.assertEqual(path.stat().st_ino, original_inode)
 
@@ -116,7 +118,7 @@ class HistoryPreservationTests(unittest.TestCase):
                     self._assert_writer_refused(writer, path)
                     replace.assert_not_called()
                 self.assertEqual(path.read_bytes(), original)
-                self.assertEqual(path.stat().st_ino, replacement_inode)
+                self.assertEqual(path.stat().st_ino, before.st_ino if writer == "sanitize" else replacement_inode)
 
     def test_default_switches_preserve_history_and_database_files(self):
         from codex_switcher import integrations

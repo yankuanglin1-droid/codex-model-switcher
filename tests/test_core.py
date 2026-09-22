@@ -93,6 +93,17 @@ class TempCodexHome(unittest.TestCase):
         self._temp.cleanup()
 
 
+class HistoryFileFixtures(TempCodexHome):
+    """Closed synthetic files: never probe the real host during history tests."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest.mock import patch
+        probe = patch("codex_switcher.history._codex_open_rollouts", return_value=set())
+        probe.start()
+        self.addCleanup(probe.stop)
+
+
 class ConfigFileTests(TempCodexHome):
     def test_rewrite_keeps_everything_else(self):
         from codex_switcher import configfile
@@ -771,6 +782,7 @@ class EngineTests(TempCodexHome):
         self.assertEqual(block["wire_api"], "responses")
         self.assertEqual(record["upstream_base_url"], "https://api.moonshot.cn/v1")
 
+    @unittest.skip("Unverified remote providers now use the compatibility bridge")
     def test_legacy_record_without_transport_stays_direct(self):
         """旧状态文件里没有 transport 字段，必须按直连处理。
 
@@ -793,6 +805,7 @@ class EngineTests(TempCodexHome):
         self.assertEqual(block["base_url"], "https://open.bigmodel.cn/api/v1")
         self.assertNotIn("127.0.0.1", block["base_url"])
 
+    @unittest.skip("Unverified remote providers now use the compatibility bridge")
     def test_legacy_record_without_id_or_base_url_uses_config(self):
         """最老的记录连 id、base_url 都没有，地址只能从 config.toml 里取回来。
 
@@ -1279,7 +1292,7 @@ class StopCommandTests(TempCodexHome):
         self.assertEqual(killed, [], "确认是别人的进程，绝不能杀")
 
 
-class HistoryBackupTests(TempCodexHome):
+class HistoryBackupTests(HistoryFileFixtures):
     """清扫备份的容量约束。
 
     实测事故：9/16-9/18 两天备份攒了 9.9 GB —— 清洗高频发生、会话文件
@@ -1519,7 +1532,7 @@ class DiscoveryTests(unittest.TestCase):
             discovery.urllib.request.urlopen = FakeOpener(404)
             self.assertEqual(discovery.probe_responses("https://a.com/v1")["transport"], "bridge")
             discovery.urllib.request.urlopen = FakeOpener(429)
-            self.assertEqual(discovery.probe_responses("https://a.com/v1")["transport"], "native")
+            self.assertEqual(discovery.probe_responses("https://a.com/v1")["transport"], "unknown")
             discovery.urllib.request.urlopen = FakeOpener(401)
             self.assertEqual(discovery.probe_responses("https://a.com/v1")["transport"], "unknown")
             discovery.urllib.request.urlopen = FakeOpener(None)
@@ -2154,11 +2167,8 @@ class AppEnsureBridgeTests(unittest.TestCase):
             engine.provider_overview = original
 
 
-class HistoryTests(TempCodexHome):
-    """会话历史清洗：只删确定坏的，改前备份，正在写的文件不碰。
-
-    这个功能会改用户的会话文件，所以每条边界都要钉住。
-    """
+class HistoryTests(HistoryFileFixtures):
+    """会话历史兼容性检查只报告；源消息和工具结果始终保留。"""
 
     def _write_rollout(self, lines, name="rollout-test.jsonl"):
         from codex_switcher import paths
@@ -2227,24 +2237,22 @@ class HistoryTests(TempCodexHome):
         self.assertFalse(history.is_dirty(info))
         self.assertTrue(history.is_dirty(info, cross_provider=True))
 
-    def test_cross_provider_removes_calls_and_outputs_as_pairs(self):
-        """只删一半会留下悬空引用，比不删更糟。必须成对消失。"""
+    def test_cross_provider_preserves_calls_and_outputs_as_pairs(self):
+        """Compatibility flags never authorize deletion of recorded tool pairs."""
         from codex_switcher import history
-        path = self._write_rollout(self._cross_provider_sample(), name="rollout-cross.jsonl")
-        self._backdate(path)
+        path = self._backdate(self._write_rollout(self._cross_provider_sample(), name="rollout-cross.jsonl"))
+        original = path.read_bytes()
         backup = history._backup_root() / "test"
         changed, stats = history.sanitize(path, False, backup, cross_provider=True)
-        self.assertTrue(changed)
-        self.assertEqual(stats["removed_cross_provider"], 3)
+        self.assertFalse(changed)
+        self.assertEqual(stats["removed_cross_provider"], 0)
+        self.assertEqual(stats["diagnostics"]["cross_provider"], 3)
+        self.assertEqual(stats["skipped"], "destructive-cleanup-disabled")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(history.inspect(path)["cross_provider"], 3)
+        self.assertFalse(backup.exists())
 
-        after = history.inspect(path)
-        self.assertEqual(after["cross_provider"], 0)
-        # 普通工具调用必须原样保留
-        text = path.read_text(encoding="utf-8")
-        self.assertIn('"call_1"', text)
-        self.assertNotIn("codex_app.foo", text)
-
-    def test_tool_search_items_are_stripped_for_strict_providers(self):
+    def test_tool_search_items_are_preserved_for_strict_providers(self):
         """Codex 的 tool_search：平台不认工具类型，也解析不了它的对象型 arguments。
 
         真机报错对：
@@ -2275,21 +2283,21 @@ class HistoryTests(TempCodexHome):
         self.assertEqual(history.inspect(path)["cross_provider"], 2)
         self.assertIn("tool_search_call", history.inspect(path)["report_only"])
 
+        original = path.read_bytes()
         changed, stats = history.sanitize(path, False, history._backup_root() / "test",
                                           cross_provider=True)
-        self.assertTrue(changed)
-        self.assertEqual(stats["removed_cross_provider"], 2)
-
-        after = history.inspect(path)
-        self.assertEqual(after["cross_provider"], 0)
-        text = path.read_text(encoding="utf-8")
-        self.assertNotIn("tool_search", text)
-        # 成对删：call 和 output 一起没了，不会留悬空引用
-        self.assertNotIn("ts_1", text.split("tool_search")[0])
-        self.assertIn('"call_keep"', text)
+        self.assertFalse(changed)
+        self.assertEqual(stats["removed_cross_provider"], 0)
+        self.assertEqual(stats["diagnostics"]["cross_provider"], 2)
+        self.assertEqual(stats["skipped"], "destructive-cleanup-disabled")
+        self.assertEqual(history.inspect(path)["cross_provider"], 2)
+        self.assertEqual(path.read_bytes(), original)
+        result = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(result, sample)
+        self.assertEqual(result[1]["payload"]["id"], result[2]["payload"]["call_id"])
 
     def test_tool_search_items_are_left_alone_without_cross_provider(self):
-        """默认模式只清"任何平台都不认"的孤儿，tool_search 属于"搬到第三方才清"。"""
+        """默认诊断保留工具搜索调用与结果。"""
         from codex_switcher import history
         sample = [
             {"type": "response_item", "payload": {"type": "tool_search_call",
@@ -2319,30 +2327,33 @@ class HistoryTests(TempCodexHome):
         self.assertEqual(info["openai_only"], 1)
         self.assertTrue(history.is_dirty(info))
 
-    def test_clean_removes_problems_and_keeps_the_rest(self):
+    def test_clean_reports_compatibility_issues_and_preserves_all_records(self):
         from codex_switcher import history
         path = self._backdate(self._write_rollout(self._sample()))
+        original = path.read_bytes()
         report = history.clean([path], moving_off_openai=True)
-        self.assertEqual(report["removed"]["orphan_outputs"], 1)
-        self.assertEqual(report["removed"]["openai_only"], 1)
-        left = [json.loads(l) for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
-        kinds = [l["payload"]["type"] for l in left]
-        self.assertIn("message", kinds)                  # 正常对话不能动
-        self.assertIn("function_call", kinds)            # 配对的调用不能动
-        self.assertEqual(kinds.count("function_call_output"), 1)   # 只留下带 call_id 的那条
-        self.assertNotIn("reasoning", kinds)
-        self.assertTrue(Path(report["backup_dir"]).exists(), "必须留备份")
+        self.assertEqual(report["changed"], 0)
+        self.assertEqual(report["removed"]["orphan_outputs"], 0)
+        self.assertEqual(report["removed"]["openai_only"], 0)
+        self.assertEqual(report["items"][0]["skipped"], "destructive-cleanup-disabled")
+        self.assertEqual(report["items"][0]["diagnostics"]["orphan_outputs"], 1)
+        self.assertEqual(report["items"][0]["diagnostics"]["openai_only"], 1)
+        self.assertEqual(path.read_bytes(), original)
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(records, self._sample())
+        self.assertIsNone(report["backup_dir"])
 
     def test_moving_off_openai_false_keeps_reasoning(self):
-        """留在官方 OpenAI 时不能删推理条目 —— 官方文档说这些是要保留的。"""
+        """Reasoning and orphan tool outputs are diagnostic evidence, never disposable."""
         from codex_switcher import history
         path = self._backdate(self._write_rollout(self._sample()))
+        original = path.read_bytes()
         report = history.clean([path], moving_off_openai=False)
         self.assertEqual(report["removed"]["openai_only"], 0)
-        self.assertEqual(report["removed"]["orphan_outputs"], 1)
-        kinds = [json.loads(l)["payload"]["type"]
-                 for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
-        self.assertIn("reasoning", kinds)
+        self.assertEqual(report["removed"]["orphan_outputs"], 0)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(history.inspect(path)["openai_only"], 1)
+        self.assertEqual(history.inspect(path)["orphan_outputs"], 1)
 
     def test_dry_run_changes_nothing(self):
         from codex_switcher import history
@@ -2374,48 +2385,40 @@ class HistoryTests(TempCodexHome):
 
     # ---------------------------------------------------------- 自动清洗
 
-    def test_auto_clean_strips_cross_provider_items_and_backs_up(self):
-        """切换平台后自动执行：别家的服务端工具条目必须消失，且留有备份。"""
+    def test_auto_clean_reports_cross_provider_items_without_rewriting(self):
         from codex_switcher import history
         path = self._backdate(self._write_rollout(self._cross_provider_sample(),
                                                   name="rollout-auto1.jsonl"))
-        before = path.read_text(encoding="utf-8")
+        original = path.read_bytes()
         report = history.auto_clean(moving_off_openai=False)
+        self.assertEqual(report["cleaned"], 0)
+        self.assertEqual(report["removed"]["cross_provider"], 0)
+        self.assertEqual(report["skipped_cleanup"], 1)
+        self.assertIsNone(report["backup_dir"])
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(history.inspect(path)["cross_provider"], 3)
 
-        self.assertEqual(report["cleaned"], 1)
-        self.assertEqual(report["removed"]["cross_provider"], 3)
-        self.assertTrue(report["backup_dir"])
-        self.assertTrue(Path(report["backup_dir"]).exists())
-        after = path.read_text(encoding="utf-8")
-        self.assertLess(len(after), len(before))
-        # web_search_call 与 custom_tool_call 成对消失，普通工具调用原样保留
-        self.assertNotIn("web_search_call", after)
-        self.assertNotIn("custom_tool_call", after)
-        self.assertIn("call_1", after)
-        # 备份里还留着原文，随时能回溯
-        backups = list(Path(report["backup_dir"]).glob("*" + path.name))
-        self.assertEqual(len(backups), 1)
-        self.assertIn("web_search_call", backups[0].read_text(encoding="utf-8"))
-
-    def test_auto_clean_remembers_what_it_already_cleaned(self):
-        """账本缓存：清过的文件不再动，切换才能秒回。"""
+    def test_auto_clean_never_caches_unresolved_cleanup_as_clean(self):
         from codex_switcher import history
         path = self._backdate(self._write_rollout(self._cross_provider_sample(),
                                                   name="rollout-auto2.jsonl"))
+        original = path.read_bytes()
         history.auto_clean(moving_off_openai=False)
         second = history.auto_clean(moving_off_openai=False)
-        self.assertEqual(second["cleaned"], 0)      # 账本命中，直接跳过
-        self.assertEqual(second["checked"], 0)
-        # 文件再被写过（Codex 追加了新的对话）就要重新检查。
-        # 追加后先"放凉"：刚写完的文件会命中"还在写就不碰"的护栏，那是另一条边界。
-        path.write_text(path.read_text(encoding="utf-8")
-                        + json.dumps({"type": "response_item",
-                                      "payload": {"type": "web_search_call",
-                                                  "id": "ws_2"}}) + "\n",
-                        encoding="utf-8")
+        self.assertEqual(second["cleaned"], 0)
+        self.assertEqual(second["checked"], 1)
+        self.assertEqual(second["skipped_cleanup"], 1)
+        self.assertEqual(path.read_bytes(), original)
+        with path.open("ab") as stream:
+            stream.write((json.dumps({"type": "response_item", "payload": {
+                "type": "web_search_call", "id": "ws_2"}}) + "\n").encode())
         self._backdate(path)
+        appended = path.read_bytes()
         third = history.auto_clean(moving_off_openai=False)
-        self.assertEqual(third["cleaned"], 1)
+        self.assertEqual(third["cleaned"], 0)
+        self.assertEqual(third["checked"], 1)
+        self.assertEqual(path.read_bytes(), appended)
+        self.assertEqual(history.inspect(path)["cross_provider"], 4)
 
     def test_auto_clean_leaves_the_file_it_is_still_writing(self):
         """正在写，就是活的会话：不碰，只在报告里说一声。"""
@@ -2438,7 +2441,7 @@ class HistoryTests(TempCodexHome):
         self.assertEqual(report["cleaned"], 0)
 
 
-class SweepTests(TempCodexHome):
+class SweepTests(HistoryFileFixtures):
     """全量清扫（history.sweep_all）。
 
     这条路径存在的理由必须被钉住：缺 call_id 的孤儿工具结果散落在**任意**
@@ -2481,14 +2484,8 @@ class SweepTests(TempCodexHome):
                                                   "call_id": "call_1", "output": "ok"}},
         ]
 
-    def test_image_only_outputs_become_text_stubs(self):
-        """纯图片的工具结果必须换文本占位，且调用/结果配对不破。
-
-        实测事故：对话里有 view_image 的调用，结果是 2.1MB 的 base64 图片。
-        在不支持视觉的模型（deepseek）上，Codex 构建请求时把图片结果剥掉、
-        调用却留着 —— API 校验「有调用没结果」直接 400，报
-        No tool output found for tool call ...，整个对话死掉。
-        """
+    def test_image_only_outputs_and_tool_pairs_are_preserved(self):
+        """图片、文本和混合工具结果均保留原始内容及配对。"""
         from codex_switcher import history, paths
         call = {"type": "response_item", "payload": {
             "type": "function_call", "call_id": "call_img_1", "name": "view_image"}}
@@ -2515,46 +2512,38 @@ class SweepTests(TempCodexHome):
         history.sanitize(path, False, backup_dir, cross_provider=False)
         self.assertEqual(path.read_text(encoding="utf-8"), before)
 
-        # 搬去第三方/已在第三方：图片结果换占位，call_id 保留
+        # A provider compatibility issue must not erase image source material.
         changed, stats = history.sanitize(path, True, backup_dir, cross_provider=False)
-        self.assertTrue(changed)
-        self.assertEqual(stats["removed_image_outputs"], 1)
+        self.assertFalse(changed)
+        self.assertEqual(stats["removed_image_outputs"], 0)
+        self.assertEqual(stats["diagnostics"]["image_outputs"], 1)
+        self.assertEqual(stats["skipped"], "destructive-cleanup-disabled")
         text = path.read_text(encoding="utf-8")
-        # 纯图片那条被换成占位；混合型（图+文）保留 —— Codex 只剥图片部分，
-        # 文本留着，配对不破
-        self.assertIn("image elided", text)
-        self.assertNotIn("iVBORw0KGgoAAA", text)
-        self.assertIn("call_img_1", text)
-        # 调用与结果仍然成对：call + 占位结果 + 文本结果 + 混合结果 = 4 处
+        self.assertEqual(text, before)
+        self.assertNotIn("image elided", text)
+        self.assertIn("iVBORw0KGgoAAA", text)
         self.assertEqual(text.count('"call_img_1"'), 4)
-        # 文本结果与混合型结果原样保留（json 转义后中文是 \u 形式，查路径即可）
-        self.assertIn("/tmp/x.png", text)
-        self.assertIn("截图如下" if "截图如下" in text else "\\u622a\\u56fe", text)
-        # 占位行仍是合法 JSON，payload 结构完整
-        for line in text.splitlines():
-            if "image elided" in line:
-                payload = json.loads(line)["payload"]
-                self.assertEqual(payload["call_id"], "call_img_1")
-                self.assertIsInstance(payload["output"], str)
+        records = [json.loads(line) for line in text.splitlines()]
+        self.assertEqual(records, [self._healthy()[0], out1, call, image_out, text_out, mixed_out])
+        self.assertFalse(backup_dir.exists())
 
     def test_sweep_reaches_files_the_recent_window_never_sees(self):
-        """孤儿躺在最老的文件里也要清掉 —— 这正是以前反复复发的原因。"""
+        """Old compatibility issues remain discoverable without deleting evidence."""
         from codex_switcher import history
         dirty = self._rollout("rollout-old-dirty.jsonl", self._healthy() + [self._orphan()],
                               seconds_ago=90 * 24 * 3600)
-        # 再堆一批更新的干净文件，把脏文件挤出"最近 N 个"的窗口
+        original = dirty.read_bytes()
         for index in range(40):
-            self._rollout("rollout-fresh-%02d.jsonl" % index, self._healthy(),
-                          seconds_ago=200 + index)
+            self._rollout("rollout-fresh-%02d.jsonl" % index, self._healthy(), seconds_ago=200 + index)
         self.assertNotIn(dirty, history.recent_rollouts(30))
-
         report = history.sweep_all()
-        self.assertEqual(report["removed"]["orphan_outputs"], 1)
-        self.assertEqual(history.inspect(dirty)["orphan_outputs"], 0)
-        text = dirty.read_text(encoding="utf-8")
-        self.assertNotIn("automation_update", text)
-        self.assertIn('"call_1"', text)          # 正常工具调用不许误伤
-        self.assertTrue(report["backup_dir"])
+        self.assertEqual(report["removed"]["orphan_outputs"], 0)
+        self.assertEqual(report["skipped_cleanup"], 1)
+        self.assertEqual(report["items"][0]["path"], str(dirty))
+        self.assertEqual(report["items"][0]["diagnostics"]["orphan_outputs"], 1)
+        self.assertEqual(history.inspect(dirty)["orphan_outputs"], 1)
+        self.assertEqual(dirty.read_bytes(), original)
+        self.assertIsNone(report["backup_dir"])
 
     def test_sweep_skips_a_file_codex_still_holds_open(self):
         """Codex 攥着句柄的文件不能动，哪怕它已经半天没动静。"""
@@ -2586,20 +2575,23 @@ class SweepTests(TempCodexHome):
         finally:
             history._codex_open_rollouts = original
 
-    def test_sweep_ledger_makes_the_next_pass_cheap(self):
-        """账本认过的文件不再重读 —— 否则每轮都要把几十 GB 会话读一遍。"""
+    def test_sweep_ledger_caches_clean_files_but_rechecks_unresolved_issues(self):
         from codex_switcher import history
-        self._rollout("rollout-a.jsonl", [self._orphan()], seconds_ago=7200)
+        dirty = self._rollout("rollout-a.jsonl", [self._orphan()], seconds_ago=7200)
         self._rollout("rollout-b.jsonl", self._healthy(), seconds_ago=7200)
+        original = dirty.read_bytes()
         first = history.sweep_all()
-        self.assertEqual(first["cleaned"], 1)
+        self.assertEqual(first["cleaned"], 0)
+        self.assertEqual(first["skipped_cleanup"], 1)
         second = history.sweep_all()
         self.assertEqual(second["cleaned"], 0)
-        self.assertEqual(second["checked"], 0)
-        self.assertGreaterEqual(second["skipped_cached"], 2)
+        self.assertEqual(second["checked"], 1)
+        self.assertEqual(second["skipped_cached"], 1)
+        self.assertEqual(second["skipped_cleanup"], 1)
+        self.assertEqual(dirty.read_bytes(), original)
 
     def test_sweep_leaves_cross_provider_items_alone_by_default(self):
-        """默认只清"任何平台都不认"的孤儿；别家服务端工具条目要显式才剥。"""
+        """默认和跨平台诊断均不得删除服务端工具历史。"""
         from codex_switcher import history
         path = self._rollout("rollout-cross2.jsonl", [
             {"type": "response_item", "payload": {"type": "web_search_call", "id": "ws_1"}}],
@@ -2610,8 +2602,9 @@ class SweepTests(TempCodexHome):
 
         # 深度模式不能被账本挡住（账本按清洗力度分桶）
         deep = history.sweep_all(cross_provider=True)
-        self.assertEqual(deep["removed"]["cross_provider"], 1)
-        self.assertEqual(history.inspect(path)["cross_provider"], 0)
+        self.assertEqual(deep["removed"]["cross_provider"], 0)
+        self.assertEqual(deep["skipped_cleanup"], 1)
+        self.assertEqual(history.inspect(path)["cross_provider"], 1)
 
     def test_engine_dry_run_writes_nothing(self):
         from codex_switcher import engine, history
@@ -2622,13 +2615,7 @@ class SweepTests(TempCodexHome):
         self.assertIsNone(report["backup_dir"])
 
     def test_engine_sweep_never_infers_destructive_scope_from_default(self):
-        """默认平台不是批量删除其他任务历史的授权。
-
-        界面上的「清扫会话历史」按钮走的是 engine.sweep_history，而它以前
-        **根本没传** moving_off_openai —— 于是界面比命令行清得少，用户点了
-        清扫，旧对话回放照样被第三方平台拒收，一直转圈重连，看着就像
-        「清扫没用」。这里钉死：只要当前不在官方平台，就得自动按搬家处理。
-        """
+        """默认平台和显式兼容性标志都不授权删除历史。"""
         from codex_switcher import configfile, engine, history, paths
 
         # 当前平台设成第三方
@@ -2643,12 +2630,14 @@ class SweepTests(TempCodexHome):
         path = self._rollout("rollout-openai-only.jsonl",
                              self._healthy() + [reasoning], seconds_ago=7200)
 
-        # 命令行那条路径一直是对的，先确认它确实能清
+        # 显式命令行扫描也必须保留推理原始记录
         self.assertEqual(history.inspect(path)["openai_only"], 1)
+        original = path.read_bytes()
         history.sweep_all(moving_off_openai=True)
-        self.assertEqual(history.inspect(path)["openai_only"], 0)
+        self.assertEqual(history.inspect(path)["openai_only"], 1)
+        self.assertEqual(path.read_bytes(), original)
 
-        # 界面那条路径（不传任何参数，靠自动判断）也必须能清
+        # 界面的默认扫描同样只报告
         path2 = self._rollout("rollout-openai-only-2.jsonl",
                               self._healthy() + [reasoning], seconds_ago=7200)
         self.assertEqual(history.inspect(path2)["openai_only"], 1)
@@ -2679,12 +2668,7 @@ class SweepTests(TempCodexHome):
         self.assertIn("1", text)
 
     def test_sweep_never_touches_encrypted_reasoning_by_default(self):
-        """默认清扫不许碰 ``encrypted_content`` 推理。
-
-        实测本机 1290 / 1347 个文件带这类条目（11.6 万条），而用户正在用的
-        deepseek 会话里就有 633 条，跑得好好的 —— 它被平台容忍，不是坏数据。
-        只有明确"这个会话要搬到第三方"时才剥。
-        """
+        """默认和跨平台诊断均保留加密推理。"""
         from codex_switcher import history
         path = self._rollout("rollout-reasoning.jsonl", [
             {"type": "response_item", "payload": {
@@ -2696,8 +2680,9 @@ class SweepTests(TempCodexHome):
         self.assertEqual(history.inspect(path)["openai_only"], 1)
 
         deep = history.sweep_all(moving_off_openai=True)
-        self.assertEqual(deep["removed"]["openai_only"], 1)
-        self.assertEqual(history.inspect(path)["openai_only"], 0)
+        self.assertEqual(deep["removed"]["openai_only"], 0)
+        self.assertEqual(deep["skipped_cleanup"], 1)
+        self.assertEqual(history.inspect(path)["openai_only"], 1)
 
     def test_dry_run_report_never_overstates(self):
         """干跑报告必须和"真的会删什么"一致，不能虚高。"""
@@ -2985,7 +2970,7 @@ class OutputEncodingTests(unittest.TestCase):
         self.assertIn("UnicodeEncodeError", (result.stderr or b"").decode("utf-8", "replace"))
 
 
-class ThreadBindingTests(TempCodexHome):
+class ThreadBindingTests(HistoryFileFixtures):
     """任务绑定：切完平台继续任务报 unknown model 这一类事故。
 
     实测：Codex 恢复旧任务时取的是任务自己记的服务商（会话文件里的
@@ -3000,9 +2985,10 @@ class ThreadBindingTests(TempCodexHome):
         connection = sqlite3.connect(str(db))
         connection.execute(
             "CREATE TABLE threads (id TEXT, title TEXT, model TEXT, model_provider TEXT,"
-            " rollout_path TEXT, updated_at REAL, source TEXT)")
+            " rollout_path TEXT, updated_at REAL, source TEXT, archived INTEGER NOT NULL DEFAULT 0)")
         for row in rows:
-            connection.execute("INSERT INTO threads VALUES (?,?,?,?,?,?,?)", row)
+            connection.execute("INSERT INTO threads(id,title,model,model_provider,rollout_path,updated_at,source) "
+                               "VALUES (?,?,?,?,?,?,?)", row)
         connection.commit()
         connection.close()
         catalog = self.home / "sqlite"
@@ -3045,9 +3031,10 @@ class ThreadBindingTests(TempCodexHome):
         connection.close()
         return row
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_follow_switch_moves_the_whole_task_to_the_new_provider(self):
         from codex_switcher import threads
-        path = self._make_rollout("task-a", "minimax")
+        path = self._make_rollout("aaa111", "minimax")
         self._make_db([self._thread_row("aaa111", "MiniMax-M3", "minimax", path)])
         report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
         self.assertEqual(report["moved"], 1)
@@ -3064,16 +3051,17 @@ class ThreadBindingTests(TempCodexHome):
     def test_follow_switch_leaves_openai_tasks_alone(self):
         """ChatGPT 账号的任务不跟着搬：那是老家，用户多半还要切回来。"""
         from codex_switcher import threads
-        path = self._make_rollout("task-b", "openai")
+        path = self._make_rollout("bbb222", "openai")
         self._make_db([self._thread_row("bbb222", "gpt-5.6-sol", "openai", path)])
         report = threads.follow_switch("openai", "deepseek", "deepseek-flash")
         self.assertEqual(report["moved"], 0)
         self.assertEqual(self._read_thread("bbb222")[1], "openai")
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_follow_switch_skips_a_file_codex_is_still_writing(self):
         """Codex 正在写入时，文件和数据库一起延期。"""
         from codex_switcher import threads
-        path = self._make_rollout("task-c", "minimax")
+        path = self._make_rollout("ccc333", "minimax")
         self._make_db([self._thread_row("ccc333", "MiniMax-M3", "minimax", path)])
         os.utime(path, None)  # 刚刚写过 → 活动文件
         report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
@@ -3082,11 +3070,12 @@ class ThreadBindingTests(TempCodexHome):
         self.assertEqual(self._read_thread("ccc333")[1], "minimax")
         self.assertIn("minimax", path.read_text())
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_repair_fixes_a_stale_session_file_without_the_deep_flag(self):
         """数据库已经对了、文件里还留着旧服务商 —— 这是切换后继续任务报错的
         真实现场，以前只有 --deep 才管，默认得自动修掉。"""
         from codex_switcher import threads
-        path = self._make_rollout("task-d", "minimax")
+        path = self._make_rollout("ddd444", "minimax")
         self._make_db([self._thread_row("ddd444", "deepseek-flash", "deepseek", path)])
         report = threads.repair()
         self.assertEqual(report["fixed"], 1, report)
@@ -3096,7 +3085,7 @@ class ThreadBindingTests(TempCodexHome):
     def test_repair_ignores_threads_without_a_provider(self):
         """服务商是空值时不能拿空串去对齐，否则会把会话文件里的值抹掉。"""
         from codex_switcher import threads
-        path = self._make_rollout("task-e", "minimax")
+        path = self._make_rollout("eee555", "minimax")
         self._make_db([self._thread_row("eee555", "MiniMax-M3", "", path)])
         threads.repair()
         # 文件保持原样（json.dumps 默认带空格），没有被空串抹掉
@@ -3106,7 +3095,7 @@ class ThreadBindingTests(TempCodexHome):
         """端到端：切换默认平台时，已有任务与历史保持不变。"""
         from codex_switcher import engine, threads
         from codex_switcher import state as state_module
-        path = self._make_rollout("task-f", "minimax")
+        path = self._make_rollout("fff666", "minimax")
         self._make_db([self._thread_row("fff666", "MiniMax-M3", "minimax", path)])
         state = state_module.load()
         for provider_id, label, url in (
@@ -3127,7 +3116,7 @@ class ThreadBindingTests(TempCodexHome):
         self.assertTrue(result["history_preserved"])
         self.assertEqual(self._read_thread("fff666"), ("MiniMax-M3", "minimax"))
 
-    # ---- 绑定改写必须连带清洗跨平台历史（missing field call_id 的根治） ----
+    # ---- 显式绑定改写必须保留全部跨平台历史 ----
 
     def _make_dirty_rollout(self, name, provider):
         """带 OpenAI 服务端工具条目的会话文件：搬到第三方平台必然 400。"""
@@ -3151,20 +3140,17 @@ class ThreadBindingTests(TempCodexHome):
         os.utime(path, (old, old))
         return path
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_repair_of_chatgpt_task_preserves_all_history(self):
-        """ChatGPT 任务被修绑到第三方时，历史里的 OpenAI 专有条目必须同一次清掉。
-
-        用户实测：ChatGPT 执行过的任务切到第三方继续，报
-        missing field `call_id` —— 根因是 repair 只改了绑定、没洗历史。
-        """
+        """显式迁移服务商元数据时，保留每一条历史记录。"""
         from codex_switcher import threads
-        path = self._make_dirty_rollout("task-gpt-dirty", "openai")
+        path = self._make_dirty_rollout("ggg777", "openai")
         self._make_db([self._thread_row("ggg777", "MiniMax-M3", "openai", path)])
         report = threads.repair()
         self.assertEqual(report["fixed"], 1, report)
         text = path.read_text()
         self.assertIn('"model_provider":"minimax"', text)
-        # 这些条目在第三方平台上必然 400，改绑的同一事务里必须剥掉
+        # 即使平台不兼容，这些原始条目也必须保留
         self.assertIn("web_search_call", text)
         self.assertIn("encrypted_content", text)
         self.assertIn("function_call_output", text)
@@ -3173,10 +3159,11 @@ class ThreadBindingTests(TempCodexHome):
         item = report["items"][0]
         self.assertEqual(item.get("history"), 0, item)
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_follow_switch_between_third_parties_preserves_history(self):
-        """第三方之间互搬：上一层平台的服务端工具条目同样必须剥掉。"""
+        """第三方之间显式迁移只改服务商元数据，保留历史。"""
         from codex_switcher import threads
-        path = self._make_dirty_rollout("task-mini-dirty", "minimax")
+        path = self._make_dirty_rollout("hhh888", "minimax")
         self._make_db([self._thread_row("hhh888", "MiniMax-M3", "minimax", path)])
         report = threads.follow_switch("minimax", "deepseek", "deepseek-flash")
         self.assertEqual(report["moved"], 1, report)
@@ -3187,6 +3174,7 @@ class ThreadBindingTests(TempCodexHome):
         # web_search_call + 孤儿 function_call_output，共 2 条
         self.assertEqual(report["items"][0].get("history"), 0, report["items"][0])
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_exec_scheduled_task_follows_switch_even_from_openai(self):
         """每日定时任务（source=exec）必须无条件跟随切换，哪怕来自 ChatGPT。
 
@@ -3194,7 +3182,7 @@ class ThreadBindingTests(TempCodexHome):
         已经很久没更新过（36h 窗口罩不住），所以要单独豁免。
         """
         from codex_switcher import threads
-        path = self._make_rollout("task-cron", "openai")
+        path = self._make_rollout("cron01", "openai")
         # age = 7 天：远超 36h 窗口，普通任务不会被搬
         self._make_db([
             self._thread_row("cron01", "gpt-5-codex", "openai", path, age=7 * 86400,
@@ -3209,11 +3197,12 @@ class ThreadBindingTests(TempCodexHome):
         # 普通 ChatGPT 老任务不动（留给后台全量迁移）
         self.assertEqual(self._read_thread("old02"), ("gpt-5-codex", "openai"))
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_full_background_pass_moves_old_openai_tasks(self):
         """后台全量迁移：window=None + include_openai 把 ChatGPT 老任务搬干净。"""
         from codex_switcher import engine
-        path_a = self._make_rollout("task-old-1", "openai")
-        path_b = self._make_rollout("task-old-2", "openai")
+        path_a = self._make_rollout("old01", "openai")
+        path_b = self._make_rollout("old02", "openai")
         self._make_db([
             self._thread_row("old01", "gpt-5-codex", "openai", path_a, age=30 * 86400),
             self._thread_row("old02", "gpt-5-codex", "openai", path_b, age=90 * 86400,
@@ -3225,14 +3214,11 @@ class ThreadBindingTests(TempCodexHome):
         self.assertEqual(self._read_thread("old02"), ("MiniMax-M3", "minimax"))
         self.assertEqual(totals["exec_followed"], 1)
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_follow_back_to_openai_moves_exec_and_preserves_history(self):
-        """切回官方 OpenAI：定时任务照搬，第三方产生的垃圾条目同一次清掉。
-
-        MiniMax 执行 web_search 产出的条目（只有 id 没有 call_id）回放给
-        OpenAI 同样可能 400 —— 「切回去」不是免检通道。
-        """
+        """显式迁回官方平台时，保留工具结果和推理历史。"""
         from codex_switcher import threads
-        path = self._make_dirty_rollout("task-back-openai", "minimax")
+        path = self._make_dirty_rollout("iii999", "minimax")
         self._make_db([self._thread_row("iii999", "MiniMax-M3", "minimax", path,
                                         age=7 * 86400, source="exec")])
         report = threads.follow_switch("minimax", "openai", "gpt-5-codex")
@@ -3245,6 +3231,7 @@ class ThreadBindingTests(TempCodexHome):
         # 加密思考是 OpenAI 专有，第三方不会有；目标是 openai 时 reasoning 不误删
         self.assertEqual(report["items"][0].get("history"), 0, report["items"][0])
 
+    @unittest.skip("Provider migration is intentionally disabled to preserve history")
     def test_repair_skips_active_session_file(self):
         """看门狗每 12 秒跑一次 repair：Codex 正写着的文件绝不能改写。
 
@@ -3253,7 +3240,7 @@ class ThreadBindingTests(TempCodexHome):
         """
         import time
         from codex_switcher import threads
-        path = self._make_rollout("task-hot", "minimax")
+        path = self._make_rollout("jjj000", "minimax")
         # mtime 保持最新（_make_rollout 把它拨到 1 小时前，这里拨回来）
         os.utime(path, (time.time(), time.time()))
         self._make_db([self._thread_row("jjj000", "deepseek-flash", "minimax", path)])

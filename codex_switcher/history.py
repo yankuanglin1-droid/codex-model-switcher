@@ -34,7 +34,6 @@ import hashlib
 import json
 import os
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -357,113 +356,22 @@ def _reuse_identical_backup(backup_dir: Path, original_name: str, text: str) -> 
 
 def sanitize(path: Path, moving_off_openai: bool, backup_dir: Path,
              cross_provider: bool = False) -> Tuple[bool, Dict]:
-    """删掉指定文件里的问题条目。返回 (是否改动, 统计)。
+    """Report legacy cleanup candidates without deleting source history.
 
-    cross_provider=True 时额外剥离 OpenAI 服务端工具的成对条目，
-    这样这个会话才能搬到第三方平台上继续。
+    Protocol rejection is not evidence that a user's history is disposable.
+    Explicit item-ID/metadata repairs have their own guarded writers; this
+    legacy entry point must never remove records, tools or image payloads.
     """
+    info = inspect(path)
     stats = {"removed_orphan_outputs": 0, "removed_openai_only": 0,
              "removed_cross_provider": 0, "removed_image_outputs": 0,
-             "kept": 0, "backup": None}
-    if busy_reason(path):
-        stats["skipped"] = "unsafe"
-        return False, stats
-    deep_clean = moving_off_openai or cross_provider
-    try:
-        original_stat = path.stat()
-        original_bytes = path.read_bytes()
-        text = original_bytes.decode("utf-8")
-    except (OSError, UnicodeError):
-        return False, stats
-
-    lines = text.split("\n")
-    kept: List[str] = []
-    for line in lines:
-        payload = _payload_of(line) if cross_provider else (
-            _payload_of(line) if ('function_call_output' in line
-                                  or 'encrypted_content' in line
-                                  or deep_clean and '"input_image"' in line) else None)
-        if payload is not None:
-            kind = payload.get("type")
-            if kind == "function_call_output" and not payload.get("call_id"):
-                stats["removed_orphan_outputs"] += 1
-                continue
-            if (moving_off_openai and kind in OPENAI_ONLY_IF_MOVING
-                    and payload.get("encrypted_content")):
-                stats["removed_openai_only"] += 1
-                continue
-            if cross_provider and kind in CROSS_PROVIDER_TYPES:
-                # call 与 output 都走这一支，所以是成对删，不会留悬空引用
-                stats["removed_cross_provider"] += 1
-                continue
-            # 纯图片的工具结果：不支持视觉的模型上，Codex 构建请求时会把
-            # 图片结果剥掉、调用却留着 —— API 校验「有调用没结果」直接 400
-            # （报 No tool output found for tool call ...）。实测一个文件里
-            # 埋了 50 个、每个约 2MB。换成文本占位并保留 call_id，
-            # 调用/结果配对完整，任何平台都能收。
-            if deep_clean and kind in ("function_call_output",
-                                       "custom_tool_call_output") \
-                    and payload.get("call_id") and _is_image_only_output(payload):
-                stats["removed_image_outputs"] += 1
-                kept.append(_image_stub_line(payload))
-                continue
-        kept.append(line)
-    stats["kept"] = len(kept)
-
-    if not (stats["removed_orphan_outputs"] or stats["removed_openai_only"]
-            or stats["removed_cross_provider"] or stats["removed_image_outputs"]):
-        return False, stats
-
-    # 备份：保留原文件，文件名带时间戳，放工具自己的状态目录里。
-    # 内容和最近一次备份完全一样就复用，不再整份复制 —— 一个几百 MB 的
-    # 会话被多轮清扫碰上，照旧整份复制的话备份目录几天就能吃掉上百 GB。
-    try:
-        relative = path.relative_to(paths.codex_home())
-    except ValueError:
-        relative = Path(path.name)
-    reused = _reuse_identical_backup(backup_dir, relative.name, text)
-    if reused is not None:
-        stats["backup"] = str(reused)
-    else:
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        target = backup_dir / (stamp + "-" + relative.name)
-        target.write_text(text, encoding="utf-8")
-        stats["backup"] = str(target)
-
-    # 逐行校验后再落盘：写回去的每一行都必须是合法 JSON
-    out = "\n".join(kept)
-    for line in kept:
-        if line.strip():
-            try:
-                json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                return False, stats          # 校验不过就整单放弃，不写盘
-    if text.endswith("\n") and not out.endswith("\n"):
-        out += "\n"
-    # Recheck after processing; never truncate the file held by the host.
-    if (busy_reason(path)
-            or not same_snapshot(path, original_stat, original_bytes)):
-        stats["skipped"] = "concurrent-write"
-        return False, stats
-    fd, temporary = tempfile.mkstemp(prefix=".history-clean-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(out)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, path.stat().st_mode & 0o777)
-        if (busy_reason(path)
-                or not same_snapshot(path, original_stat, original_bytes)):
-            stats["skipped"] = "concurrent-write"
-            return False, stats
-        os.replace(temporary, path)
-        if path.read_text(encoding="utf-8") != out:
-            raise OSError("History write verification failed; original is backed up")
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-    return True, stats
+             "kept": info["lines"], "backup": None,
+             "skipped": "destructive-cleanup-disabled",
+             "diagnostics": {field: info[field] for field in
+                             ("orphan_outputs", "openai_only", "cross_provider", "image_outputs")}}
+    if info.get("error"):
+        stats["error"] = info["error"]
+    return False, stats
 
 
 def recent_rollouts(limit: int = 30) -> List[Path]:
@@ -524,6 +432,9 @@ def clean(paths_to_clean: List[Path], moving_off_openai: bool,
             continue
         changed, stats = sanitize(path, moving_off_openai, backup_dir,
                                   cross_provider=cross_provider)
+        if stats.get("skipped"):
+            report["items"].append({"path": str(path), "skipped": stats["skipped"],
+                                    "diagnostics": stats.get("diagnostics", {})})
         if changed:
             report["changed"] += 1
             report["backup_dir"] = str(backup_dir)
@@ -629,6 +540,7 @@ def auto_clean(moving_off_openai: bool, limit: int = AUTO_CLEAN_LIMIT,
                                       _backup_root() / stamp,
                                       cross_provider=True)
             if stats.get("skipped"):
+                report["skipped_cleanup"] = report.get("skipped_cleanup", 0) + 1
                 continue
             if changed:
                 report["cleaned"] += 1
@@ -803,6 +715,10 @@ def sweep_all(moving_off_openai: bool = False, cross_provider: bool = False,
             continue
         changed, stats = sanitize(path, moving_off_openai, backup_dir,
                                   cross_provider=cross_provider)
+        if stats.get("skipped"):
+            report["skipped_cleanup"] = report.get("skipped_cleanup", 0) + 1
+            report["items"].append({"path": str(path), "skipped": stats["skipped"],
+                                    "diagnostics": stats.get("diagnostics", {})})
         if changed:
             report["cleaned"] += 1
             report["backup_dir"] = str(backup_dir)
@@ -853,6 +769,9 @@ def describe_sweep(report: Dict) -> str:
         lines.append("  · 时间预算用完，剩下的下一轮继续")
     if report.get("backup_dir"):
         lines.append("  备份：%s" % report["backup_dir"])
-    if not report.get("cleaned") and not report.get("skipped_busy"):
+    if report.get("skipped_cleanup"):
+        lines.append("  · %d 个会话有兼容性提示；已禁用删除历史条目的清理（含缺 call_id 的结果）"
+                     % report["skipped_cleanup"])
+    if not report.get("cleaned") and not report.get("skipped_busy") and not report.get("skipped_cleanup"):
         lines.append("  没有发现需要清理的内容 ✅")
     return "\n".join(lines)

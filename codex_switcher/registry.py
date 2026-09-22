@@ -5,8 +5,8 @@
 字段含义：
   base_url    —— 平台真实地址
   models_url  —— 拉取模型清单的地址（有些平台和 base_url 不同）
-  transport   —— native：平台自带 Responses 接口，可以直接用
-                 auto  ：添加时自动探测，探不到就走本地协议桥翻译
+  transport   —— bridge：默认通过本地协议桥转换为 Chat Completions；只有
+                 经真实 Responses 成功响应验证的平台才允许 native 直连
   balance     —— 余额/额度适配器；None 表示该平台没有公开额度接口
   console_url —— 查额度、充值、看账单的官网页面
 
@@ -104,11 +104,11 @@ PRESETS: List[Dict] = [
         "config_name": "DeepSeek",
         "base_url": "https://api.deepseek.com",
         "models_url": "https://api.deepseek.com/models",
-        "transport": "native",
+        "transport": "bridge",
         "balance": BALANCE_DEEPSEEK,
         "console_url": "https://platform.deepseek.com/usage",
         "known_models": ["deepseek-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
-        "notes": "原生支持 Responses 协议，已实测可用；官方余额接口能显示真实剩余金额。",
+        "notes": "默认通过本地协议桥使用兼容接口；官方余额接口能显示真实剩余金额。",
     },
     {
         "id": "minimax",
@@ -116,7 +116,7 @@ PRESETS: List[Dict] = [
         "config_name": "MiniMax",
         "base_url": "https://api.minimax.cn/v1",
         "models_url": "https://api.minimax.cn/v1/models",
-        "transport": "native",
+        "transport": "bridge",
         "balance": None,
         "console_url": "https://platform.minimaxi.com/user-center/payment/balance",
         "known_models": [
@@ -124,7 +124,7 @@ PRESETS: List[Dict] = [
             "MiniMax-M2.5", "MiniMax-M2.5-highspeed",
             "MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2",
         ],
-        "notes": "原生支持 Responses 协议，已实测可用；官方未开放额度查询接口，套餐余量请在官网查看。",
+        "notes": "默认通过本地协议桥使用兼容接口；官方未开放额度查询接口，套餐余量请在官网查看。",
     },
     {
         "id": "zhipu",
@@ -132,14 +132,14 @@ PRESETS: List[Dict] = [
         "config_name": "GLM Coding Plan",
         "base_url": "https://open.bigmodel.cn/api/v1",
         "models_url": "https://open.bigmodel.cn/api/paas/v4/models",
-        "transport": "native",
+        "transport": "bridge",
         "balance": None,
         "console_url": "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
         "known_models": [
             "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1",
             "glm-5", "glm-5-turbo", "glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air",
         ],
-        "notes": "原生支持 Responses 协议；官方未开放额度查询接口，套餐余量请在官网查看。",
+        "notes": "默认通过本地协议桥使用兼容接口；官方未开放额度查询接口，套餐余量请在官网查看。",
     },
     {
         "id": "moonshot",

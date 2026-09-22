@@ -361,12 +361,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, action: str, payload: Dict) -> Dict:
         from .. import recovery
-        if (recovery.status()["phase"] in ("quitting", "repairing", "reopening")
-                and action not in ("recovery_status", "restart_codex")):
+        if (recovery.status()["phase"] in recovery.BUSY_PHASES
+                and action not in ("recovery_status", "recover_history", "cancel_recovery_wait")):
             return {"error": "History repair is in progress; wait before changing configuration."}
         if action == "fit_switch":
-            # 上下文守卫的自动化出口：换到一个装得下当前会话的模型。
-            # switch_to 会顺带把最近在用的任务搬过去并重写压缩触发点。
+            # 上下文守卫的自动化出口：只更新后续新任务的默认模型。
+            # 已有任务的协议记录不可跨服务商搬运，故不会重写会话或压缩触发点。
             provider = (payload.get("provider") or "").strip()
             model = (payload.get("model") or "").strip()
             if not provider or not model:
@@ -438,9 +438,20 @@ class Handler(BaseHTTPRequestHandler):
             return result
 
         if action == "restart_codex":
-            # Codex 只在启动时读一次配置：切完模型点确认，由这里代劳重启
-            from .. import recovery
-            return recovery.start()
+            from .. import codexapp
+            return codexapp.restart()
+
+        if action == "recover_history":
+            return recovery.start(wait_for_exit=payload.get("wait_for_exit") is True)
+
+        if action == "cancel_recovery_wait":
+            return recovery.cancel_wait()
+
+        if action == "history_index_audit":
+            from .. import projection
+            report = projection.audit_projection(paths.codex_home())
+            return {"read_only": True, "active_threads": report["active_threads"],
+                    "invalid_count": report["invalid_count"], "issues": len(report["issues"])}
 
         if action == "sync_integrations":
             provider_id = (payload.get("provider") or "").strip()
@@ -659,7 +670,7 @@ def _watchdog_loop(interval: float = WATCHDOG_INTERVAL_SECONDS) -> None:
             return
         tick += 1
         from .. import recovery
-        if recovery.status()["phase"] in ("quitting", "repairing", "reopening"):
+        if recovery.status()["phase"] in recovery.BUSY_PHASES:
             continue
         try:
             report = threads_module.repair(dry_run=True)

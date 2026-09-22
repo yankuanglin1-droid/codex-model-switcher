@@ -1,27 +1,66 @@
-# History preservation / 原始对话保护（v1.7.10）
+# History preservation and recovery / 历史保护与恢复
 
-修复目标是防止模型切换器导致重启后历史显示减少。旧版默认迁移和自动清扫可能直接删除历史中的工具、图片或推理条目；文件占用检测失败时退回修改时间判断也不够安全。
+## v1.7.11 safety changes
 
-## 现在的行为
+The switcher preserves existing transcripts during startup, default-model changes,
+background diagnostics and ordinary restart. Existing tasks and automations keep
+their provider bindings. A new default applies to new tasks.
 
-- 打开 App、切换默认模型、后台检查不再写入已有任务历史或任务数据库。
-- App 中“清扫会话历史”改为“检查会话历史”，点击仅检查，不删除记录；旧客户端也不能通过该接口请求清扫。
-- 旧任务与自动化保留原平台。新任务使用新的默认平台。不要在旧任务中直接选择另一平台的模型；这不构成安全迁移。
-- 显式迁移只修改平台字段及必要的官方记录 ID，保留所有历史记录、工具结果、图片和推理。不能保证每种专有工具或加密历史被其他平台接受。
-- 显式修复遇到忙碌、无法检测占用、文件缺失或读取失败时整条延期，不单独修改数据库，也不报告已成功。
-- 每次写入前重新检查文件句柄、设备、inode、mtime、大小与字节内容。失败保留原文件，成功后读回验证。
-- 官方历史 ID 修复仍通过“修复官方历史并重启”入口执行，先退出宿主并备份；不会删除对话正文或工具结果。
+Older versions could rewrite rollout files without updating the host's paginated
+history indexes. A saved byte offset can then point beyond EOF or into a JSON
+record: the original file may still contain messages that the UI cannot read.
 
-后台不再执行破坏性转换。低层 CLI 中显式清扫功能仍属于手动维护操作，不应当作恢复缺失消息的方法；请先保存备份。旧版文档中的自动批量迁移/清扫说明不再适用。
+## 恢复现有任务历史
 
-## 使用上的边界
+macOS App 的历史检查在线运行且只读：它不会退出 ChatGPT/Codex，也不会
+改写数据库、分页游标或原始任务记录。宿主运行时，切换器只报告可读性与
+索引风险，避免把缓存中的会话再次损坏。
 
-这是对切换器已知写入路径的修复，并非所有平台、宿主版本或文件系统永远不会出错的承诺。它防止后续自动删改，不会凭空恢复已经删除、尚未落盘或宿主无法显示的消息。恢复旧任务需要逐任务比较历史、备份和显示结果，避免覆盖后来新增内容。
+如需进行离线重建，必须由维护者在宿主**已经停止**时单独运行受控恢复流程；
+App 按钮不会主动关闭或重开 ChatGPT/Codex。该流程仅用于已确认的分页索引
+故障，默认不会重写 `msg`、`fc`、`call_id` 或 `reasoning.content`：
 
-Windows 上无法确认文件占用时，手动写入会被阻止；不会退回“mtime 足够老就能写”的策略。Windows 本轮未作实机验收。
+1. 确认宿主已停止，并确认旧后台进程与外部数据库句柄已退出；退出失败或中途重新打开会停止写入。
+2. 仅选择当前未归档任务。归档任务、仅备份中存在的任务、无法确认归属的文件不纳入恢复。
+3. 数据库快照、所有纳入恢复的原文件独立备份和逐任务报告存于本机 `CODEX_HOME/model-switcher-preservation/`，不进入滚动清理、安装包或 GitHub。
+4. 在隔离副本中调用已安装的官方历史读取程序重建分页记录。副本不含登录凭据，不启动模型推理、不执行工具，也不把真实历史路径传给 `thread/resume`。
+5. 只补充缺失的显示记录，核对任务归属和源文件校验值；已有消息内容发生冲突时保留原值并报告。派生的轮次读取位置按已验证的官方重建结果同步。
+6. 通过官方分页读取接口验证数量和显示内容校验值。部分失败明确显示为待检查，不宣布全部恢复成功。
 
-## Verification
+恢复报告区分「已备份」「已处理」「已读回验证」，不会把备份数量作为
+恢复成功数量。失败时另存本机 `failure.json`，记录具体步骤、固定错误代码
+和代码位置，不记录聊天正文或服务端错误正文。原始检查报告仍保留。
 
-236 tests passed on macOS. New regression fixtures cover unknown occupancy, lsof error output, late changes before writes, replacement inode with identical content, immutable history/database during default switches, read-only startup/watchdog, and database deferral when history cannot be updated. Tests use temporary histories and synthetic providers, never private sessions or credentials.
+每次原文件改写或显示索引导入都有独立撤销凭据。验证失败时先确认本次
+读取器进程已经退出，再核对文件及数据库行仍为本次操作的结果，才允许
+定向回滚。发现新消息、外部占用或未完成清理时保留现状并标记待处理；
+不会用旧备份覆盖新工作，也不会在回滚尚未确认时自动重开宿主。
 
-Startup and switching are read-only for existing transcripts. Explicit migration preserves every source record. This does not provide universal cross-provider replay compatibility or guarantee restoration of UI messages lost before this update.
+**不得直接删除分页游标或整个历史数据库。** 已知宿主 schema 的 DELETE trigger 会连带清理实时记录；本工具只将游标的读取位置归零，保留 cursor 和消息数据。未知 schema、未知触发器、数据库锁定或并发变化均停止相关写入。
+
+## 协议兼容
+
+- 不会为跨平台切换修改 `msg` / `fc` / `rs`、`call_id` 或 `reasoning.content`。这些字段是服务商协议状态，必须跟随原任务保留。
+- 旧任务需要改用另一服务商时，创建兼容续接任务并传递可移植的文本、附件引用和任务状态；不能把另一服务商的隐藏推理或工具协议状态伪装成目标服务商格式。
+- Chat Completions 协议桥只转换请求副本。缺失、重复或孤儿 `call_id`，以及无法表达的工具/内容类型，会返回明确错误，不再伪造 ID 或静默丢弃记录。
+- 普通重启不修复历史。旧的 `sanitize` / clean 路径已改为诊断，不再删除记录。
+
+## Verification and limits
+
+Regression tests cover archive exclusion, active-host refusal, byte/inode races,
+transaction rollback, cleanup triggers, replay isolation, idempotent imports,
+streamed tool identities, readback hashes and read-only default switching.
+Run them in a temporary `CODEX_HOME`; tests use synthetic providers and histories.
+
+Before a release, use the installed host to replay private copies and verify all
+turn offsets against the original source, then check display hashes across
+restarts. A stable count alone does not prove complete history. Offline replay
+does not prove successful inference against every provider.
+
+Automatic host shutdown and recovery are currently implemented on macOS. Windows
+configuration and protocol logic have portable tests; Windows recovery stays
+read-only until equivalent host-shutdown and replay checks are available.
+
+No tool can reconstruct records with no surviving file or backup, or guarantee
+that every future host/API version remains compatible. Conflicting, malformed or
+unverifiable data is preserved for review instead of silently rewritten.

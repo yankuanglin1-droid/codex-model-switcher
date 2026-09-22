@@ -127,11 +127,21 @@ def resolve_base_url(record: Dict, config_text: Optional[str] = None,
 def resolve_transport(record: Dict) -> str:
     """判断一个平台该直连还是走协议桥。
 
-    关键点：旧版本或手工建的状态文件里没有 transport 字段，那种记录本来就指向
-    平台真实地址，必须按“直连”处理；否则会被误判成需要协议桥，
-    把用户本来好用的配置改成指向 127.0.0.1。
+    直连 Responses 只有在收到过结构正确的 Responses 成功响应后才允许。
+    旧版本把 HTTP 400/429 或预设名称当作证据，会将 Codex 的不透明历史
+    原样发送到只兼容 Chat Completions 的网关。无可验证证据时本地桥是
+    保守且可逆的默认路径。
     """
-    return "bridge" if (record.get("transport") or "").strip() == "bridge" else "native"
+    if (record.get("transport") or "").strip() == "bridge":
+        return "bridge"
+    # A loopback endpoint is a deliberately local OpenAI-compatible runtime;
+    # it cannot leak a transcript to a remote vendor and does not need the
+    # bridge hop.
+    upstream = resolve_base_url(record)
+    if upstream.startswith("http://127.0.0.1:") or upstream.startswith("http://localhost:"):
+        return "native"
+    evidence = str(record.get("transport_evidence") or "")
+    return "native" if evidence.startswith("verified Responses HTTP ") else "bridge"
 
 
 def provider_settings(record: Dict, model_id: str, provider_id: Optional[str] = None) -> Dict:
@@ -149,7 +159,10 @@ def provider_settings(record: Dict, model_id: str, provider_id: Optional[str] = 
         "model": model_id,
         "model_reasoning_effort": effort,
         "model_reasoning_summary": "none",
-        "model_supports_reasoning_summaries": True,
+        # A bridge translates only portable user/assistant/tool content.  Do
+        # not ask a generic Chat Completions provider to accept opaque
+        # Responses reasoning summaries unless it was explicitly verified.
+        "model_supports_reasoning_summaries": resolve_transport(record) == "native",
         "model_catalog_json": str(catalog_module.catalog_path(identifier)),
     }
     context = override.get("context_window")
@@ -170,10 +183,20 @@ def provider_settings(record: Dict, model_id: str, provider_id: Optional[str] = 
     if not effective and context:
         effective = contextguard_module.effective_window(
             {"context_window": context,
-             "effective_context_window_percent": catalog.DEFAULT_EFFECTIVE_PERCENT})
+             "effective_context_window_percent": catalog_module.DEFAULT_EFFECTIVE_PERCENT})
     if effective:
         settings["model_auto_compact_token_limit"] = contextguard_module.auto_compact_limit(effective)
     return settings
+
+
+def _rewrite_provider_settings(text: str, settings: Dict) -> str:
+    """Keep user preferences, but never inherit another model's window override."""
+    merged = configfile.read_top_level(text, configfile.MANAGED_KEYS)
+    # Without an explicit target override, its catalog supplies the window.
+    # Other managed settings (such as service_tier) retain their existing value.
+    merged.pop("model_context_window", None)
+    merged.update(settings)
+    return configfile.rewrite_model_settings(text, merged, keep_others=False)
 
 
 def official_settings(model_id: str) -> Dict:
@@ -284,14 +307,9 @@ def add_provider(
     # 自动探测平台是否自带 Responses 接口
     if record.get("transport") == "auto":
         probe_key = api_key or (secrets.load(identifier) if requires_key else None)
-        preset_transport = (registry.preset(preset_id) or {}).get("transport")
         probe = probe_responses(record["base_url"], probe_key)
-        if probe["transport"] == "native":
+        if probe.get("verified_native") is True:
             record["transport"] = "native"
-        elif probe["transport"] == "bridge":
-            record["transport"] = "bridge"
-        elif preset_transport in ("native", "bridge"):
-            record["transport"] = preset_transport
         else:
             record["transport"] = "bridge"
         record["transport_evidence"] = probe.get("evidence")
@@ -440,7 +458,7 @@ def switch_to(provider_id: str, model_id: Optional[str] = None, dry_run: bool = 
                   "wire_api": registry.WIRE_API}
         try:
             with_block = configfile.upsert_provider_block(text, provider_id, fields, auth)
-            new_text = configfile.rewrite_model_settings(with_block, settings)
+            new_text = _rewrite_provider_settings(with_block, settings)
             # 有的平台拒收 Codex 的 tool_search 内置工具，按平台开关它
             new_text = configfile.set_feature(
                 new_text, "tool_search", not tool_search_disabled(record))
@@ -921,7 +939,7 @@ def _rewrite_if_current(record: Dict, model_id: str) -> bool:
         return False
     try:
         text = config.read_text()
-        new_text = configfile.rewrite_model_settings(
+        new_text = _rewrite_provider_settings(
             text, provider_settings(record, model_id, record.get("id")))
         with platform_compat.file_lock(paths.lock_file()):
             configfile.backup(config)

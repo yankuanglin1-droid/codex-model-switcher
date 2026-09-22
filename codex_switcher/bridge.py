@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import http.client
 import os
@@ -34,71 +35,126 @@ DEFAULT_PORT = 8787
 
 # --------------------------------------------------------------- 请求翻译
 
+class BridgeProtocolError(ValueError):
+    """An unsupported/ambiguous conversion, without any request values in errors."""
+
+    def __init__(self):
+        super().__init__("The protocol bridge cannot safely translate this request or response.")
+
+
+def _required_string(value):
+    if not isinstance(value, str) or not value:
+        raise BridgeProtocolError()
+    return value
+
+
 def _content_to_chat(content) -> object:
-    """Responses 的内容块 → Chat 的内容块。"""
+    """Convert supported content without silently dropping unknown blocks."""
     if isinstance(content, str):
         return content
+    if not isinstance(content, list):
+        raise BridgeProtocolError()
     parts: List[Dict] = []
-    for block in content or []:
+    for block in content:
         if not isinstance(block, dict):
-            continue
+            raise BridgeProtocolError()
         kind = block.get("type")
         if kind in ("input_text", "text", "output_text"):
-            parts.append({"type": "text", "text": block.get("text", "")})
+            if not isinstance(block.get("text"), str):
+                raise BridgeProtocolError()
+            parts.append({"type": "text", "text": block["text"]})
         elif kind in ("input_image", "image_url"):
-            url = block.get("image_url") or block.get("url") or ""
-            if isinstance(url, dict):
-                url = url.get("url", "")
-            parts.append({"type": "image_url", "image_url": {"url": url}})
+            image_url = block.get("image_url", block.get("url"))
+            image = copy.deepcopy(image_url) if isinstance(image_url, dict) else {"url": image_url}
+            _required_string(image.get("url"))
+            if "detail" in block:
+                image["detail"] = block["detail"]
+            parts.append({"type": "image_url", "image_url": image})
+        else:
+            raise BridgeProtocolError()
     if len(parts) == 1 and parts[0]["type"] == "text":
         return parts[0]["text"]
     return parts
 
 
+def _tool_output(output):
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        # Chat tool messages cannot carry image/file/audio content. Reject it
+        # instead of replacing multimodal evidence with a text placeholder.
+        if any(not isinstance(block, dict) or block.get("type") not in
+               ("input_text", "output_text", "text") for block in output):
+            raise BridgeProtocolError()
+        return _content_to_chat(output)
+    try:
+        return json.dumps(output, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise BridgeProtocolError() from exc
+
+
 def responses_to_chat(body: Dict, provider_id: str = "") -> Dict:
-    """把 Responses 请求体翻译成 Chat Completions 请求体。"""
+    """Translate a request copy, refusing unsupported records and broken links."""
+    if not isinstance(body, dict):
+        raise BridgeProtocolError()
+    # This stateless bridge cannot resolve a previous server-side response.
+    if body.get("previous_response_id") is not None:
+        raise BridgeProtocolError()
     messages: List[Dict] = []
     instructions = body.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
+    if instructions is not None:
+        if not isinstance(instructions, str):
+            raise BridgeProtocolError()
         messages.append({"role": "system", "content": instructions})
 
-    raw_input = body.get("input")
+    raw_input = body.get("input", [])
     if isinstance(raw_input, str):
         messages.append({"role": "user", "content": raw_input})
-    else:
-        for item in raw_input or []:
+    elif isinstance(raw_input, list):
+        seen_calls, pending = set(), set()
+        call_message = None
+        outputs_started = False
+        for item in raw_input:
             if not isinstance(item, dict):
-                continue
+                raise BridgeProtocolError()
             kind = item.get("type")
             if kind == "function_call":
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": item.get("call_id") or item.get("id") or "call_0",
-                        "type": "function",
-                        "function": {
-                            "name": item.get("name") or "",
-                            "arguments": item.get("arguments") or "{}",
-                        },
-                    }],
-                })
+                call_id = _required_string(item.get("call_id"))
+                name = _required_string(item.get("name"))
+                arguments = item.get("arguments")
+                if (not isinstance(arguments, str) or item.get("namespace") is not None
+                        or call_id in seen_calls or (pending and outputs_started)):
+                    raise BridgeProtocolError()
+                if not pending:
+                    call_message = {"role": "assistant", "content": None, "tool_calls": []}
+                    messages.append(call_message)
+                    outputs_started = False
+                call_message["tool_calls"].append({"id": call_id, "type": "function",
+                                                   "function": {"name": name, "arguments": arguments}})
+                seen_calls.add(call_id)
+                pending.add(call_id)
             elif kind == "function_call_output":
-                output = item.get("output")
-                if not isinstance(output, str):
-                    output = json.dumps(output, ensure_ascii=False)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": item.get("call_id") or item.get("id") or "call_0",
-                    "content": output,
-                })
+                call_id = _required_string(item.get("call_id"))
+                if call_id not in pending or "output" not in item:
+                    raise BridgeProtocolError()
+                messages.append({"role": "tool", "tool_call_id": call_id,
+                                 "content": _tool_output(item["output"])})
+                pending.remove(call_id)
+                outputs_started = True
             elif kind in ("message", None):
-                role = item.get("role") or "user"
-                if role == "developer":
-                    role = "system"
+                if pending or item.get("role") not in ("user", "assistant", "developer", "system"):
+                    raise BridgeProtocolError()
+                role = "system" if item["role"] == "developer" else item["role"]
                 messages.append({"role": role, "content": _content_to_chat(item.get("content"))})
             elif kind == "reasoning":
-                continue  # 平台之间不通用，直接丢弃
+                # Request-only adaptation; never mutate saved history or body.
+                continue
+            else:
+                raise BridgeProtocolError()
+        if pending:
+            raise BridgeProtocolError()
+    else:
+        raise BridgeProtocolError()
 
     payload: Dict = {
         "model": body.get("model"),
@@ -113,27 +169,33 @@ def responses_to_chat(body: Dict, provider_id: str = "") -> Dict:
     if limit:
         payload["max_tokens"] = limit
     tools = body.get("tools")
-    if tools:
+    if tools is not None:
+        if not isinstance(tools, list):
+            raise BridgeProtocolError()
         converted = []
         for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            if tool.get("type") == "function":
-                if "function" in tool:
-                    converted.append(tool)
-                else:
-                    converted.append({
-                        "type": "function",
-                        "function": {
-                            "name": tool.get("name"),
-                            "description": tool.get("description") or "",
-                            "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
-                        },
-                    })
-        if converted:
-            payload["tools"] = converted
-            if body.get("tool_choice") is not None:
-                payload["tool_choice"] = body["tool_choice"]
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                raise BridgeProtocolError()
+            if "function" in tool:
+                definition = copy.deepcopy(tool["function"])
+            else:
+                definition = copy.deepcopy({key: value for key, value in tool.items() if key != "type"})
+            if not isinstance(definition, dict):
+                raise BridgeProtocolError()
+            _required_string(definition.get("name"))
+            converted.append({"type": "function", "function": definition})
+        payload["tools"] = converted
+    if body.get("tool_choice") is not None:
+        choice = body["tool_choice"]
+        if isinstance(choice, str) and choice in {"auto", "required", "none"}:
+            payload["tool_choice"] = choice
+        elif isinstance(choice, dict) and choice.get("type") == "function":
+            function = choice.get("function", {"name": choice.get("name")})
+            if not isinstance(function, dict):
+                raise BridgeProtocolError()
+            payload["tool_choice"] = {"type": "function", "function": {"name": _required_string(function.get("name"))}}
+        else:
+            raise BridgeProtocolError()
     if body.get("parallel_tool_calls") is not None:
         payload["parallel_tool_calls"] = body["parallel_tool_calls"]
 
@@ -158,44 +220,61 @@ def responses_to_chat(body: Dict, provider_id: str = "") -> Dict:
 # --------------------------------------------------------------- 响应翻译
 
 def _message_output(message: Dict) -> List[Dict]:
-    """Chat 的一条 assistant 消息 → Responses 的 output 数组。"""
+    """Convert upstream output with original tool identities, never invented IDs."""
+    if not isinstance(message, dict) or message.get("function_call") is not None:
+        raise BridgeProtocolError()
     items: List[Dict] = []
     text = message.get("content")
     if isinstance(text, list):
-        text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
-    if text:
-        items.append({
-            "type": "message",
-            "id": "msg_" + uuid.uuid4().hex[:16],
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": text, "annotations": []}],
-        })
-    for call in message.get("tool_calls") or []:
-        function = call.get("function") or {}
-        items.append({
-            "type": "function_call",
-            "id": "fc_" + uuid.uuid4().hex[:16],
-            "call_id": call.get("id") or ("call_" + uuid.uuid4().hex[:12]),
-            "name": function.get("name") or "",
-            "arguments": function.get("arguments") or "{}",
-            "status": "completed",
-        })
+        if any(not isinstance(part, dict) or part.get("type") not in ("text", "output_text")
+               or not isinstance(part.get("text"), str) for part in text):
+            raise BridgeProtocolError()
+        text = "".join(part["text"] for part in text)
+    if text is not None and not isinstance(text, str):
+        raise BridgeProtocolError()
+    content = []
+    if text is not None:
+        content.append({"type": "output_text", "text": text, "annotations": []})
+    if message.get("refusal") is not None:
+        content.append({"type": "refusal", "refusal": _required_string(message["refusal"])})
+    if content:
+        items.append({"type": "message", "id": "msg_" + uuid.uuid4().hex[:16],
+                      "role": "assistant", "status": "completed", "content": content})
+    calls = message.get("tool_calls", [])
+    if calls is None:
+        calls = []
+    if not isinstance(calls, list):
+        raise BridgeProtocolError()
+    seen = set()
+    for call in calls:
+        if not isinstance(call, dict) or call.get("type") != "function" or not isinstance(call.get("function"), dict):
+            raise BridgeProtocolError()
+        call_id = _required_string(call.get("id"))
+        function = call["function"]
+        name = _required_string(function.get("name"))
+        arguments = function.get("arguments")
+        if call_id in seen or not isinstance(arguments, str):
+            raise BridgeProtocolError()
+        seen.add(call_id)
+        items.append({"type": "function_call", "id": "fc_" + uuid.uuid4().hex[:16],
+                      "call_id": call_id, "name": name, "arguments": arguments, "status": "completed"})
     if not items:
-        items.append({
-            "type": "message",
-            "id": "msg_" + uuid.uuid4().hex[:16],
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "", "annotations": []}],
-        })
+        items.append({"type": "message", "id": "msg_" + uuid.uuid4().hex[:16],
+                      "role": "assistant", "status": "completed",
+                      "content": [{"type": "output_text", "text": "", "annotations": []}]})
     return items
 
 
 def chat_to_responses(document: Dict, request_model: str) -> Dict:
-    choices = document.get("choices") or [{}]
-    message = (choices[0] or {}).get("message") or {}
+    if not isinstance(document, dict):
+        raise BridgeProtocolError()
+    choices = document.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        raise BridgeProtocolError()
+    message = choices[0].get("message")
     usage = document.get("usage") or {}
+    if not isinstance(usage, dict):
+        raise BridgeProtocolError()
     return {
         "id": "resp_" + uuid.uuid4().hex[:20],
         "object": "response",
@@ -216,7 +295,7 @@ def _sse(event: str, data: Dict) -> bytes:
 
 
 class _StreamState:
-    """把 Chat 的流式增量拼成 Responses 的事件序列。"""
+    """Keep upstream tool IDs and Responses output indices stable for every delta."""
 
     def __init__(self, model: str):
         self.model = model
@@ -224,158 +303,135 @@ class _StreamState:
         self.item_id = "msg_" + uuid.uuid4().hex[:16]
         self.text_started = False
         self.text = []
+        self.text_index = None
         self.tool_index: Dict[int, Dict] = {}
         self.tool_order: List[int] = []
         self.output_index = 0
+        self.finished = False
 
     def preamble(self) -> Iterator[bytes]:
-        yield _sse("response.created", {
-            "type": "response.created",
-            "response": {
-                "id": self.response_id,
-                "object": "response",
-                "created_at": int(time.time()),
-                "status": "in_progress",
-                "model": self.model,
-                "output": [],
-            },
-        })
+        yield _sse("response.created", {"type": "response.created", "response": {
+            "id": self.response_id, "object": "response", "created_at": int(time.time()),
+            "status": "in_progress", "model": self.model, "output": []}})
 
     def _open_text(self) -> Iterator[bytes]:
         if self.text_started:
             return
         self.text_started = True
-        yield _sse("response.output_item.added", {
-            "type": "response.output_item.added",
-            "output_index": self.output_index,
-            "item": {"type": "message", "id": self.item_id, "role": "assistant",
-                     "status": "in_progress", "content": []},
-        })
-        yield _sse("response.content_part.added", {
-            "type": "response.content_part.added",
-            "item_id": self.item_id,
-            "output_index": self.output_index,
-            "content_index": 0,
-            "part": {"type": "output_text", "text": "", "annotations": []},
-        })
+        self.text_index = self.output_index
+        self.output_index += 1
+        yield _sse("response.output_item.added", {"type": "response.output_item.added",
+            "output_index": self.text_index, "item": {"type": "message", "id": self.item_id,
+            "role": "assistant", "status": "in_progress", "content": []}})
+        yield _sse("response.content_part.added", {"type": "response.content_part.added",
+            "item_id": self.item_id, "output_index": self.text_index, "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []}})
 
     def delta(self, chunk: Dict) -> Iterator[bytes]:
-        choices = chunk.get("choices") or []
+        if self.finished or not isinstance(chunk, dict) or "error" in chunk:
+            raise BridgeProtocolError()
+        choices = chunk.get("choices", [])
+        if not isinstance(choices, list) or len(choices) > 1:
+            raise BridgeProtocolError()
         if not choices:
             return
-        delta = (choices[0] or {}).get("delta") or {}
+        if not isinstance(choices[0], dict):
+            raise BridgeProtocolError()
+        delta = choices[0].get("delta", {})
+        if not isinstance(delta, dict) or delta.get("function_call") is not None or delta.get("refusal"):
+            raise BridgeProtocolError()
         content = delta.get("content")
+        if content is not None and not isinstance(content, str):
+            raise BridgeProtocolError()
         if content:
             yield from self._open_text()
             self.text.append(content)
-            yield _sse("response.output_text.delta", {
-                "type": "response.output_text.delta",
-                "item_id": self.item_id,
-                "output_index": self.output_index,
-                "content_index": 0,
-                "delta": content,
-            })
-        for call in delta.get("tool_calls") or []:
-            index = call.get("index", 0)
+            yield _sse("response.output_text.delta", {"type": "response.output_text.delta",
+                "item_id": self.item_id, "output_index": self.text_index, "content_index": 0, "delta": content})
+        calls = delta.get("tool_calls", [])
+        if calls is None:
+            calls = []
+        if not isinstance(calls, list):
+            raise BridgeProtocolError()
+        for call in calls:
+            if not isinstance(call, dict) or call.get("type") not in (None, "function"):
+                raise BridgeProtocolError()
+            index = call.get("index")
+            if type(index) is not int or index < 0:
+                raise BridgeProtocolError()
+            function = call.get("function", {})
+            if not isinstance(function, dict):
+                raise BridgeProtocolError()
             if index not in self.tool_index:
-                item_id = "fc_" + uuid.uuid4().hex[:16]
-                self.tool_index[index] = {
-                    "item_id": item_id,
-                    "call_id": call.get("id") or ("call_" + uuid.uuid4().hex[:12]),
-                    "name": (call.get("function") or {}).get("name") or "",
-                    "arguments": "",
-                }
+                self.tool_index[index] = {"item_id": "fc_" + uuid.uuid4().hex[:16],
+                    "call_id": None, "name": None, "arguments": "", "opened": False,
+                    "output_index": self.output_index}
                 self.tool_order.append(index)
-                yield _sse("response.output_item.added", {
-                    "type": "response.output_item.added",
-                    "output_index": self.output_index + len(self.tool_order) - (0 if self.text_started else 1),
-                    "item": {
-                        "type": "function_call",
-                        "id": item_id,
-                        "call_id": self.tool_index[index]["call_id"],
-                        "name": self.tool_index[index]["name"],
-                        "arguments": "",
-                        "status": "in_progress",
-                    },
-                })
-            function = call.get("function") or {}
-            if function.get("name") and not self.tool_index[index]["name"]:
-                self.tool_index[index]["name"] = function["name"]
-            arguments = function.get("arguments") or ""
-            if arguments:
-                self.tool_index[index]["arguments"] += arguments
-                yield _sse("response.function_call_arguments.delta", {
-                    "type": "response.function_call_arguments.delta",
-                    "item_id": self.tool_index[index]["item_id"],
-                    "output_index": self.output_index,
-                    "delta": arguments,
-                })
+                self.output_index += 1
+            entry = self.tool_index[index]
+            if call.get("id") is not None:
+                call_id = _required_string(call["id"])
+                if entry["call_id"] is not None and entry["call_id"] != call_id:
+                    raise BridgeProtocolError()
+                if any(other != index and value["call_id"] == call_id for other, value in self.tool_index.items()):
+                    raise BridgeProtocolError()
+                entry["call_id"] = call_id
+            if function.get("name") is not None:
+                name = _required_string(function["name"])
+                if entry["name"] is not None and entry["name"] != name:
+                    raise BridgeProtocolError()
+                entry["name"] = name
+            arguments = function.get("arguments", "")
+            if not isinstance(arguments, str):
+                raise BridgeProtocolError()
+            entry["arguments"] += arguments
+            newly_opened = False
+            # Some upstreams deliver identity after arguments; retain the bytes
+            # until identity is known instead of publishing a fabricated call ID.
+            if not entry["opened"] and entry["call_id"] and entry["name"]:
+                entry["opened"] = newly_opened = True
+                yield _sse("response.output_item.added", {"type": "response.output_item.added",
+                    "output_index": entry["output_index"], "item": {"type": "function_call",
+                    "id": entry["item_id"], "call_id": entry["call_id"], "name": entry["name"],
+                    "arguments": "", "status": "in_progress"}})
+            pending_arguments = entry["arguments"] if newly_opened else arguments
+            if entry["opened"] and pending_arguments:
+                yield _sse("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta",
+                    "item_id": entry["item_id"], "output_index": entry["output_index"], "delta": pending_arguments})
 
     def finish(self, usage: Dict) -> Iterator[bytes]:
-        output: List[Dict] = []
+        if (self.finished or not isinstance(usage, dict)
+                or any(not entry["opened"] for entry in self.tool_index.values())):
+            raise BridgeProtocolError()
+        self.finished = True
+        output = []
         if self.text_started:
             text = "".join(self.text)
-            yield _sse("response.output_text.done", {
-                "type": "response.output_text.done",
-                "item_id": self.item_id,
-                "output_index": self.output_index,
-                "content_index": 0,
-                "text": text,
-            })
-            yield _sse("response.content_part.done", {
-                "type": "response.content_part.done",
-                "item_id": self.item_id,
-                "output_index": self.output_index,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": text, "annotations": []},
-            })
-            item = {"type": "message", "id": self.item_id, "role": "assistant",
-                    "status": "completed",
+            yield _sse("response.output_text.done", {"type": "response.output_text.done",
+                "item_id": self.item_id, "output_index": self.text_index, "content_index": 0, "text": text})
+            yield _sse("response.content_part.done", {"type": "response.content_part.done",
+                "item_id": self.item_id, "output_index": self.text_index, "content_index": 0,
+                "part": {"type": "output_text", "text": text, "annotations": []}})
+            item = {"type": "message", "id": self.item_id, "role": "assistant", "status": "completed",
                     "content": [{"type": "output_text", "text": text, "annotations": []}]}
-            yield _sse("response.output_item.done", {
-                "type": "response.output_item.done",
-                "output_index": self.output_index,
-                "item": item,
-            })
-            output.append(item)
+            yield _sse("response.output_item.done", {"type": "response.output_item.done",
+                "output_index": self.text_index, "item": item})
+            output.append((self.text_index, item))
         for index in self.tool_order:
             entry = self.tool_index[index]
-            item = {
-                "type": "function_call",
-                "id": entry["item_id"],
-                "call_id": entry["call_id"],
-                "name": entry["name"],
-                "arguments": entry["arguments"] or "{}",
-                "status": "completed",
-            }
-            yield _sse("response.function_call_arguments.done", {
-                "type": "response.function_call_arguments.done",
-                "item_id": entry["item_id"],
-                "output_index": self.output_index,
-                "arguments": item["arguments"],
-            })
-            yield _sse("response.output_item.done", {
-                "type": "response.output_item.done",
-                "output_index": self.output_index,
-                "item": item,
-            })
-            output.append(item)
-        yield _sse("response.completed", {
-            "type": "response.completed",
-            "response": {
-                "id": self.response_id,
-                "object": "response",
-                "created_at": int(time.time()),
-                "status": "completed",
-                "model": self.model,
-                "output": output,
-                "usage": {
-                    "input_tokens": usage.get("prompt_tokens", 0),
-                    "output_tokens": usage.get("completion_tokens", 0),
-                    "total_tokens": usage.get("total_tokens", 0),
-                },
-            },
-        })
+            item = {"type": "function_call", "id": entry["item_id"], "call_id": entry["call_id"],
+                    "name": entry["name"], "arguments": entry["arguments"], "status": "completed"}
+            yield _sse("response.function_call_arguments.done", {"type": "response.function_call_arguments.done",
+                "item_id": entry["item_id"], "output_index": entry["output_index"], "arguments": item["arguments"]})
+            yield _sse("response.output_item.done", {"type": "response.output_item.done",
+                "output_index": entry["output_index"], "item": item})
+            output.append((entry["output_index"], item))
+        yield _sse("response.completed", {"type": "response.completed", "response": {
+            "id": self.response_id, "object": "response", "created_at": int(time.time()),
+            "status": "completed", "model": self.model, "output": [item for _, item in sorted(output)],
+            "usage": {"input_tokens": usage.get("prompt_tokens", 0),
+                      "output_tokens": usage.get("completion_tokens", 0),
+                      "total_tokens": usage.get("total_tokens", 0)}}})
 
 
 # ------------------------------------------------------------------ 转发层
@@ -412,7 +468,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return
 
     def _error(self, code: int, message: str) -> None:
-        body = json.dumps({"error": {"message": message, "type": "bridge_error"}}).encode()
+        error_type = "invalid_request_error" if code == 400 else "bridge_error"
+        body = json.dumps({"error": {"message": message, "type": error_type}}).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -451,18 +508,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not record:
             self._error(404, error or "not found")
             return
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0:
+                raise ValueError()
+        except ValueError:
+            self._error(400, "Invalid request body length.")
+            return
         raw = self.rfile.read(length) if length else b"{}"
         try:
             body = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeError):
             self._error(400, "请求体不是合法 JSON")
+            return
+        if not isinstance(body, dict):
+            self._error(400, "Request body must be a JSON object.")
             return
 
         authorization = self.headers.get("Authorization") or ""
         target = _target_url(record, (record.get("upstream_base_url") or record.get("base_url")).rstrip("/"))
         native = record.get("transport", "bridge") == "native"
-        payload = body if native else responses_to_chat(body, provider_id)
+        try:
+            payload = body if native else responses_to_chat(body, provider_id)
+        except BridgeProtocolError as exc:
+            self._error(400, str(exc))
+            return
         streaming = bool(payload.get("stream"))
         if not native:
             payload["stream"] = streaming
@@ -485,9 +555,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         connection, _ = _open_connection(target)
         try:
-            connection.request("POST", path, body=json.dumps(payload).encode("utf-8"), headers=headers)
+            connection.request("POST", path, body=raw if native else json.dumps(payload).encode("utf-8"), headers=headers)
             response = connection.getresponse()
         except Exception as exc:  # noqa: BLE001
+            connection.close()
             self._error(502, "无法连接上游平台：%s" % type(exc).__name__)
             return
 
@@ -504,9 +575,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not streaming:
             try:
                 document = json.loads(response.read(20 * 1024 * 1024).decode("utf-8", "replace"))
+                translated = document if native else chat_to_responses(document, payload.get("model", ""))
+            except (ValueError, TypeError):
+                self._error(502, "The upstream response could not be safely translated.")
+                return
             finally:
                 connection.close()
-            translated = document if native else chat_to_responses(document, payload.get("model", ""))
             body_out = json.dumps(translated, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -544,6 +618,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 for event in state.finish(usage):
                     self.wfile.write(event)
                 self.wfile.flush()
+        except BridgeProtocolError:
+            # Headers have already been sent; terminate with a generic protocol
+            # error, never a fabricated completed response or upstream content.
+            self.wfile.write(_sse("error", {"type": "error", "code": "bridge_protocol_error",
+                              "message": "The upstream stream could not be safely translated."}))
+            self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -558,7 +638,7 @@ def _iter_chat_stream(response) -> Iterator[Dict]:
         if not raw:
             break
         line = raw.decode("utf-8", "replace").strip()
-        if not line or line.startswith(":"):
+        if not line or line.startswith(":") or line.startswith(("event:", "id:", "retry:")):
             continue
         if line.startswith("data:"):
             line = line[5:].strip()
@@ -566,8 +646,8 @@ def _iter_chat_stream(response) -> Iterator[Dict]:
             break
         try:
             yield json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise BridgeProtocolError() from exc
 
 
 _SERVER: Optional[ThreadingHTTPServer] = None

@@ -186,13 +186,14 @@ def _line_may_hold_provider(line: str) -> bool:
 
 
 def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider: str,
-                          backup_dir: Path) -> Tuple[bool, int, int, int]:
+                          backup_dir: Path, *, host_closed: bool = False) -> Tuple[bool, int, int, int]:
     """Explicit provider migration. Keep all source history records intact.
 
     Only provider metadata and supported official item IDs may change. Never
     remove messages, tools, images or reasoning to satisfy a remote API.
     """
     from . import history as history_module
+    from .history_write_guard import prepare_rewrite
 
     if not path.exists():
         return False, 0, 0, 0
@@ -208,46 +209,50 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
         raise OSError("Session safety cannot be verified; migration deferred")
     original_stat = path.stat()
     original_bytes = path.read_bytes()
-    raw_lines: List[str] = []
+    raw_lines: List[bytes] = []
     meta_changed = 0
     settings_changed = 0
     history_removed = 0
     changed = False
-    with path.open("r", encoding="utf-8", errors="surrogateescape") as stream:
-        for line in stream:
-            is_response = '"response_item"' in line or '"compacted"' in line
-            if not _line_may_hold_provider(line) and not is_response:
-                raw_lines.append(line)
-                continue
-            try:
-                document = json.loads(line)
-            except json.JSONDecodeError:
-                raw_lines.append(line)
-                continue
-            if not isinstance(document, dict) or not isinstance(document.get("payload"), dict):
-                raw_lines.append(line)
-                continue
-            payload = document["payload"]
-            # Preserve every historical record. Protocol adaptation must never
-            # delete source records or their tool results from the transcript.
-            touched = False
-            if to_provider == OFFICIAL_PROVIDER_ID:
-                from .message_ids import normalize_record
-                touched = bool(normalize_record(document))
-            if document.get("type") == "session_meta" and should_replace(payload.get("model_provider")):
-                payload["model_provider"] = to_provider
-                meta_changed += 1
-                touched = True
-            settings = payload.get("thread_settings")
-            if isinstance(settings, dict) and should_replace(settings.get("model_provider_id")):
-                settings["model_provider_id"] = to_provider
-                settings_changed += 1
-                touched = True
-            if touched:
-                changed = True
-                raw_lines.append(json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n")
-            else:
-                raw_lines.append(line)
+    # Work from the verified byte snapshot so untouched lines, blank lines and
+    # each original line ending survive the migration exactly.
+    for raw_line in original_bytes.splitlines(keepends=True):
+        line = raw_line.decode("utf-8", "surrogateescape")
+        is_response = '"response_item"' in line or '"compacted"' in line
+        if not _line_may_hold_provider(line) and not is_response:
+            raw_lines.append(raw_line)
+            continue
+        try:
+            document = json.loads(line)
+        except json.JSONDecodeError:
+            raw_lines.append(raw_line)
+            continue
+        if not isinstance(document, dict) or not isinstance(document.get("payload"), dict):
+            raw_lines.append(raw_line)
+            continue
+        payload = document["payload"]
+        # Preserve every historical record. Protocol adaptation must never
+        # delete source records or their tool results from the transcript.
+        touched = False
+        if to_provider == OFFICIAL_PROVIDER_ID:
+            from .message_ids import normalize_record
+            touched = bool(normalize_record(document))
+        if document.get("type") == "session_meta" and should_replace(payload.get("model_provider")):
+            payload["model_provider"] = to_provider
+            meta_changed += 1
+            touched = True
+        settings = payload.get("thread_settings")
+        if isinstance(settings, dict) and should_replace(settings.get("model_provider_id")):
+            settings["model_provider_id"] = to_provider
+            settings_changed += 1
+            touched = True
+        if touched:
+            changed = True
+            ending = b"\r\n" if raw_line.endswith(b"\r\n") else b"\n" if raw_line.endswith(b"\n") else b""
+            raw_lines.append(json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8", "surrogateescape") + ending)
+        else:
+            raw_lines.append(raw_line)
     if not (changed or history_removed):
         return False, 0, 0, 0
 
@@ -258,19 +263,29 @@ def _rewrite_session_file(path: Path, from_provider: Optional[str], to_provider:
     relative = path.name
     target = backup_dir / (str(time.time_ns()) + "-" + relative)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(path, target)
+    with target.open("xb") as stream:
+        os.chmod(target, 0o600)
+        stream.write(original_bytes)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if target.read_bytes() != original_bytes:
+        raise OSError("Session backup readback mismatch; original left unchanged")
 
+    updated = b"".join(raw_lines)
     fd, temp = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as stream:
-            stream.writelines(raw_lines)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temp, path.stat().st_mode & 0o777)
         if history_module.busy_reason(path) or not history_module.same_snapshot(path, original_stat, original_bytes):
             raise OSError("Session changed during migration; deferred")
+        prepare_rewrite(path, host_closed=host_closed)
+        if history_module.busy_reason(path) or not history_module.same_snapshot(path, original_stat, original_bytes):
+            raise OSError("Session changed during migration; deferred")
         os.replace(temp, path)
-        if path.read_text(encoding="utf-8", errors="surrogateescape") != "".join(raw_lines):
+        if path.read_bytes() != updated:
             raise OSError("Session readback mismatch; original retained in backup")
     finally:
         if os.path.exists(temp):
@@ -592,28 +607,114 @@ def describe_follow(report: Dict) -> str:
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------ Safe task binding policy
+#
+# A Codex task is a persisted protocol transcript, not just a model selection.
+# Rewriting its provider, model, message identifiers, or response records makes
+# the host re-submit one provider's opaque state to another provider.  That was
+# the source of the invalid `msg` / `fc` prefixes, malformed reasoning content,
+# and disappearing-history regressions seen in older releases.  Keep the old
+# low-level migration helpers above for forensic compatibility only; public
+# operations below deliberately override them and are diagnostic-only.
+
+_CONTINUATION_REQUIRED = (
+    "任务已绑定原服务商。为保护完整历史，切换默认模型不会改写已有任务；"
+    "请在目标服务商下新建或分叉兼容续接任务。"
+)
+
+
+def _binding_candidates(thread_id: Optional[str] = None,
+                        limit: Optional[int] = None) -> List[Dict]:
+    """Return bindings that cannot safely be repaired in place.
+
+    The function intentionally does not inspect or write rollout files.  A
+    database/model mismatch is useful advice for the UI, but never proof that
+    it is safe to mutate an opaque conversation transcript.
+    """
+    from . import state as state_module
+    owners = owner_map(state_module.load())
+    candidates = []
+    for item in list_threads(limit=limit):
+        if thread_id and not item["id"].startswith(thread_id):
+            continue
+        expected = expected_provider(item["model"], owners)
+        if expected and expected != item["provider"]:
+            candidates.append(dict(item, expected=expected))
+    return candidates
+
+
+def repair(thread_id: Optional[str] = None, dry_run: bool = False,
+           limit: Optional[int] = None, deep: bool = False) -> Dict:
+    """Diagnose provider/model binding mismatches without changing history.
+
+    ``deep`` is retained for CLI/API compatibility but never authorizes a
+    write.  This makes startup checks, watchdog checks, and the App's repair
+    button safe even when the desktop host is actively appending history.
+    """
+    all_threads = list_threads(limit=limit)
+    candidates = _binding_candidates(thread_id=thread_id, limit=limit)
+    items = [{
+        "id": item["id"][:8], "title": item["title"][:40],
+        "model": item["model"], "from": item["provider"],
+        "to": item["expected"], "continuation_required": True,
+    } for item in candidates]
+    return {
+        "checked": len(all_threads), "fixed": 0, "moved": 0,
+        "dry_run": dry_run, "deep": deep, "items": items,
+        "backup_dir": None, "skipped_active": [],
+        "continuation_required": len(items), "message": _CONTINUATION_REQUIRED,
+        "history_preserved": True,
+    }
+
+
+def follow_switch(from_provider: str, to_provider: str, model: Optional[str] = None,
+                  window_seconds: Optional[float] = FOLLOW_WINDOW_SECONDS,
+                  include_openai: bool = False, dry_run: bool = False,
+                  limit: Optional[int] = None) -> Dict:
+    """Plan compatible continuations instead of migrating existing tasks.
+
+    ``window_seconds`` and ``include_openai`` remain accepted so old callers
+    cannot accidentally fall back to the historic mutating implementation.
+    """
+    records = [item for item in list_threads(limit=limit)
+               if item["provider"] == from_provider and from_provider != to_provider]
+    if window_seconds is not None:
+        cutoff = time.time() - max(0.0, window_seconds)
+        records = [item for item in records
+                   if (item.get("updated_at") or 0) >= cutoff]
+    if limit is not None:
+        records = records[:max(0, int(limit))]
+    items = [{
+        "id": item["id"][:8], "title": item["title"][:40],
+        "model": item["model"], "from": from_provider, "to": to_provider,
+        "continuation_required": True,
+    } for item in records]
+    return {
+        "checked": len(list_threads()), "moved": 0, "fixed": 0,
+        "items": items, "skipped_active": [], "dry_run": dry_run,
+        "backup_dir": None, "from": from_provider, "to": to_provider,
+        "model": model, "exec_followed": 0,
+        "continuation_required": len(items), "message": _CONTINUATION_REQUIRED,
+        "history_preserved": True,
+    }
+
+
+def describe_follow(report: Dict) -> str:
+    count = report.get("continuation_required", len(report.get("items") or []))
+    if not count:
+        return "没有发现需要创建兼容续接任务的近期任务。"
+    return "发现 %d 个既有任务需要在目标服务商下创建兼容续接任务；原历史未被改写。" % count
+
+
 def describe(report: Dict) -> str:
-    if report.get("dry_run"):
-        if not report["items"]:
-            return "没有需要修复的任务。"
-        lines = ["预演：将修复 %d 个任务" % len(report["items"])]
-        for item in report["items"]:
-            lines.append("  %s  %s → %s  （%s）" % (item["id"], item["from"], item["to"], item["model"]))
-        return "\n".join(lines)
-    if not report["items"]:
-        return "没有需要修复的任务。"
-    lines = ["已修复 %d 个任务的服务商绑定。" % report["fixed"]]
-    for item in report["items"]:
-        extra = []
-        if item["session"]:
-            extra.append("会话文件 %d 处会话头 / %d 处轮次设置" % (item["meta"], item["settings"]))
-        if item.get("history"):
-            extra.append("剥离跨平台条目 %d 条" % item["history"])
-        if item["db"]:
-            extra.append("数据库 " + "、".join(item["db"]))
-        lines.append("  %s  %s → %s  %s" % (item["id"], item["from"], item["to"],
-                                            "；".join(extra) if extra else ""))
-    lines.append("备份：%s" % report["backup_dir"])
+    items = report.get("items") or []
+    if not items:
+        return "没有发现服务商绑定异常。"
+    lines = ["发现 %d 个任务存在模型与服务商不一致。" % len(items)]
+    for item in items[:20]:
+        lines.append("  %s  %s → %s  （%s）" % (
+            item["id"], item["from"], item["to"], item["model"]))
+    lines.append(_CONTINUATION_REQUIRED)
     return "\n".join(lines)
 
 
@@ -623,7 +724,7 @@ _LAST_CHECK = 0.0
 
 
 def watch_once(min_interval: float = 3.0) -> Optional[Dict]:
-    """给协议桥的巡检线程用：有坏任务就修掉。"""
+    """Give the bridge a rate-limited, read-only binding diagnostic."""
     global _LAST_CHECK
     now = time.time()
     if now - _LAST_CHECK < min_interval:

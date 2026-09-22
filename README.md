@@ -1,12 +1,16 @@
-# Codex Model Switcher — use any model in Codex
+# Codex Model Switcher — connect compatible model providers
+
+> **History recovery update:** ordinary switching and online history inspection are read-only for existing tasks. The App never closes ChatGPT/Codex or rewrites an existing transcript. See [history preservation](docs/history-preservation.md).
 
 > **v1.7.10 历史保护变更：** 启动、默认模型切换和后台巡检不再自动改写原始对话或任务绑定。旧任务与自动化保留原平台，新任务使用新默认平台。旧版本关于自动迁移、自动清扫的说明已失效。参见 [历史保护说明](docs/history-preservation.md)。
 
 **v1.7.8:** frosted macOS startup screen, corrected official-provider diagnostics,
 safer process shutdown, and [Windows edition/build status](docs/windows.md).
 
-**v1.7.7 — built-in history repair.** Repair foreign message IDs when returning
- to OpenAI directly in the app, with backup, progress and safe restart.
+**v1.7.11 — immutable bindings by default.** Existing task bindings and raw
+history are never migrated between providers. The app provides a compatible
+continuation plan; any offline index recovery is a separately controlled maintenance action,
+with independent backups and readback verification.
  Read the [compatibility audit and remaining limits](docs/debug-audit-v1.7.7.md).
  Automation diagnostics distinguish fixed-model schedules from heartbeats;
  successful scheduled execution must still be verified in the host app.
@@ -19,17 +23,15 @@ safer process shutdown, and [Windows edition/build status](docs/windows.md).
 [![macOS 11+](https://img.shields.io/badge/macOS-11%2B-black?style=flat-square&logo=apple)](https://github.com/yankuanglin1-droid/codex-model-switcher/releases/latest)
 [![Windows / Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-0078D6?style=flat-square&logo=windows)](INSTALL-WITH-AI.md)
 [![Python 3.9+](https://img.shields.io/badge/Python%203.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](README.md)
-[![Tests](https://img.shields.io/badge/tests-204%20passing-2ea44f?style=flat-square)](#development)
+[![Tests](https://img.shields.io/badge/tests-local%20regressions-2ea44f?style=flat-square)](#development)
 
-**Codex (ChatGPT App) can officially only talk to OpenAI. This tool opens it up to
-any provider with an OpenAI-compatible API** — DeepSeek, MiniMax, Zhipu GLM, Moonshot
+**Connect compatible providers to Codex (ChatGPT App)** — DeepSeek, MiniMax, Zhipu GLM, Moonshot
 Kimi, Qwen, SiliconFlow, OpenRouter, Groq, your own gateway/relay, or a local Ollama —
 picked straight from the model dropdown in Codex, with a one-click way back to official
 OpenAI.
 
-> **Not a list of hardcoded platforms.** If it exposes an OpenAI-compatible endpoint,
-> it works: official APIs, third-party relays, self-hosted gateways, local runtimes.
-> Name + Base URL + API key is the entire contract.
+> Add a provider by name, Base URL and credentials. Available models and protocol
+> capabilities vary by endpoint; cross-provider replay is checked, not assumed.
 
 ![The app](docs/screenshot.png)
 
@@ -69,10 +71,10 @@ errors. This tool turns the whole mess into two commands and encodes every lesso
 | Model list | hand-written catalog JSON, one wrong field and models vanish | fixed list | **auto-fetched**, sorted, regenerated on change |
 | Protocol | must be `responses` or Codex refuses to start | varies | always `responses`; **built-in local bridge** translates Chat-Completions-only platforms |
 | API keys | plain text in config | varies | **system keychain only** (macOS Keychain / Secret Service / DPAPI) |
-| Old conversations | break after switching (provider mismatch) | not handled | **auto-rebound** to the new provider on switch + background watchdog |
+| Old conversations | break after switching (provider mismatch) | not handled | existing provider bindings are retained; mismatch checks are read-only |
 | Context window | you guess | not handled | **three-layer guard**: official window → Codex usable (95%) → auto-compact line, with a one-click "switch to a model that fits" |
 | Model capabilities | guesswork | not handled | **probed with real requests** (vision/reasoning/tools) and written back into the catalog |
-| History portability | not handled | not handled | sweeps every session file: strips orphan `call_id` outputs (the 400 cause) and, on a real move, OpenAI-only entries — with backup |
+| History portability | not handled | not handled | request-copy adaptation with explicit incompatibility errors; offline, backed-up recovery of active tasks |
 | Restoring official OpenAI | manual re-edit | often impossible | `codex-switcher restore`, third-party config kept |
 
 ## Features
@@ -80,28 +82,18 @@ errors. This tool turns the whole mess into two commands and encodes every lesso
 - **One-command setup** — 17 built-in presets, or paste any Base URL for a custom/relay provider.
 - **Every model selectable** — full catalog generated from the platform, newest first.
 - **One-click switch / restore** — CLI, interactive menu, or GUI; back to official
-  OpenAI anytime. Switching shows a full-screen loading state (task migration takes
-  a while) so it never looks frozen. The desktop app is recognized by bundle id
+  OpenAI anytime. Switching shows progress without rewriting existing tasks. The desktop app is recognized by bundle id
   `com.openai.codex`, so the one-click restart works whether Codex ships as
   `Codex.app` or inside `ChatGPT.app`. Restoring official means exactly that: the
   tool writes back `model_provider = "openai"` with the official model name and
   removes third-party catalog references, letting Codex show your account's own
   model list again — the official subscription has no picker, by design.
-- **Old tasks follow you — all of them** — recent tasks are re-bound to the new provider
-  on switch (session files + both databases, backed up); the rest, **including daily
-  scheduled (`exec`) automations**, migrate in batches on a background thread, so nothing
-  is left pointing at the old provider. History that only OpenAI understands
-  (`web_search_call` and friends) is stripped in the same pass. After switching, a dialog
-  reminds you that Codex reads its config once at launch, with a **one-click restart
-  Codex** button.
-- **`missing field call_id` is fixed at the root** — Codex App's own tools (the
-  `codex_app` namespace, e.g. `automation_update`) write `function_call_output` records
-  **with no `call_id`**: legal in the rollout file, **required** by the API — so replaying
-  that history 400s. Those orphans hide in *any* old session file, which is why a
-  "recent N" scan never found them. Since v1.6.6 **every** session file is swept
-  (ledger-incremented, so later passes are nearly free): on switch, at GUI startup, and
-  every 60 s while the GUI runs — those tools keep producing new ones. "Is this file in
-  use?" is answered by `lsof` (Codex holds session files open), not by guessing from mtime.
+- **Existing tasks stay intact** — changing the default does not rewrite their provider,
+  messages, tools or automation bindings. Ordinary restart is separate from explicit
+  offline recovery. See [history preservation](docs/history-preservation.md).
+- **Protocol errors are explicit** — missing, duplicate or orphan `call_id` values
+  stop incompatible requests. The bridge adapts request copies and preserves original
+  records; it does not invent IDs or delete tool results to suppress errors.
 - **Context guard that acts, not just warns** — session size vs. usable window is checked
   before you switch; past the auto-compact line it tells you Codex will compact
   automatically, and past the window it offers **one-click switch to a model that fits**.
@@ -114,11 +106,9 @@ errors. This tool turns the whole mess into two commands and encodes every lesso
   platform's **official MCP Server** into Codex (`[mcp_servers.*]`) and generates a
   `0600` env file (`~/.codex/model-switcher/env/<id>.sh`) so official CLIs, SDKs and
   `curl` work immediately. Removing a provider cleans both up.
-- **OpenAI plugins from any model** — OpenAI plugin calls in the Codex request stream are
-  forwarded as-is: free plugins (web search) run natively on platforms that implement them
-  (verified on MiniMax). Plugins that meter through OpenAI itself (image generation, and
-  other server-side paid tools) additionally need an **OpenAI API key** — billed to that
-  key, not to the provider.
+- **Portable tool boundary** — local skills and plugins remain available. OpenAI server-side
+  tools are disabled for third-party endpoints by default, so an unsupported tool declaration
+  cannot poison a provider request or an existing transcript.
 - **Balance & usage** — real numbers where platforms expose an API, honest "not exposed"
   where they don't, plus local token usage from Codex's own logs.
 - **Native macOS app** — double-click, own window/Dock icon, background service;
@@ -161,24 +151,24 @@ curl -fsSL https://raw.githubusercontent.com/yankuanglin1-droid/codex-model-swit
 
 ```bash
 echo "$YOUR_API_KEY" | codex-switcher add --preset deepseek --key-stdin   # or: add --name "My relay" --base-url https://...
-codex-switcher use deepseek          # switch (recent tasks move with you)
+codex-switcher use deepseek          # set the default provider for new tasks
 codex-switcher app                   # GUI
 codex-switcher restore               # back to official OpenAI
 ```
 
-After switching: **quit Codex completely (⌘Q) and reopen it.** That's it.
+The new default is saved immediately for new tasks. Existing tasks retain their original provider binding and remain readable; do not change their provider in place.
 
 ## When things go wrong
 
-Everything here is handled automatically or by one command — details in
+Diagnostics and supported recovery paths are documented in
 [docs/troubleshooting.md](docs/troubleshooting.md). All repairs are backed up first.
 
 | Symptom | What it means | Fix |
 | --- | --- | --- |
-| `unknown model 'xxx'` / `invalid params (2013)` | the thread is still bound to the previous provider | self-heals within seconds, or `codex-switcher repair --follow`; restart Codex |
+| `unknown model 'xxx'` / `invalid params (2013)` | the thread is still bound to the previous provider | inspect the task binding; use a compatible model or a new task on the desired provider |
 | `The 'xxx' model is not supported ... ChatGPT account` | continuing an old task that is bound to official OpenAI (those are deliberately never moved) | fork the task, or start a new one |
-| `missing field call_id` (any task, any provider) | `codex_app`-namespace tools write `function_call_output` with no `call_id` — optional in the rollout file, required by the API | **swept automatically since v1.6.6** (every session file: on switch + GUI watchdog); to do it right now: `codex-switcher history --sweep` (backed up) |
-| `tool type "tool_search" is not supported` (Kimi / strict providers) | Codex's built-in `tool_search` tool — unlike `function_call`, its `arguments` is an **object**, not a string | **handled since v1.6.8**: the tool is not offered to third-party providers, and `tool_search` pairs already in history are stripped on switch |
+| `missing field call_id` | the target protocol cannot pair a call and its result | inspect the reported pair; original history is retained and automatic deletion is disabled |
+| `tool type "tool_search" is not supported` | the target endpoint cannot represent this tool | choose a compatible endpoint; incompatible history is reported, never silently stripped |
 | Endless "compacting" with no progress | session is larger than the target model's window | `codex-switcher guard` — or click **Switch to a model that fits** in the banner |
 | `wire_api = "chat" is no longer supported` | stale hand-written config | `codex-switcher use <provider>` rewrites it |
 | 502 / connection refused | local bridge isn't running | `codex-switcher bridge --install-agent` |
